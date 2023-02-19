@@ -1,3 +1,5 @@
+use crate::PageId;
+
 pub const BTREE_PAGE_HEADER_MAX_SIZE: usize = 12;
 
 const LEAF_FLAG: u8 = 0x08;
@@ -7,8 +9,6 @@ pub const BTREE_PAGE_TYPE_INTERIOR_INDEX: u8 = INDEX_FLAG;
 pub const BTREE_PAGE_TYPE_INTERIOR_TABLE: u8 = TABLE_FLAG;
 pub const BTREE_PAGE_TYPE_LEAF_INDEX: u8 = LEAF_FLAG | INDEX_FLAG;
 pub const BTREE_PAGE_TYPE_LEAF_TABLE: u8 = LEAF_FLAG | TABLE_FLAG;
-
-pub type PageId = u32;
 
 pub struct BtreePageHeader<'a>(&'a [u8; BTREE_PAGE_HEADER_MAX_SIZE]);
 
