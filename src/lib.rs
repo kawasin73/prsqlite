@@ -1,13 +1,22 @@
-const SQLITE_MAX_PAGE_SIZE: usize = 65536;
-const DATABASE_HEADER_SIZE: usize = 100;
+mod btree;
+
+// TODO: This is to suppress the unused warning.
+pub use crate::btree::*;
+
+const SQLITE_MAX_PAGE_SIZE: u32 = 65536;
+pub const DATABASE_HEADER_SIZE: usize = 100;
+const MAGIC_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 pub struct DatabaseHeader<'a>(&'a [u8; DATABASE_HEADER_SIZE]);
 
-impl DatabaseHeader<'_> {
-    const MAGIC_HEADER: &[u8; 16] = b"SQLite format 3\0";
+impl<'a> DatabaseHeader<'a> {
+    pub fn from(buf: &'a [u8; DATABASE_HEADER_SIZE]) -> Self {
+        Self(buf)
+    }
+
     pub fn validate_magic_header(&self) -> bool {
         let magic_header: &[u8; 16] = self.0[0..16].try_into().unwrap();
-        magic_header == Self::MAGIC_HEADER
+        magic_header == MAGIC_HEADER
     }
 
     pub fn validate_pagesize(&self) -> bool {
@@ -15,47 +24,13 @@ impl DatabaseHeader<'_> {
         pagesize >= 512 && pagesize <= SQLITE_MAX_PAGE_SIZE && (pagesize - 1) & pagesize == 0
     }
 
-    pub fn pagesize(&self) -> usize {
-        let pagesize = u16::from_be_bytes(self.0[16..18].try_into().unwrap()) as usize;
-        if pagesize == 1 {
-            SQLITE_MAX_PAGE_SIZE
-        } else {
-            pagesize
-        }
+    pub fn pagesize(&self) -> u32 {
+        // If the original big endian value is 1, it means 65536.
+        (self.0[16] as u32) << 8 | (self.0[17] as u32) << 16
     }
 
     pub fn reserved(&self) -> &u8 {
         &self.0[20]
-    }
-}
-
-pub struct BtreePageHeader<'a>(&'a [u8; 12]);
-
-pub const BTREE_PAGE_TYPE_INTERIOR_INDEX: u8 = 2;
-pub const BTREE_PAGE_TYPE_INTERIOR_TABLE: u8 = 5;
-pub const BTREE_PAGE_TYPE_LEAF_INDEX: u8 = 10;
-pub const BTREE_PAGE_TYPE_LEAF_TABLE: u8 = 13;
-
-pub type PageId = u32;
-
-impl BtreePageHeader<'_> {
-    /// The btree page type
-    ///
-    /// TODO: how to convert u8 into enum with zero copy?
-    pub fn pagetype(&self) -> &u8 {
-        &self.0[0]
-    }
-
-    /// The number of cells in this page
-    pub fn n_cells(&self) -> u16 {
-        u16::from_be_bytes(self.0[3..5].try_into().unwrap())
-    }
-
-    /// The right-most pointer
-    ///
-    /// This is only valid when the page is a interior page.
-    pub fn right_page_id(&self) -> PageId {
-        u32::from_be_bytes(self.0[8..12].try_into().unwrap())
     }
 }
 
@@ -67,6 +42,30 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
+
+    #[test]
+    fn pagesize() {
+        for shift in 9..16 {
+            // 512 ~ 32768
+            let size: u16 = 1 << shift;
+            let bytes = size.to_be_bytes();
+            let mut buf = [0_u8; DATABASE_HEADER_SIZE];
+            buf[16] = bytes[0];
+            buf[17] = bytes[1];
+            let header = DatabaseHeader::from(&buf);
+
+            assert_eq!(header.pagesize(), size as u32);
+        }
+
+        // the pagesize "1" means 65536
+        let bytes = 1_u16.to_be_bytes();
+        let mut buf = [0_u8; DATABASE_HEADER_SIZE];
+        buf[16] = bytes[0];
+        buf[17] = bytes[1];
+        let header = DatabaseHeader::from(&buf);
+
+        assert_eq!(header.pagesize(), 65536);
+    }
 
     fn create_sqlite_database(queries: &[&str]) -> NamedTempFile {
         let file = NamedTempFile::new().unwrap();
@@ -83,7 +82,7 @@ mod tests {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
         let buf = fs::read(file.path()).unwrap();
 
-        let header = DatabaseHeader(buf[0..DATABASE_HEADER_SIZE].try_into().unwrap());
+        let header = DatabaseHeader::from(buf[0..DATABASE_HEADER_SIZE].try_into().unwrap());
 
         assert!(header.validate_magic_header());
         assert_eq!(header.pagesize(), 4096);
@@ -95,19 +94,50 @@ mod tests {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
         let buf = fs::read(file.path()).unwrap();
 
-        let header = DatabaseHeader(buf[0..DATABASE_HEADER_SIZE].try_into().unwrap());
-        let pagesize = header.pagesize();
+        let header = DatabaseHeader::from(buf[0..DATABASE_HEADER_SIZE].try_into().unwrap());
+        let pagesize = header.pagesize() as usize;
         assert_eq!(buf.len(), 2 * pagesize);
-        let page1_header = BtreePageHeader(
+        let page1_header = BtreePageHeader::from(
             buf[DATABASE_HEADER_SIZE..DATABASE_HEADER_SIZE + 12]
                 .try_into()
                 .unwrap(),
         );
-        let page2_header = BtreePageHeader(buf[pagesize..pagesize + 12].try_into().unwrap());
+        let page2_header = BtreePageHeader::from(buf[pagesize..pagesize + 12].try_into().unwrap());
 
         assert_eq!(*page1_header.pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
         assert_eq!(*page2_header.pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
         assert_eq!(page1_header.n_cells(), 1);
         assert_eq!(page2_header.n_cells(), 0);
+    }
+
+    #[test]
+    fn load_btree_leaf_table_cell() {
+        let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
+        let buf = fs::read(file.path()).unwrap();
+
+        let header = DatabaseHeader::from(buf[0..DATABASE_HEADER_SIZE].try_into().unwrap());
+        let pagesize = header.pagesize() as usize;
+        assert_eq!(buf.len(), 2 * pagesize);
+
+        let page1_header = BtreePageHeader::from(
+            buf[DATABASE_HEADER_SIZE..DATABASE_HEADER_SIZE + 12]
+                .try_into()
+                .unwrap(),
+        );
+        let page1 = BtreeLeafTablePage::from(&buf[..pagesize]);
+        assert_eq!(page1_header.n_cells(), 1);
+        let header_size = DATABASE_HEADER_SIZE as u8 + page1_header.header_size();
+        let cell = page1.get_cell(0, header_size);
+
+        let (key, payload) = cell.parse();
+        assert_eq!(key, 1);
+        assert_eq!(
+            payload,
+            &[
+                6, 23, 27, 27, 1, 63, 116, 97, 98, 108, 101, 101, 120, 97, 109, 112, 108, 101, 101,
+                120, 97, 109, 112, 108, 101, 2, 67, 82, 69, 65, 84, 69, 32, 84, 65, 66, 76, 69, 32,
+                101, 120, 97, 109, 112, 108, 101, 40, 99, 111, 108, 41
+            ]
+        );
     }
 }
