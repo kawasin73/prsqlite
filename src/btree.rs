@@ -10,10 +10,10 @@ pub const BTREE_PAGE_TYPE_INTERIOR_TABLE: u8 = TABLE_FLAG;
 pub const BTREE_PAGE_TYPE_LEAF_INDEX: u8 = LEAF_FLAG | INDEX_FLAG;
 pub const BTREE_PAGE_TYPE_LEAF_TABLE: u8 = LEAF_FLAG | TABLE_FLAG;
 
-pub struct BtreePageHeader<'a>(&'a [u8; BTREE_PAGE_HEADER_MAX_SIZE]);
+pub struct BtreePageHeader<'page>(&'page [u8; BTREE_PAGE_HEADER_MAX_SIZE]);
 
-impl<'a> BtreePageHeader<'a> {
-    pub fn from(buf: &'a [u8; BTREE_PAGE_HEADER_MAX_SIZE]) -> Self {
+impl<'page> BtreePageHeader<'page> {
+    pub fn from(buf: &'page [u8; BTREE_PAGE_HEADER_MAX_SIZE]) -> Self {
         Self(buf)
     }
 
@@ -51,37 +51,81 @@ impl<'a> BtreePageHeader<'a> {
     }
 }
 
-pub struct BtreeLeafTablePage<'a>(&'a [u8]);
-
-impl<'a> BtreeLeafTablePage<'a> {
-    pub fn from(buf: &'a [u8]) -> Self {
-        assert!(buf.len() >= BTREE_PAGE_HEADER_MAX_SIZE);
-        Self(buf)
-    }
-
-    pub fn get_cell(&self, i: u16, header_size: u8) -> BtreeLeafTableCell {
-        let cell_pointer_offset = header_size as usize + (i << 1) as usize;
-        let cell_offset = u16::from_be_bytes(
-            self.0[cell_pointer_offset..cell_pointer_offset + 2]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        BtreeLeafTableCell {
-            buf: &self.0[cell_offset..],
-        }
-    }
+pub struct BtreeLeafTableCell<'page> {
+    buf: &'page [u8],
 }
 
-pub struct BtreeLeafTableCell<'a> {
-    buf: &'a [u8],
-}
-
-impl BtreeLeafTableCell<'_> {
-    pub fn parse(&self) -> (i64, &[u8]) {
+impl<'page> BtreeLeafTableCell<'page> {
+    pub fn parse(&self) -> (i64, &'page [u8]) {
         // TODO: support varint
         assert!(self.buf[0] < 128);
         assert!(self.buf[1] < 128);
         (self.buf[1] as i64, &self.buf[2..2 + self.buf[0] as usize])
+    }
+}
+
+pub struct BtreeLeafTablePage<'page> {
+    buf: &'page [u8],
+    base_offset: u8,
+}
+
+impl<'page> BtreeLeafTablePage<'page> {
+    pub fn from(buf: &'page [u8], base_offset: u8) -> Self {
+        assert!(buf.len() >= BTREE_PAGE_HEADER_MAX_SIZE + base_offset as usize);
+        Self { buf, base_offset }
+    }
+
+    pub fn get_cell(&self, i: u16, offset: u8) -> BtreeLeafTableCell<'page> {
+        let cell_pointer_offset = offset as usize + (i << 1) as usize;
+        let cell_offset = u16::from_be_bytes(
+            self.buf[cell_pointer_offset..cell_pointer_offset + 2]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        BtreeLeafTableCell {
+            buf: &self.buf[cell_offset..],
+        }
+    }
+
+    pub fn header(&'page self) -> BtreePageHeader<'page> {
+        let offset = self.base_offset as usize;
+        BtreePageHeader::from(
+            (&self.buf[offset..offset + BTREE_PAGE_HEADER_MAX_SIZE])
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    pub fn iter<'a>(&'a self) -> BtreeIterator<'page, 'a> {
+        let header = self.header();
+        let cells = header.n_cells();
+        BtreeIterator {
+            page: self,
+            cur: 0,
+            cells,
+            offset: self.base_offset + header.header_size(),
+        }
+    }
+}
+
+pub struct BtreeIterator<'page, 'a> {
+    page: &'a BtreeLeafTablePage<'page>,
+    cur: u16,
+    cells: u16,
+    offset: u8,
+}
+
+impl<'page> Iterator for BtreeIterator<'page, '_> {
+    type Item = BtreeLeafTableCell<'page>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cur < self.cells {
+            let cell = self.page.get_cell(self.cur, self.offset);
+            self.cur += 1;
+            Some(cell)
+        } else {
+            None
+        }
     }
 }
 
