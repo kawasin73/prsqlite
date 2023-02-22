@@ -1,3 +1,4 @@
+use crate::utils::parse_varint;
 use crate::PageId;
 
 pub const BTREE_PAGE_HEADER_MAX_SIZE: usize = 12;
@@ -57,10 +58,14 @@ pub struct BtreeLeafTableCell<'page> {
 
 impl<'page> BtreeLeafTableCell<'page> {
     pub fn parse(&self) -> (i64, &'page [u8]) {
-        // TODO: support varint
-        assert!(self.buf[0] < 128);
-        assert!(self.buf[1] < 128);
-        (self.buf[1] as i64, &self.buf[2..2 + self.buf[0] as usize])
+        let (payload_length, consumed1) = parse_varint(self.buf);
+        let (key, consumed2) = parse_varint(&self.buf[consumed1..]);
+        let header_length = consumed1 + consumed2;
+        // TODO: support multi page payload
+        (
+            key,
+            &self.buf[header_length..header_length + payload_length as usize],
+        )
     }
 }
 

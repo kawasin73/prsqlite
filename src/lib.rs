@@ -1,9 +1,11 @@
 mod btree;
+mod utils;
 
 use thiserror::Error;
 
 // TODO: This is to suppress the unused warning.
 pub use crate::btree::*;
+use crate::utils::parse_varint;
 
 pub type PageId = u32;
 
@@ -163,11 +165,6 @@ pub fn parse_record<'a>(headers: &'a [u8], contents: &'a [u8]) -> (Record<'a>, &
             (Record::Text(&contents[..size]), headers, &contents[size..])
         }
     }
-}
-
-fn parse_varint(buf: &[u8]) -> (u64, usize) {
-    assert!(buf[0] < 128);
-    (buf[0] as u64, 1)
 }
 
 #[derive(Error, Debug)]
