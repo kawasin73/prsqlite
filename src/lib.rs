@@ -2,7 +2,8 @@ mod btree;
 mod pager;
 mod utils;
 
-use thiserror::Error;
+use anyhow::anyhow;
+use thiserror::Error as ThisError;
 
 // TODO: This is to suppress the unused warning.
 pub use crate::btree::*;
@@ -167,7 +168,7 @@ pub fn parse_record<'a>(headers: &'a [u8], contents: &'a [u8]) -> (Record<'a>, &
     }
 }
 
-#[derive(Error, Debug)]
+#[derive(ThisError, Debug)]
 pub enum Error {
     #[error("failed to parse: {0}")]
     ParseField(&'static str),
@@ -239,48 +240,78 @@ impl<'a> SQLiteSchema<'a> {
     }
 }
 
-pub struct AllRowIterator<'page, 'a> {
-    iter: BtreeIterator<'page, 'a>,
-    columns: usize,
+#[derive(ThisError, Debug)]
+pub enum FindError {
+    #[error("table not found")]
+    NotFound,
+    #[error("{0}")]
+    Other(#[from] anyhow::Error),
 }
 
-impl<'page> Iterator for AllRowIterator<'page, '_> {
-    type Item = Vec<Record<'page>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(cell) = self.iter.next() {
-            let (_, payload) = cell.parse();
-            // TODO: This is not efficient.
-            let mut records = vec![Record::Null; self.columns];
-            let _ = parse_records(payload, &mut records).unwrap();
-            Some(records)
-        } else {
-            None
+pub fn find_table_page_id<'a>(
+    table: &[u8],
+    page_id: PageId,
+    pager: &'a Pager,
+) -> std::result::Result<PageId, FindError> {
+    let page = pager.get_page(page_id)?;
+    let base_offset = if page_id == 1 {
+        DATABASE_HEADER_SIZE
+    } else {
+        0
+    };
+    let header = BtreePageHeader::from(
+        page.get_buf()[base_offset..base_offset + BTREE_PAGE_HEADER_MAX_SIZE]
+            .try_into()
+            .unwrap(),
+    );
+    match *header.pagetype() {
+        BTREE_PAGE_TYPE_INTERIOR_TABLE => {
+            let interior_page = BtreeInteriorTablePage::from(page.get_buf(), base_offset as u8);
+            for i in 0..header.n_cells() {
+                let (page_id, _) = interior_page.get_cell(i).parse();
+                let page_id = u32::from_be_bytes(*page_id);
+                match find_table_page_id(table, page_id, pager) {
+                    Err(FindError::NotFound) => {
+                        continue;
+                    }
+                    others => {
+                        return others;
+                    }
+                }
+            }
+            debug_assert!(header.right_page_id() > 0);
+            find_table_page_id(table, header.right_page_id(), pager)
         }
-    }
-}
-
-pub fn find_table<'a>(table: &[u8], page1: &'a [u8]) -> anyhow::Result<SQLiteSchema<'a>> {
-    let page1 = BtreeLeafTablePage::from(page1, DATABASE_HEADER_SIZE as u8);
-    assert_eq!(*page1.header().pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
-    for cell in page1.iter() {
-        let (_, payload) = cell.parse();
-        let schema = SQLiteSchema::from(payload)?;
-        if schema._type == b"table" && schema.name == table {
-            return Ok(schema);
+        BTREE_PAGE_TYPE_LEAF_TABLE => {
+            let leaf_page = BtreeLeafTablePage::from(page.get_buf(), base_offset as u8);
+            for i in 0..header.n_cells() {
+                let cell = leaf_page.get_cell(i);
+                let (_, payload) = cell.parse();
+                let schema = SQLiteSchema::from(payload)?;
+                if schema._type == b"table" && schema.name == table {
+                    return Ok(schema.root_page_id()?);
+                }
+            }
+            Err(FindError::NotFound)
         }
+        others => Err(anyhow!("unexpected page type {}", others).into()),
     }
-    Err(anyhow::anyhow!("not found"))
 }
 
 pub fn load_all_rows<'a>(
     page: &'a BtreeLeafTablePage,
     columns: usize,
-) -> anyhow::Result<AllRowIterator<'a, 'a>> {
-    Ok(AllRowIterator {
-        iter: page.iter(),
-        columns,
-    })
+) -> anyhow::Result<Vec<Vec<Record<'a>>>> {
+    let mut result = Vec::new();
+    for i in 0..page.header().n_cells() {
+        let cell = page.get_cell(i);
+        let (_, payload) = cell.parse();
+        // TODO: This is not efficient.
+        let mut records = vec![Record::Null; columns];
+        let _ = parse_records(payload, &mut records).unwrap();
+        result.push(records);
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -380,8 +411,7 @@ mod tests {
 
         let table_page1 = BtreeLeafTablePage::from(page1.get_buf(), DATABASE_HEADER_SIZE as u8);
         assert_eq!(page1_header.n_cells(), 1);
-        let header_size = DATABASE_HEADER_SIZE as u8 + page1_header.header_size();
-        let cell = table_page1.get_cell(0, header_size);
+        let cell = table_page1.get_cell(0);
 
         let (key, payload) = cell.parse();
         assert_eq!(key, 1);
@@ -400,14 +430,8 @@ mod tests {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap(), 100).unwrap();
         let page1 = pager.get_page(1).unwrap();
-        let page1_header = BtreePageHeader::from(
-            page1.get_buf()[DATABASE_HEADER_SIZE..DATABASE_HEADER_SIZE + 12]
-                .try_into()
-                .unwrap(),
-        );
         let table_page1 = BtreeLeafTablePage::from(page1.get_buf(), DATABASE_HEADER_SIZE as u8);
-        let header_size = DATABASE_HEADER_SIZE as u8 + page1_header.header_size();
-        let cell = table_page1.get_cell(0, header_size);
+        let cell = table_page1.get_cell(0);
         let (_, payload) = cell.parse();
         let schema = SQLiteSchema::from(payload).unwrap();
         assert_eq!(schema._type, b"table");
@@ -418,17 +442,35 @@ mod tests {
     }
 
     #[test]
-    fn find_table_success() {
+    fn find_table_page_id_success() {
         let file = create_sqlite_database(&[
             "CREATE TABLE example(col);",
             "CREATE TABLE example2(col1, col2);",
             "CREATE TABLE example3(col1, col2, col3);",
         ]);
         let pager = create_pager(file.as_file().try_clone().unwrap(), 100).unwrap();
-        let page1 = pager.get_page(1).unwrap();
 
-        let schema = find_table(b"example2", page1.get_buf()).unwrap();
-        assert_eq!(schema.name, b"example2");
+        let page_id = find_table_page_id(b"example2", 1, &pager).unwrap();
+
+        assert_eq!(page_id, 3);
+    }
+
+    #[test]
+    fn find_table_page_id_interior_success() {
+        let mut queries = Vec::with_capacity(100);
+        for i in 0..100 {
+            queries.push(format!(
+                "CREATE TABLE example{}(col1,col2,col3,col4,col5,col6,col7,col8,col9,col10);",
+                i
+            ));
+        }
+        let file =
+            create_sqlite_database(&queries.iter().map(|q| q.as_str()).collect::<Vec<&str>>());
+        let pager = create_pager(file.as_file().try_clone().unwrap(), 100).unwrap();
+
+        let page_id = find_table_page_id(b"example99", 1, &pager).unwrap();
+
+        assert_eq!(page_id, 104);
     }
 
     #[test]
@@ -439,9 +481,9 @@ mod tests {
             "CREATE TABLE example3(col1, col2, col3);",
         ]);
         let pager = create_pager(file.as_file().try_clone().unwrap(), 100).unwrap();
-        let page1 = pager.get_page(1).unwrap();
 
-        let result = find_table(b"invalid", page1.get_buf());
+        let result = find_table_page_id(b"invalid", 1, &pager);
+
         assert!(result.is_err());
     }
 
@@ -466,13 +508,11 @@ mod tests {
         queries.extend(inserts.iter().map(|s| s.as_str()));
         let file = create_sqlite_database(&queries);
         let pager = create_pager(file.as_file().try_clone().unwrap(), 100).unwrap();
-        let page1 = pager.get_page(1).unwrap();
+        let page_id = find_table_page_id(b"example4", 1, &pager).unwrap();
 
-        let schema = find_table(b"example4", page1.get_buf()).unwrap();
-        let page_id = schema.root_page_id().unwrap();
         let page = pager.get_page(page_id).unwrap();
         let table_page = BtreeLeafTablePage::from(page.get_buf(), 0);
-        let result: Vec<Vec<Record>> = load_all_rows(&table_page, 4).unwrap().collect();
+        let result: Vec<Vec<Record>> = load_all_rows(&table_page, 4).unwrap();
 
         assert!(matches!(result[0][0], Record::Null));
         assert!(matches!(result[0][1], Record::One));
@@ -505,7 +545,6 @@ mod tests {
         assert!(matches!(result[4][0], Record::Zero));
         assert!(matches!(result[4][1], Record::One));
         assert!(matches!(result[4][2], Record::Text(_)));
-        println!("result[4][3]: {:?}", result[4][3]);
         assert!(matches!(result[4][3], Record::Blob(_)));
         assert_eq!(result[4][0].to_i64().unwrap(), 0);
         assert_eq!(result[4][1].to_i64().unwrap(), 1);
