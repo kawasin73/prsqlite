@@ -1,13 +1,13 @@
 mod btree;
+mod pager;
 mod utils;
 
 use thiserror::Error;
 
 // TODO: This is to suppress the unused warning.
 pub use crate::btree::*;
+pub use crate::pager::*;
 use crate::utils::parse_varint;
-
-pub type PageId = u32;
 
 const SQLITE_MAX_PAGE_SIZE: u32 = 65536;
 pub const DATABASE_HEADER_SIZE: usize = 100;
@@ -194,7 +194,7 @@ pub struct SQLiteSchema<'a> {
     pub _type: &'a [u8],
     pub name: &'a [u8],
     pub tbl_name: &'a [u8],
-    pub rootpage: &'a [u8],
+    pub rootpage: Record<'a>,
     pub sql: &'a [u8],
 }
 
@@ -220,17 +220,6 @@ impl<'a> SQLiteSchema<'a> {
         } else {
             anyhow::bail!("failed to parse tbl_name");
         };
-        let rootpage = match records[3] {
-            Record::Int8(v) => v.as_slice(),
-            Record::Int16(v) => v.as_slice(),
-            Record::Int24(v) => v.as_slice(),
-            Record::Int32(v) => v.as_slice(),
-            Record::Int48(v) => v.as_slice(),
-            Record::Int64(v) => v.as_slice(),
-            _ => {
-                anyhow::bail!("failed to parse rootpage");
-            }
-        };
         let sql = if let Record::Text(sql) = records[4] {
             sql
         } else {
@@ -240,9 +229,13 @@ impl<'a> SQLiteSchema<'a> {
             _type,
             name,
             tbl_name,
-            rootpage,
+            rootpage: records[3],
             sql,
         })
+    }
+
+    pub fn root_page_id(&self) -> anyhow::Result<PageId> {
+        Ok(self.rootpage.to_i64()?.try_into()?)
     }
 }
 
@@ -293,6 +286,8 @@ pub fn load_all_rows<'a>(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::fs::File;
+    use std::os::unix::fs::FileExt;
 
     use rusqlite::Connection;
     use tempfile::NamedTempFile;
@@ -333,6 +328,13 @@ mod tests {
         file
     }
 
+    fn create_pager(file: File, cache_size: usize) -> anyhow::Result<Pager> {
+        let mut header_buf = [0_u8; DATABASE_HEADER_SIZE];
+        file.read_exact_at(&mut header_buf, 0)?;
+        let header = DatabaseHeader::from(&header_buf);
+        Pager::new(file, header.pagesize() as usize, cache_size)
+    }
+
     #[test]
     fn validate_database_header() {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
@@ -348,17 +350,16 @@ mod tests {
     #[test]
     fn validate_btree_page_header() {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
-        let buf = fs::read(file.path()).unwrap();
+        let pager = create_pager(file.as_file().try_clone().unwrap(), 100).unwrap();
 
-        let header = DatabaseHeader::from(buf[0..DATABASE_HEADER_SIZE].try_into().unwrap());
-        let pagesize = header.pagesize() as usize;
-        assert_eq!(buf.len(), 2 * pagesize);
+        let page1 = pager.get_page(1).unwrap();
         let page1_header = BtreePageHeader::from(
-            buf[DATABASE_HEADER_SIZE..DATABASE_HEADER_SIZE + 12]
+            page1.get_buf()[DATABASE_HEADER_SIZE..DATABASE_HEADER_SIZE + 12]
                 .try_into()
                 .unwrap(),
         );
-        let page2_header = BtreePageHeader::from(buf[pagesize..pagesize + 12].try_into().unwrap());
+        let page2 = pager.get_page(2).unwrap();
+        let page2_header = BtreePageHeader::from(page2.get_buf()[..12].try_into().unwrap());
 
         assert_eq!(*page1_header.pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
         assert_eq!(*page2_header.pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
@@ -369,21 +370,18 @@ mod tests {
     #[test]
     fn load_btree_leaf_table_cell() {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
-        let buf = fs::read(file.path()).unwrap();
-
-        let header = DatabaseHeader::from(buf[0..DATABASE_HEADER_SIZE].try_into().unwrap());
-        let pagesize = header.pagesize() as usize;
-        assert_eq!(buf.len(), 2 * pagesize);
-
+        let pager = create_pager(file.as_file().try_clone().unwrap(), 100).unwrap();
+        let page1 = pager.get_page(1).unwrap();
         let page1_header = BtreePageHeader::from(
-            buf[DATABASE_HEADER_SIZE..DATABASE_HEADER_SIZE + 12]
+            page1.get_buf()[DATABASE_HEADER_SIZE..DATABASE_HEADER_SIZE + 12]
                 .try_into()
                 .unwrap(),
         );
-        let page1 = BtreeLeafTablePage::from(&buf[..pagesize], DATABASE_HEADER_SIZE as u8);
+
+        let table_page1 = BtreeLeafTablePage::from(page1.get_buf(), DATABASE_HEADER_SIZE as u8);
         assert_eq!(page1_header.n_cells(), 1);
         let header_size = DATABASE_HEADER_SIZE as u8 + page1_header.header_size();
-        let cell = page1.get_cell(0, header_size);
+        let cell = table_page1.get_cell(0, header_size);
 
         let (key, payload) = cell.parse();
         assert_eq!(key, 1);
@@ -400,24 +398,22 @@ mod tests {
     #[test]
     fn parse_sqlite_schema_entry() {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
-        let buf = fs::read(file.path()).unwrap();
-
-        let header = DatabaseHeader::from(buf[0..DATABASE_HEADER_SIZE].try_into().unwrap());
-        let pagesize = header.pagesize() as usize;
+        let pager = create_pager(file.as_file().try_clone().unwrap(), 100).unwrap();
+        let page1 = pager.get_page(1).unwrap();
         let page1_header = BtreePageHeader::from(
-            buf[DATABASE_HEADER_SIZE..DATABASE_HEADER_SIZE + 12]
+            page1.get_buf()[DATABASE_HEADER_SIZE..DATABASE_HEADER_SIZE + 12]
                 .try_into()
                 .unwrap(),
         );
-        let page1 = BtreeLeafTablePage::from(&buf[..pagesize], DATABASE_HEADER_SIZE as u8);
+        let table_page1 = BtreeLeafTablePage::from(page1.get_buf(), DATABASE_HEADER_SIZE as u8);
         let header_size = DATABASE_HEADER_SIZE as u8 + page1_header.header_size();
-        let cell = page1.get_cell(0, header_size);
+        let cell = table_page1.get_cell(0, header_size);
         let (_, payload) = cell.parse();
         let schema = SQLiteSchema::from(payload).unwrap();
         assert_eq!(schema._type, b"table");
         assert_eq!(schema.name, b"example");
         assert_eq!(schema.tbl_name, b"example");
-        assert_eq!(schema.rootpage, [2]);
+        assert_eq!(schema.root_page_id().unwrap(), 2);
         assert_eq!(schema.sql, b"CREATE TABLE example(col)");
     }
 
@@ -428,12 +424,10 @@ mod tests {
             "CREATE TABLE example2(col1, col2);",
             "CREATE TABLE example3(col1, col2, col3);",
         ]);
-        let buf = fs::read(file.path()).unwrap();
-        let header = DatabaseHeader::from(buf[0..DATABASE_HEADER_SIZE].try_into().unwrap());
-        let pagesize = header.pagesize() as usize;
-        let page1 = &buf[..pagesize];
+        let pager = create_pager(file.as_file().try_clone().unwrap(), 100).unwrap();
+        let page1 = pager.get_page(1).unwrap();
 
-        let schema = find_table(b"example2", page1).unwrap();
+        let schema = find_table(b"example2", page1.get_buf()).unwrap();
         assert_eq!(schema.name, b"example2");
     }
 
@@ -444,12 +438,10 @@ mod tests {
             "CREATE TABLE example2(col1, col2);",
             "CREATE TABLE example3(col1, col2, col3);",
         ]);
-        let buf = fs::read(file.path()).unwrap();
-        let header = DatabaseHeader::from(buf[0..DATABASE_HEADER_SIZE].try_into().unwrap());
-        let pagesize = header.pagesize() as usize;
-        let page1 = &buf[..pagesize];
+        let pager = create_pager(file.as_file().try_clone().unwrap(), 100).unwrap();
+        let page1 = pager.get_page(1).unwrap();
 
-        let result = find_table(b"invalid", page1);
+        let result = find_table(b"invalid", page1.get_buf());
         assert!(result.is_err());
     }
 
@@ -473,15 +465,14 @@ mod tests {
         queries.extend(tables);
         queries.extend(inserts.iter().map(|s| s.as_str()));
         let file = create_sqlite_database(&queries);
-        let buf = fs::read(file.path()).unwrap();
-        let header = DatabaseHeader::from(buf[0..DATABASE_HEADER_SIZE].try_into().unwrap());
-        let pagesize = header.pagesize() as usize;
-        let page1 = &buf[..pagesize];
+        let pager = create_pager(file.as_file().try_clone().unwrap(), 100).unwrap();
+        let page1 = pager.get_page(1).unwrap();
 
-        let schema = find_table(b"example4", page1).unwrap();
-        let page_id = schema.rootpage[0] as usize;
-        let page = BtreeLeafTablePage::from(&buf[(page_id - 1) * pagesize..page_id * pagesize], 0);
-        let result: Vec<Vec<Record>> = load_all_rows(&page, 4).unwrap().collect();
+        let schema = find_table(b"example4", page1.get_buf()).unwrap();
+        let page_id = schema.root_page_id().unwrap();
+        let page = pager.get_page(page_id).unwrap();
+        let table_page = BtreeLeafTablePage::from(page.get_buf(), 0);
+        let result: Vec<Vec<Record>> = load_all_rows(&table_page, 4).unwrap().collect();
 
         assert!(matches!(result[0][0], Record::Null));
         assert!(matches!(result[0][1], Record::One));
