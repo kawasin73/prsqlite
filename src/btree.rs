@@ -1,3 +1,5 @@
+use std::num::NonZeroU32;
+
 use crate::pager::PageId;
 use crate::utils::parse_varint;
 
@@ -54,20 +56,71 @@ impl<'page> BtreePageHeader<'page> {
     }
 }
 
+pub struct NextPayload {
+    next_page_id: NonZeroU32,
+    remaining_size: i64,
+}
+
+impl NextPayload {
+    pub fn next_page_id(&self) -> PageId {
+        self.next_page_id.get()
+    }
+
+    pub fn next<'a>(&self, page: &'a [u8]) -> (&'a [u8], Option<NextPayload>) {
+        let next_page_id = PageId::from_be_bytes(page[..4].try_into().unwrap());
+        if next_page_id == 0 {
+            let tail = 4 + self.remaining_size as usize;
+            assert!(page.len() >= tail);
+            (&page[4..tail], None)
+        } else {
+            let payload = &page[4..];
+            (
+                payload,
+                Some(Self {
+                    // Safe because it already checks next_page_id != 0.
+                    next_page_id: unsafe { NonZeroU32::new_unchecked(next_page_id) },
+                    remaining_size: self.remaining_size - payload.len() as i64,
+                }),
+            )
+        }
+    }
+}
+
 pub struct BtreeLeafTableCell<'page> {
     buf: &'page [u8],
 }
 
 impl<'page> BtreeLeafTableCell<'page> {
-    pub fn parse(&self) -> (i64, &'page [u8]) {
+    pub fn parse(&self, usable_size: i64) -> (i64, &'page [u8], Option<NextPayload>) {
         let (payload_length, consumed1) = parse_varint(self.buf);
         let (key, consumed2) = parse_varint(&self.buf[consumed1..]);
         let header_length = consumed1 + consumed2;
-        // TODO: support multi page payload
-        (
-            key,
-            &self.buf[header_length..header_length + payload_length as usize],
-        )
+
+        let x = usable_size - 35;
+        if payload_length <= x {
+            (
+                key,
+                &self.buf[header_length..header_length + payload_length as usize],
+                None,
+            )
+        } else {
+            let m = ((usable_size - 12) * 32 / 255) - 23;
+            let k = m + ((payload_length - m) % (usable_size - 4));
+            let payload_size_in_cell = if k <= x { k } else { m };
+            let tail_payload = header_length + payload_size_in_cell as usize;
+            let next_page_id =
+                PageId::from_be_bytes(self.buf[tail_payload..tail_payload + 4].try_into().unwrap());
+            assert_ne!(next_page_id, 0);
+            (
+                key,
+                &self.buf[header_length..tail_payload],
+                Some(NextPayload {
+                    // Safe because next_page_id != 0 is asserted.
+                    next_page_id: unsafe { NonZeroU32::new_unchecked(next_page_id) },
+                    remaining_size: payload_length - payload_size_in_cell,
+                }),
+            )
+        }
     }
 }
 
@@ -172,6 +225,20 @@ impl<'page> BtreePage<'page> {
                 .try_into()
                 .unwrap(),
         )
+    }
+}
+
+pub struct OverflowPage<'page> {
+    buf: &'page [u8],
+}
+
+impl<'page> OverflowPage<'page> {
+    pub fn next_page_id(&self) -> PageId {
+        PageId::from_be_bytes(self.buf[..4].try_into().unwrap())
+    }
+
+    pub fn payload(&self) -> &'page [u8] {
+        &self.buf[4..]
     }
 }
 
