@@ -2,6 +2,8 @@ mod btree;
 mod pager;
 mod utils;
 
+use std::cell::Ref;
+
 use anyhow::anyhow;
 use thiserror::Error as ThisError;
 
@@ -42,6 +44,67 @@ impl<'a> DatabaseHeader<'a> {
 
     pub fn usable_size(&self) -> i64 {
         self.pagesize() as i64 - *self.reserved() as i64
+    }
+}
+
+pub struct Context {
+    usable_size: i64,
+}
+
+impl Context {
+    pub fn new(pager: &Pager) -> Self {
+        let page1 = pager.get_page(1).unwrap();
+        let header =
+            DatabaseHeader::from(page1.get_buf()[..DATABASE_HEADER_SIZE].try_into().unwrap());
+        Self {
+            usable_size: header.usable_size(),
+        }
+    }
+}
+
+pub struct BtreeCursor<'a> {
+    context: &'a Context,
+    page: Ref<'a, Page>,
+    idx_cell: u16,
+}
+
+// TODO: support interior table page
+impl<'a> BtreeCursor<'a> {
+    pub fn new(root_page: PageId, pager: &'a Pager, context: &'a Context) -> anyhow::Result<Self> {
+        Ok(Self {
+            context,
+            page: pager.get_page(root_page)?,
+            idx_cell: 0,
+        })
+    }
+
+    pub fn move_first(&mut self) -> bool {
+        let page = BtreeLeafTablePage::from(self.page.get_buf(), 0);
+        if page.header().n_cells() > 0 {
+            self.idx_cell = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn move_next(&mut self) -> bool {
+        self.idx_cell += 1;
+        let page = BtreeLeafTablePage::from(self.page.get_buf(), 0);
+        if self.idx_cell >= page.header().n_cells() {
+            self.idx_cell -= 1;
+            false
+        } else {
+            true
+        }
+    }
+
+    pub fn get_payload(&'a self) -> &'a [u8] {
+        // TODO: cache parsed cell.
+        let page = BtreeLeafTablePage::from(self.page.get_buf(), 0);
+        let cell = page.get_cell(self.idx_cell as u16);
+        let (_, payload, _) = cell.parse(self.context.usable_size);
+        payload
     }
 }
 
@@ -638,5 +701,53 @@ mod tests {
             assert_eq!(payload, &buf[cur..cur + payload.len()]);
             cur += payload.len();
         }
+    }
+
+    #[test]
+    fn test_btree_cursor_single_page() {
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col);",
+            "INSERT INTO example(col) VALUES (0);",
+            "INSERT INTO example(col) VALUES (1);",
+            "INSERT INTO example(col) VALUES (2);",
+        ]);
+        let pager = create_pager(file.as_file().try_clone().unwrap(), 100).unwrap();
+        let context = Context::new(&pager);
+        let page_id = find_table_page_id(b"example", 1, &pager, context.usable_size).unwrap();
+
+        let mut cursor = BtreeCursor::new(page_id, &pager, &context).unwrap();
+        assert!(cursor.move_first());
+
+        let mut records = vec![Record::Null];
+        let payload = cursor.get_payload();
+        let size = parse_records(payload, &mut records).unwrap();
+        assert_eq!(size, 1);
+        assert_eq!(records[0].to_i64().unwrap(), 0);
+        assert!(cursor.move_next());
+
+        let mut records = vec![Record::Null];
+        let payload = cursor.get_payload();
+        let size = parse_records(payload, &mut records).unwrap();
+        assert_eq!(size, 1);
+        assert_eq!(records[0].to_i64().unwrap(), 1);
+        assert!(cursor.move_next());
+
+        let mut records = vec![Record::Null];
+        let payload = cursor.get_payload();
+        let size = parse_records(payload, &mut records).unwrap();
+        assert_eq!(size, 1);
+        assert_eq!(records[0].to_i64().unwrap(), 2);
+        assert!(!cursor.move_next());
+    }
+
+    #[test]
+    fn test_btree_cursor_empty_records() {
+        let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
+        let pager = create_pager(file.as_file().try_clone().unwrap(), 100).unwrap();
+        let context = Context::new(&pager);
+        let page_id = find_table_page_id(b"example", 1, &pager, context.usable_size).unwrap();
+
+        let mut cursor = BtreeCursor::new(page_id, &pager, &context).unwrap();
+        assert!(!cursor.move_first());
     }
 }
