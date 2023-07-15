@@ -74,12 +74,14 @@ impl NextPayload {
             (&page[4..tail], None)
         } else {
             let payload = &page[4..];
+            let remaining_size = self.remaining_size - payload.len() as i64;
+            assert!(remaining_size > 0);
             (
                 payload,
                 Some(Self {
                     // Safe because it already checks next_page_id != 0.
                     next_page_id: unsafe { NonZeroU32::new_unchecked(next_page_id) },
-                    remaining_size: self.remaining_size - payload.len() as i64,
+                    remaining_size,
                 }),
             )
         }
@@ -225,20 +227,6 @@ impl<'page> BtreePage<'page> {
                 .try_into()
                 .unwrap(),
         )
-    }
-}
-
-pub struct OverflowPage<'page> {
-    buf: &'page [u8],
-}
-
-impl<'page> OverflowPage<'page> {
-    pub fn next_page_id(&self) -> PageId {
-        PageId::from_be_bytes(self.buf[..4].try_into().unwrap())
-    }
-
-    pub fn payload(&self) -> &'page [u8] {
-        &self.buf[4..]
     }
 }
 
