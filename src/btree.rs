@@ -1,5 +1,6 @@
 use std::num::NonZeroU32;
 
+use crate::pager::PageBuffer;
 use crate::pager::PageId;
 use crate::utils::parse_varint;
 
@@ -22,11 +23,21 @@ impl<'page> BtreePageHeader<'page> {
         Self(buf)
     }
 
+    pub fn from_page(page: &'page PageBuffer) -> Self {
+        // SAFETY: PageBuffer is always more than 1024 bytes.
+        Self(page[0..BTREE_PAGE_HEADER_MAX_SIZE].try_into().unwrap())
+    }
+
     /// The btree page type
     ///
     /// TODO: how to convert u8 into enum with zero copy?
     pub fn pagetype(&self) -> &u8 {
         &self.0[0]
+    }
+
+    /// Whether the page is a leaf page
+    pub fn is_leaf(&self) -> bool {
+        self.0[0] & LEAF_FLAG != 0
     }
 
     /// The number of cells in this page
@@ -163,6 +174,10 @@ pub struct BtreeInteriorTableCell<'page> {
 }
 
 impl<'page> BtreeInteriorTableCell<'page> {
+    pub fn page_id(&self) -> PageId {
+        PageId::from_be_bytes(self.buf[..4].try_into().unwrap())
+    }
+
     pub fn parse(&self) -> (&'page [u8; 4], i64) {
         let (key, _) = parse_varint(&self.buf[4..]);
         (self.buf[..4].try_into().unwrap(), key)

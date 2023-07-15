@@ -4,6 +4,8 @@ use std::os::unix::fs::FileExt;
 use anyhow::bail;
 
 pub type PageId = u32;
+// The size of a page is more than 1024.
+pub type PageBuffer = [u8];
 
 pub struct Pager {
     n_pages: u32,
@@ -29,7 +31,7 @@ impl Pager {
         })
     }
 
-    pub fn get_page(&self, id: PageId) -> anyhow::Result<&[u8]> {
+    pub fn get_page(&self, id: PageId) -> anyhow::Result<&PageBuffer> {
         if id == 0 {
             bail!("page id starts from 1");
         } else if id > self.n_pages {
