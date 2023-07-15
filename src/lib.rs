@@ -31,31 +31,21 @@ impl<'a> DatabaseHeader<'a> {
         pagesize >= 512 && pagesize <= SQLITE_MAX_PAGE_SIZE && (pagesize - 1) & pagesize == 0
     }
 
+    pub fn validate_reserved(&self) -> bool {
+        self.pagesize() > self.reserved() as u32
+    }
+
     pub fn pagesize(&self) -> u32 {
         // If the original big endian value is 1, it means 65536.
         (self.0[16] as u32) << 8 | (self.0[17] as u32) << 16
     }
 
-    pub fn reserved(&self) -> &u8 {
-        &self.0[20]
+    pub fn reserved(&self) -> u8 {
+        self.0[20]
     }
 
-    pub fn usable_size(&self) -> i64 {
-        self.pagesize() as i64 - *self.reserved() as i64
-    }
-}
-
-pub struct Context {
-    pub usable_size: i64,
-}
-
-impl Context {
-    pub fn new(pager: &Pager) -> Self {
-        let page1 = pager.get_page(1).unwrap();
-        let header = DatabaseHeader::from(page1[..DATABASE_HEADER_SIZE].try_into().unwrap());
-        Self {
-            usable_size: header.usable_size(),
-        }
+    pub fn usable_size(&self) -> u32 {
+        self.pagesize() - self.reserved() as u32
     }
 }
 
@@ -347,7 +337,7 @@ pub fn find_table_page_id<'a>(
     table: &[u8],
     page_id: PageId,
     pager: &'a Pager,
-    usable_size: i64,
+    usable_size: u32,
 ) -> std::result::Result<PageId, FindError> {
     let page = pager.get_page(page_id)?;
     let base_offset = if page_id == 1 {
@@ -398,7 +388,7 @@ pub fn find_table_page_id<'a>(
 pub fn load_all_rows<'a>(
     page: &'a BtreeLeafTablePage,
     columns: usize,
-    usable_size: i64,
+    usable_size: u32,
 ) -> anyhow::Result<Vec<Vec<Record<'a>>>> {
     let mut result = Vec::new();
     for i in 0..page.header().n_cells() {
@@ -465,6 +455,13 @@ mod tests {
         Pager::new(file, header.pagesize() as usize)
     }
 
+    fn load_usable_size(file: &File) -> anyhow::Result<u32> {
+        let mut header_buf = [0_u8; DATABASE_HEADER_SIZE];
+        file.read_exact_at(&mut header_buf, 0)?;
+        let header = DatabaseHeader::from(&header_buf);
+        Ok(header.usable_size())
+    }
+
     fn buffer_to_hex(buf: &[u8]) -> String {
         buf.iter().map(|v| format!("{:02X}", v)).collect::<String>()
     }
@@ -479,6 +476,7 @@ mod tests {
         assert!(header.validate_magic_header());
         assert_eq!(header.pagesize(), 4096);
         assert!(header.validate_pagesize());
+        assert!(header.validate_reserved());
     }
 
     #[test]
@@ -506,8 +504,7 @@ mod tests {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let page1 = pager.get_page(1).unwrap();
-        let usable_size =
-            DatabaseHeader::from(page1[..DATABASE_HEADER_SIZE].try_into().unwrap()).usable_size();
+        let usable_size = load_usable_size(file.as_file()).unwrap();
         let page1_header = BtreePageHeader::from(
             page1[DATABASE_HEADER_SIZE..DATABASE_HEADER_SIZE + 12]
                 .try_into()
@@ -535,8 +532,7 @@ mod tests {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let page1 = pager.get_page(1).unwrap();
-        let usable_size =
-            DatabaseHeader::from(page1[..DATABASE_HEADER_SIZE].try_into().unwrap()).usable_size();
+        let usable_size = load_usable_size(file.as_file()).unwrap();
         let table_page1 = BtreeLeafTablePage::from(page1, DATABASE_HEADER_SIZE as u8);
         let cell = table_page1.get_cell(0);
         let (_, payload, _) = cell.parse(usable_size);
@@ -556,12 +552,7 @@ mod tests {
             "CREATE TABLE example3(col1, col2, col3);",
         ]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = DatabaseHeader::from(
-            pager.get_page(1).unwrap()[..DATABASE_HEADER_SIZE]
-                .try_into()
-                .unwrap(),
-        )
-        .usable_size();
+        let usable_size = load_usable_size(file.as_file()).unwrap();
 
         let page_id = find_table_page_id(b"example2", 1, &pager, usable_size).unwrap();
 
@@ -580,12 +571,7 @@ mod tests {
         let file =
             create_sqlite_database(&queries.iter().map(|q| q.as_str()).collect::<Vec<&str>>());
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = DatabaseHeader::from(
-            pager.get_page(1).unwrap()[..DATABASE_HEADER_SIZE]
-                .try_into()
-                .unwrap(),
-        )
-        .usable_size();
+        let usable_size = load_usable_size(file.as_file()).unwrap();
 
         let page_id = find_table_page_id(b"example99", 1, &pager, usable_size).unwrap();
 
@@ -600,12 +586,7 @@ mod tests {
             "CREATE TABLE example3(col1, col2, col3);",
         ]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = DatabaseHeader::from(
-            pager.get_page(1).unwrap()[..DATABASE_HEADER_SIZE]
-                .try_into()
-                .unwrap(),
-        )
-        .usable_size();
+        let usable_size = load_usable_size(file.as_file()).unwrap();
 
         let result = find_table_page_id(b"invalid", 1, &pager, usable_size);
 
@@ -633,12 +614,7 @@ mod tests {
         queries.extend(inserts.iter().map(|s| s.as_str()));
         let file = create_sqlite_database(&queries);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = DatabaseHeader::from(
-            pager.get_page(1).unwrap()[..DATABASE_HEADER_SIZE]
-                .try_into()
-                .unwrap(),
-        )
-        .usable_size();
+        let usable_size = load_usable_size(file.as_file()).unwrap();
         let page_id = find_table_page_id(b"example4", 1, &pager, usable_size).unwrap();
 
         let page = pager.get_page(page_id).unwrap();
@@ -702,12 +678,7 @@ mod tests {
         queries.push(&query);
         let file = create_sqlite_database(&queries);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = DatabaseHeader::from(
-            pager.get_page(1).unwrap()[..DATABASE_HEADER_SIZE]
-                .try_into()
-                .unwrap(),
-        )
-        .usable_size();
+        let usable_size = load_usable_size(file.as_file()).unwrap();
         let page_id = find_table_page_id(b"example", 1, &pager, usable_size).unwrap();
         let page = pager.get_page(page_id).unwrap();
         let table_page = BtreeLeafTablePage::from(page, 0);
@@ -744,14 +715,14 @@ mod tests {
             "INSERT INTO example(col) VALUES (2);",
         ]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let context = Context::new(&pager);
-        let page_id = find_table_page_id(b"example", 1, &pager, context.usable_size).unwrap();
+        let usable_size = load_usable_size(file.as_file()).unwrap();
+        let page_id = find_table_page_id(b"example", 1, &pager, usable_size).unwrap();
 
         let mut cursor = BtreeCursor::new(page_id, &pager);
 
         let cell = cursor.next();
         assert!(cell.is_some());
-        let (_, payload, _) = cell.unwrap().parse(context.usable_size);
+        let (_, payload, _) = cell.unwrap().parse(usable_size);
         let mut records = vec![Record::Null];
         let size = parse_records(payload, &mut records).unwrap();
         assert_eq!(size, 1);
@@ -759,7 +730,7 @@ mod tests {
 
         let cell = cursor.next();
         assert!(cell.is_some());
-        let (_, payload, _) = cell.unwrap().parse(context.usable_size);
+        let (_, payload, _) = cell.unwrap().parse(usable_size);
         let mut records = vec![Record::Null];
         let size = parse_records(payload, &mut records).unwrap();
         assert_eq!(size, 1);
@@ -767,7 +738,7 @@ mod tests {
 
         let cell = cursor.next();
         assert!(cell.is_some());
-        let (_, payload, _) = cell.unwrap().parse(context.usable_size);
+        let (_, payload, _) = cell.unwrap().parse(usable_size);
         let mut records = vec![Record::Null];
         let size = parse_records(payload, &mut records).unwrap();
         assert_eq!(size, 1);
@@ -780,8 +751,8 @@ mod tests {
     fn test_btree_cursor_empty_records() {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let context = Context::new(&pager);
-        let page_id = find_table_page_id(b"example", 1, &pager, context.usable_size).unwrap();
+        let usable_size = load_usable_size(file.as_file()).unwrap();
+        let page_id = find_table_page_id(b"example", 1, &pager, usable_size).unwrap();
 
         let mut cursor = BtreeCursor::new(page_id, &pager);
         assert!(cursor.next().is_none());
@@ -807,15 +778,15 @@ mod tests {
         queries.extend(inserts.iter().map(|s| s.as_str()));
         let file = create_sqlite_database(&queries);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let context = Context::new(&pager);
-        let page_id = find_table_page_id(b"example", 1, &pager, context.usable_size).unwrap();
+        let usable_size = load_usable_size(file.as_file()).unwrap();
+        let page_id = find_table_page_id(b"example", 1, &pager, usable_size).unwrap();
 
         let mut cursor = BtreeCursor::new(page_id, &pager);
 
         for i in 0..1000 {
             let cell = cursor.next();
             assert!(cell.is_some());
-            let (_, payload, _) = cell.unwrap().parse(context.usable_size);
+            let (_, payload, _) = cell.unwrap().parse(usable_size);
             let mut records = vec![Record::Null, Record::Null];
             let size = parse_records(payload, &mut records).unwrap();
             assert_eq!(size, 2);
@@ -825,7 +796,7 @@ mod tests {
         for i in 0..1000 {
             let cell = cursor.next();
             assert!(cell.is_some());
-            let (_, payload, _) = cell.unwrap().parse(context.usable_size);
+            let (_, payload, _) = cell.unwrap().parse(usable_size);
             let mut records = vec![Record::Null, Record::Null];
             let size = parse_records(payload, &mut records).unwrap();
             assert_eq!(size, 2);

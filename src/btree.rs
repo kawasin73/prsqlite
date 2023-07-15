@@ -104,7 +104,8 @@ pub struct BtreeLeafTableCell<'page> {
 }
 
 impl<'page> BtreeLeafTableCell<'page> {
-    pub fn parse(&self, usable_size: i64) -> (i64, &'page [u8], Option<NextPayload>) {
+    pub fn parse(&self, usable_size: u32) -> (i64, &'page [u8], Option<NextPayload>) {
+        let usable_size = usable_size as i64;
         let (payload_length, consumed1) = parse_varint(self.buf);
         let (key, consumed2) = parse_varint(&self.buf[consumed1..]);
         let header_length = consumed1 + consumed2;
