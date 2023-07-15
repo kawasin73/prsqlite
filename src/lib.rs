@@ -2,7 +2,6 @@ mod btree;
 mod pager;
 mod utils;
 
-use anyhow::anyhow;
 use thiserror::Error as ThisError;
 
 // TODO: This is to suppress the unused warning.
@@ -339,39 +338,23 @@ pub fn find_table_page_id<'a>(
     pager: &'a Pager,
     usable_size: u32,
 ) -> std::result::Result<PageId, FindError> {
-    let page = pager.get_page(page_id)?;
-    let header = BtreePageHeader::from_page(&page);
-    match *header.pagetype() {
-        BTREE_PAGE_TYPE_INTERIOR_TABLE => {
-            for i in 0..header.n_cells() {
-                let (page_id, _) = BtreeInteriorTableCell::get(&page, i).parse();
-                let page_id = u32::from_be_bytes(*page_id);
-                match find_table_page_id(table, page_id, pager, usable_size) {
-                    Err(FindError::NotFound) => {
-                        continue;
-                    }
-                    others => {
-                        return others;
-                    }
-                }
-            }
-            debug_assert!(header.right_page_id() > 0);
-            find_table_page_id(table, header.right_page_id(), pager, usable_size)
+    let mut cursor = BtreeCursor::new(page_id, pager);
+    loop {
+        let cell = match cursor.next() {
+            Some(cell) => cell,
+            None => break,
+        };
+        let (_, payload, _) = cell.parse(usable_size);
+        // TODO: payload may be multi payload.
+        let schema = SQLiteSchema::from(payload)?;
+        if schema._type == b"table" && schema.name == table {
+            return Ok(schema.root_page_id()?);
         }
-        BTREE_PAGE_TYPE_LEAF_TABLE => {
-            for i in 0..header.n_cells() {
-                let cell = BtreeLeafTableCell::get(&page, i);
-                let (_, payload, _) = cell.parse(usable_size);
-                // TODO: payload may be multi payload.
-                let schema = SQLiteSchema::from(payload)?;
-                if schema._type == b"table" && schema.name == table {
-                    return Ok(schema.root_page_id()?);
-                }
-            }
-            Err(FindError::NotFound)
-        }
-        others => Err(anyhow!("unexpected page type {}", others).into()),
     }
+    cursor
+        .last_error
+        .map(|e| Err(e.into()))
+        .unwrap_or(Err(FindError::NotFound))
 }
 
 pub fn load_all_rows<'a>(
