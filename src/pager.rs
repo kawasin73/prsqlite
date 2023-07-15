@@ -3,9 +3,9 @@ use std::os::unix::fs::FileExt;
 
 use anyhow::bail;
 
+use crate::DATABASE_HEADER_SIZE;
+
 pub type PageId = u32;
-// The size of a page is more than 1024.
-pub type PageBuffer = [u8];
 
 pub struct Pager {
     n_pages: u32,
@@ -31,13 +31,27 @@ impl Pager {
         })
     }
 
-    pub fn get_page(&self, id: PageId) -> anyhow::Result<&PageBuffer> {
-        if id == 0 {
-            bail!("page id starts from 1");
-        } else if id > self.n_pages {
-            bail!("page id exceeds file size");
+    pub fn get_page<'a>(&'a self, id: PageId) -> anyhow::Result<MemPage<'a>> {
+        match id {
+            0 => bail!("page id starts from 1"),
+            1 => Ok(MemPage {
+                buffer: &self.buffer[..self.pagesize],
+                header_offset: DATABASE_HEADER_SIZE,
+            }),
+            _ if id > self.n_pages => bail!("page id exceeds file size"),
+            _ => {
+                let offset = (id - 1) as usize * self.pagesize;
+                Ok(MemPage {
+                    buffer: &self.buffer[offset..offset + self.pagesize],
+                    header_offset: 0,
+                })
+            }
         }
-        let offset = (id - 1) as usize * self.pagesize;
-        Ok(&self.buffer[offset..offset + self.pagesize])
     }
+}
+
+pub struct MemPage<'a> {
+    // The size of a page is more than 1024.
+    pub buffer: &'a [u8],
+    pub header_offset: usize,
 }

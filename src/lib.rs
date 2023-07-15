@@ -52,6 +52,7 @@ impl<'a> DatabaseHeader<'a> {
 pub struct BtreeCursor<'a> {
     pager: &'a Pager,
     current_page_id: PageId,
+    current_page: MemPage<'a>,
     idx_cell: u16,
     parent_pages: Vec<(PageId, u16)>,
     last_error: Option<anyhow::Error>,
@@ -62,6 +63,7 @@ impl<'a> BtreeCursor<'a> {
         Self {
             pager,
             current_page_id: root_page,
+            current_page: pager.get_page(root_page).unwrap(),
             idx_cell: 0,
             parent_pages: Vec::new(),
             last_error: None,
@@ -73,14 +75,14 @@ impl<'a> Iterator for BtreeCursor<'a> {
     type Item = BtreeLeafTableCell<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let page = match self.pager.get_page(self.current_page_id) {
+        self.current_page = match self.pager.get_page(self.current_page_id) {
             Ok(page) => page,
             Err(e) => {
                 self.last_error = Some(e);
                 return None;
             }
         };
-        let page_header = BtreePageHeader::from_page(page);
+        let page_header = BtreePageHeader::from_page(&self.current_page);
         if !page_header.is_leaf() && self.idx_cell == page_header.n_cells() {
             self.idx_cell += 1;
             self.parent_pages
@@ -100,13 +102,11 @@ impl<'a> Iterator for BtreeCursor<'a> {
             self.next()
         } else {
             if page_header.is_leaf() {
-                let page = BtreeLeafTablePage::from(page, 0);
-                let cell = page.get_cell(self.idx_cell);
+                let cell = BtreeLeafTableCell::get(&self.current_page, self.idx_cell);
                 self.idx_cell += 1;
                 Some(cell)
             } else {
-                let page = BtreeInteriorTablePage::from(page, 0);
-                let cell = page.get_cell(self.idx_cell);
+                let cell = BtreeInteriorTableCell::get(&self.current_page, self.idx_cell);
                 let page_id = cell.page_id();
                 self.parent_pages
                     .push((self.current_page_id, self.idx_cell));
@@ -340,21 +340,11 @@ pub fn find_table_page_id<'a>(
     usable_size: u32,
 ) -> std::result::Result<PageId, FindError> {
     let page = pager.get_page(page_id)?;
-    let base_offset = if page_id == 1 {
-        DATABASE_HEADER_SIZE
-    } else {
-        0
-    };
-    let header = BtreePageHeader::from(
-        page[base_offset..base_offset + BTREE_PAGE_HEADER_MAX_SIZE]
-            .try_into()
-            .unwrap(),
-    );
+    let header = BtreePageHeader::from_page(&page);
     match *header.pagetype() {
         BTREE_PAGE_TYPE_INTERIOR_TABLE => {
-            let interior_page = BtreeInteriorTablePage::from(page, base_offset as u8);
             for i in 0..header.n_cells() {
-                let (page_id, _) = interior_page.get_cell(i).parse();
+                let (page_id, _) = BtreeInteriorTableCell::get(&page, i).parse();
                 let page_id = u32::from_be_bytes(*page_id);
                 match find_table_page_id(table, page_id, pager, usable_size) {
                     Err(FindError::NotFound) => {
@@ -369,9 +359,8 @@ pub fn find_table_page_id<'a>(
             find_table_page_id(table, header.right_page_id(), pager, usable_size)
         }
         BTREE_PAGE_TYPE_LEAF_TABLE => {
-            let leaf_page = BtreeLeafTablePage::from(page, base_offset as u8);
             for i in 0..header.n_cells() {
-                let cell = leaf_page.get_cell(i);
+                let cell = BtreeLeafTableCell::get(&page, i);
                 let (_, payload, _) = cell.parse(usable_size);
                 // TODO: payload may be multi payload.
                 let schema = SQLiteSchema::from(payload)?;
@@ -386,13 +375,14 @@ pub fn find_table_page_id<'a>(
 }
 
 pub fn load_all_rows<'a>(
-    page: &'a BtreeLeafTablePage,
+    page: &MemPage<'a>,
     columns: usize,
     usable_size: u32,
 ) -> anyhow::Result<Vec<Vec<Record<'a>>>> {
     let mut result = Vec::new();
-    for i in 0..page.header().n_cells() {
-        let cell = page.get_cell(i);
+    let header = BtreePageHeader::from_page(page);
+    for i in 0..header.n_cells() {
+        let cell = BtreeLeafTableCell::get(page, i);
         let (_, payload, _) = cell.parse(usable_size);
         // TODO: This is not efficient.
         let mut records = vec![Record::Null; columns];
@@ -486,12 +476,12 @@ mod tests {
 
         let page1 = pager.get_page(1).unwrap();
         let page1_header = BtreePageHeader::from(
-            page1[DATABASE_HEADER_SIZE..DATABASE_HEADER_SIZE + 12]
+            page1.buffer[DATABASE_HEADER_SIZE..DATABASE_HEADER_SIZE + 12]
                 .try_into()
                 .unwrap(),
         );
         let page2 = pager.get_page(2).unwrap();
-        let page2_header = BtreePageHeader::from(page2[..12].try_into().unwrap());
+        let page2_header = BtreePageHeader::from(page2.buffer[..12].try_into().unwrap());
 
         assert_eq!(*page1_header.pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
         assert_eq!(*page2_header.pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
@@ -505,15 +495,10 @@ mod tests {
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let page1 = pager.get_page(1).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
-        let page1_header = BtreePageHeader::from(
-            page1[DATABASE_HEADER_SIZE..DATABASE_HEADER_SIZE + 12]
-                .try_into()
-                .unwrap(),
-        );
+        let page1_header = BtreePageHeader::from_page(&page1);
 
-        let table_page1 = BtreeLeafTablePage::from(page1, DATABASE_HEADER_SIZE as u8);
         assert_eq!(page1_header.n_cells(), 1);
-        let cell = table_page1.get_cell(0);
+        let cell = BtreeLeafTableCell::get(&page1, 0);
 
         let (key, payload, _) = cell.parse(usable_size);
         assert_eq!(key, 1);
@@ -533,8 +518,7 @@ mod tests {
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let page1 = pager.get_page(1).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
-        let table_page1 = BtreeLeafTablePage::from(page1, DATABASE_HEADER_SIZE as u8);
-        let cell = table_page1.get_cell(0);
+        let cell = BtreeLeafTableCell::get(&page1, 0);
         let (_, payload, _) = cell.parse(usable_size);
         let schema = SQLiteSchema::from(payload).unwrap();
         assert_eq!(schema._type, b"table");
@@ -618,8 +602,7 @@ mod tests {
         let page_id = find_table_page_id(b"example4", 1, &pager, usable_size).unwrap();
 
         let page = pager.get_page(page_id).unwrap();
-        let table_page = BtreeLeafTablePage::from(page, 0);
-        let result: Vec<Vec<Record>> = load_all_rows(&table_page, 4, usable_size).unwrap();
+        let result: Vec<Vec<Record>> = load_all_rows(&page, 4, usable_size).unwrap();
 
         assert!(matches!(result[0][0], Record::Null));
         assert!(matches!(result[0][1], Record::One));
@@ -681,10 +664,9 @@ mod tests {
         let usable_size = load_usable_size(file.as_file()).unwrap();
         let page_id = find_table_page_id(b"example", 1, &pager, usable_size).unwrap();
         let page = pager.get_page(page_id).unwrap();
-        let table_page = BtreeLeafTablePage::from(page, 0);
-        assert_eq!(table_page.header().n_cells(), 1);
+        assert_eq!(BtreePageHeader::from_page(&page).n_cells(), 1);
 
-        let cell = table_page.get_cell(0);
+        let cell = BtreeLeafTableCell::get(&page, 0);
         let (_, mut payload, mut next_payload) = cell.parse(usable_size);
         let (header_size, c1) = parse_varint(payload);
         let (serial_type, c2) = parse_varint(&payload[c1..]);
@@ -700,7 +682,7 @@ mod tests {
             let page = pager
                 .get_page(next_payload.as_ref().unwrap().next_page_id())
                 .unwrap();
-            (payload, next_payload) = next_payload.as_ref().unwrap().next(page);
+            (payload, next_payload) = next_payload.as_ref().unwrap().next(&page);
             assert_eq!(payload, &buf[cur..cur + payload.len()]);
             cur += payload.len();
         }
