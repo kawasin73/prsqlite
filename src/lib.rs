@@ -7,7 +7,7 @@ use thiserror::Error as ThisError;
 // TODO: This is to suppress the unused warning.
 pub use crate::btree::*;
 pub use crate::pager::*;
-use crate::utils::parse_varint;
+use crate::utils::unsafe_parse_varint;
 
 const SQLITE_MAX_PAGE_SIZE: u32 = 65536;
 pub const DATABASE_HEADER_SIZE: usize = 100;
@@ -101,11 +101,25 @@ impl<'a> Iterator for BtreeCursor<'a> {
             self.next()
         } else {
             if page_header.is_leaf() {
-                let cell = BtreeLeafTableCell::get(&self.current_page, self.idx_cell);
+                let cell = match BtreeLeafTableCell::get(&self.current_page, self.idx_cell) {
+                    Ok(cell) => cell,
+                    Err(e) => {
+                        self.last_error =
+                            Some(anyhow::anyhow!("get btree leaf table cell: {:?}", e));
+                        return None;
+                    }
+                };
                 self.idx_cell += 1;
                 Some(cell)
             } else {
-                let cell = BtreeInteriorTableCell::get(&self.current_page, self.idx_cell);
+                let cell = match BtreeInteriorTableCell::get(&self.current_page, self.idx_cell) {
+                    Ok(cell) => cell,
+                    Err(e) => {
+                        self.last_error =
+                            Some(anyhow::anyhow!("get btree interior table cell: {:?}", e));
+                        return None;
+                    }
+                };
                 let page_id = cell.page_id();
                 self.parent_pages
                     .push((self.current_page_id, self.idx_cell));
@@ -134,6 +148,7 @@ pub enum Record<'a> {
     Text(&'a [u8]),
 }
 
+// TODO: automatic type conversion
 impl<'a> Record<'a> {
     pub fn to_i64(&self) -> anyhow::Result<i64> {
         use Record::*;
@@ -196,7 +211,7 @@ impl<'a> Record<'a> {
 }
 
 pub fn parse_record<'a>(headers: &'a [u8], contents: &'a [u8]) -> (Record<'a>, &'a [u8], &'a [u8]) {
-    let (serial_type, consumed) = parse_varint(headers);
+    let (serial_type, consumed) = unsafe_parse_varint(headers);
     let headers = &headers[consumed..];
     match serial_type {
         0 => (Record::Null, headers, contents),
@@ -259,7 +274,7 @@ pub enum Error {
 }
 
 pub fn parse_records<'a>(payload: &'a [u8], records: &mut [Record<'a>]) -> anyhow::Result<usize> {
-    let (header_size, consumed) = parse_varint(payload);
+    let (header_size, consumed) = unsafe_parse_varint(payload);
     let header_size: usize = header_size.try_into().unwrap();
     let mut headers = &payload[consumed..header_size];
     let mut contents = &payload[header_size..];
@@ -344,7 +359,9 @@ pub fn find_table_page_id<'a>(
             Some(cell) => cell,
             None => break,
         };
-        let (_, payload, _) = cell.parse(usable_size);
+        let (_, payload, _) = cell
+            .parse(usable_size)
+            .map_err(|e| anyhow::anyhow!("parse btree leaf table cell: {:?}", e))?;
         // TODO: payload may be multi payload.
         let schema = SQLiteSchema::from(payload)?;
         if schema._type == b"table" && schema.name == table {
@@ -365,8 +382,10 @@ pub fn load_all_rows<'a>(
     let mut result = Vec::new();
     let header = BtreePageHeader::from_page(page);
     for i in 0..header.n_cells() {
-        let cell = BtreeLeafTableCell::get(page, i);
-        let (_, payload, _) = cell.parse(usable_size);
+        let cell = BtreeLeafTableCell::get(page, i).unwrap();
+        let (_, payload, _) = cell
+            .parse(usable_size)
+            .map_err(|e| anyhow::anyhow!("parse btree leaf table cell: {:?}", e))?;
         // TODO: This is not efficient.
         let mut records = vec![Record::Null; columns];
         // TODO: payload may be multi payload.
@@ -481,9 +500,9 @@ mod tests {
         let page1_header = BtreePageHeader::from_page(&page1);
 
         assert_eq!(page1_header.n_cells(), 1);
-        let cell = BtreeLeafTableCell::get(&page1, 0);
+        let cell = BtreeLeafTableCell::get(&page1, 0).unwrap();
 
-        let (key, payload, _) = cell.parse(usable_size);
+        let (key, payload, _) = cell.parse(usable_size).unwrap();
         assert_eq!(key, 1);
         assert_eq!(
             payload,
@@ -501,8 +520,8 @@ mod tests {
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let page1 = pager.get_page(1).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
-        let cell = BtreeLeafTableCell::get(&page1, 0);
-        let (_, payload, _) = cell.parse(usable_size);
+        let cell = BtreeLeafTableCell::get(&page1, 0).unwrap();
+        let (_, payload, _) = cell.parse(usable_size).unwrap();
         let schema = SQLiteSchema::from(payload).unwrap();
         assert_eq!(schema._type, b"table");
         assert_eq!(schema.name, b"example");
@@ -649,10 +668,10 @@ mod tests {
         let page = pager.get_page(page_id).unwrap();
         assert_eq!(BtreePageHeader::from_page(&page).n_cells(), 1);
 
-        let cell = BtreeLeafTableCell::get(&page, 0);
-        let (_, mut payload, mut next_payload) = cell.parse(usable_size);
-        let (header_size, c1) = parse_varint(payload);
-        let (serial_type, c2) = parse_varint(&payload[c1..]);
+        let cell = BtreeLeafTableCell::get(&page, 0).unwrap();
+        let (_, mut payload, mut next_payload) = cell.parse(usable_size).unwrap();
+        let (header_size, c1) = unsafe_parse_varint(payload);
+        let (serial_type, c2) = unsafe_parse_varint(&payload[c1..]);
         let payload_size = (serial_type - 12) / 2;
         assert_eq!(payload_size, buf.len() as i64);
         assert_eq!(header_size, (c1 + c2) as i64);
@@ -663,9 +682,9 @@ mod tests {
         while cur < buf.len() {
             assert!(next_payload.is_some());
             let page = pager
-                .get_page(next_payload.as_ref().unwrap().next_page_id())
+                .get_page(next_payload.as_ref().unwrap().page_id())
                 .unwrap();
-            (payload, next_payload) = next_payload.as_ref().unwrap().next(&page);
+            (payload, next_payload) = next_payload.as_ref().unwrap().parse(&page).unwrap();
             assert_eq!(payload, &buf[cur..cur + payload.len()]);
             cur += payload.len();
         }
@@ -687,7 +706,7 @@ mod tests {
 
         let cell = cursor.next();
         assert!(cell.is_some());
-        let (_, payload, _) = cell.unwrap().parse(usable_size);
+        let (_, payload, _) = cell.unwrap().parse(usable_size).unwrap();
         let mut records = vec![Record::Null];
         let size = parse_records(payload, &mut records).unwrap();
         assert_eq!(size, 1);
@@ -695,7 +714,7 @@ mod tests {
 
         let cell = cursor.next();
         assert!(cell.is_some());
-        let (_, payload, _) = cell.unwrap().parse(usable_size);
+        let (_, payload, _) = cell.unwrap().parse(usable_size).unwrap();
         let mut records = vec![Record::Null];
         let size = parse_records(payload, &mut records).unwrap();
         assert_eq!(size, 1);
@@ -703,7 +722,7 @@ mod tests {
 
         let cell = cursor.next();
         assert!(cell.is_some());
-        let (_, payload, _) = cell.unwrap().parse(usable_size);
+        let (_, payload, _) = cell.unwrap().parse(usable_size).unwrap();
         let mut records = vec![Record::Null];
         let size = parse_records(payload, &mut records).unwrap();
         assert_eq!(size, 1);
@@ -751,7 +770,7 @@ mod tests {
         for i in 0..1000 {
             let cell = cursor.next();
             assert!(cell.is_some());
-            let (_, payload, _) = cell.unwrap().parse(usable_size);
+            let (_, payload, _) = cell.unwrap().parse(usable_size).unwrap();
             let mut records = vec![Record::Null, Record::Null];
             let size = parse_records(payload, &mut records).unwrap();
             assert_eq!(size, 2);
@@ -761,7 +780,7 @@ mod tests {
         for i in 0..1000 {
             let cell = cursor.next();
             assert!(cell.is_some());
-            let (_, payload, _) = cell.unwrap().parse(usable_size);
+            let (_, payload, _) = cell.unwrap().parse(usable_size).unwrap();
             let mut records = vec![Record::Null, Record::Null];
             let size = parse_records(payload, &mut records).unwrap();
             assert_eq!(size, 2);

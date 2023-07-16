@@ -51,7 +51,7 @@ impl Pager {
 }
 
 pub struct MemPage<'a> {
-    // The size of a page is more than 1024.
+    // The size of a page is more than 512.
     pub buffer: &'a [u8],
     pub header_offset: usize,
 }

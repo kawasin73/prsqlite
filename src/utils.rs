@@ -1,8 +1,32 @@
 const VARINT_FLAG_MASK: u8 = 0b1000_0000;
 const VARINT_VAR_MASK: u8 = !VARINT_FLAG_MASK;
 
-/// Parse varint
-pub fn parse_varint(buf: &[u8]) -> (i64, usize) {
+/// Parse varint.
+///
+/// Return None if the buffer is not valid varint.
+pub fn parse_varint(buf: &[u8]) -> Option<(i64, usize)> {
+    if valid_varint_buffer(buf) {
+        Some(unsafe_parse_varint(buf))
+    } else {
+        None
+    }
+}
+
+fn valid_varint_buffer(buf: &[u8]) -> bool {
+    let mut count = 0;
+    for b in buf {
+        count += 1;
+        if count == 9 {
+            return true;
+        } else if b & VARINT_FLAG_MASK == 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Parse varint without validation
+pub fn unsafe_parse_varint(buf: &[u8]) -> (i64, usize) {
     if buf[0] & VARINT_FLAG_MASK == 0 {
         (buf[0] as i64, 1)
     } else {
@@ -56,19 +80,42 @@ mod tests {
             ),
             (&[255, 255, 255, 255, 255, 255, 255, 255, 255], -1),
         ] {
-            let (result, consumed) = parse_varint(buf);
+            let (result, consumed) = unsafe_parse_varint(buf);
             assert_eq!(consumed, buf.len(), "buf: {:?}", buf);
             assert_eq!(result, v, "buf: {:?}", buf);
+
+            // valid as varint
+            assert!(parse_varint(buf).is_some());
         }
     }
 
     #[test]
     fn test_parse_varint_consume() {
-        let (_, consumed) = parse_varint(&[0, 0]);
+        let (_, consumed) = unsafe_parse_varint(&[0, 0]);
         assert_eq!(consumed, 1);
-        let (_, consumed) = parse_varint(&[129, 0, 0]);
+        let (_, consumed) = unsafe_parse_varint(&[129, 0, 0]);
         assert_eq!(consumed, 2);
-        let (_, consumed) = parse_varint(&[255, 255, 255, 255, 255, 255, 255, 255, 255, 255]);
+        let (_, consumed) =
+            unsafe_parse_varint(&[255, 255, 255, 255, 255, 255, 255, 255, 255, 255]);
         assert_eq!(consumed, 9);
+    }
+
+    #[test]
+    fn test_parse_varint_invalid_varint() {
+        for buf in [
+            &[],
+            &[128],
+            &[255],
+            &[255, 255],
+            &[255, 255, 255],
+            &[255, 255, 255, 255],
+            &[255, 255, 255, 255, 255],
+            &[255, 255, 255, 255, 255, 255],
+            &[255, 255, 255, 255, 255, 255, 255],
+            &[255, 255, 255, 255, 255, 255, 255, 255],
+        ] as [&[u8]; 10]
+        {
+            assert!(parse_varint(buf).is_none());
+        }
     }
 }
