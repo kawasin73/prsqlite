@@ -94,6 +94,7 @@ fn get_cell_buffer<'page>(
     Ok(&page.buffer[cell_offset..])
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct OverflowPage {
     page_id: NonZeroU32,
     remaining_size: i64,
@@ -143,7 +144,10 @@ impl<'page> BtreeLeafTableCell<'page> {
         })
     }
 
-    pub fn parse(&self, usable_size: u32) -> ParseResult<(i64, &'page [u8], Option<OverflowPage>)> {
+    pub fn parse(
+        &self,
+        usable_size: u32,
+    ) -> ParseResult<(i64, i64, &'page [u8], Option<OverflowPage>)> {
         let usable_size = usable_size as i64;
         let (payload_length, consumed1) =
             parse_varint(self.buf).map_or(Err("parse payload length varint"), |v| Ok(v))?;
@@ -156,6 +160,7 @@ impl<'page> BtreeLeafTableCell<'page> {
             if self.buf.len() >= header_length + payload_length as usize {
                 Ok((
                     key,
+                    payload_length,
                     &self.buf[header_length..header_length + payload_length as usize],
                     None,
                 ))
@@ -175,6 +180,7 @@ impl<'page> BtreeLeafTableCell<'page> {
             if next_page_id > 0 {
                 Ok((
                     key,
+                    payload_length,
                     &self.buf[header_length..tail_payload],
                     Some(OverflowPage {
                         // Safe because next_page_id != 0 is asserted.
@@ -217,6 +223,11 @@ impl<'page> BtreeInteriorTableCell<'page> {
 mod tests {
     use super::*;
 
+    use crate::find_table_page_id;
+    use crate::test_utils::*;
+    use crate::utils::unsafe_parse_varint;
+    use crate::DATABASE_HEADER_SIZE;
+
     #[test]
     fn pagetype() {
         let mut buf = [0_u8; 12];
@@ -250,6 +261,91 @@ mod tests {
             let header = BtreePageHeader(&buf);
 
             assert_eq!(header.header_size(), 8);
+        }
+    }
+
+    #[test]
+    fn validate_btree_page_header() {
+        let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+
+        let page1 = pager.get_page(1).unwrap();
+        let page1_header = BtreePageHeader::from(
+            page1.buffer[DATABASE_HEADER_SIZE..DATABASE_HEADER_SIZE + 12]
+                .try_into()
+                .unwrap(),
+        );
+        let page2 = pager.get_page(2).unwrap();
+        let page2_header = BtreePageHeader::from(page2.buffer[..12].try_into().unwrap());
+
+        assert_eq!(*page1_header.pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
+        assert_eq!(*page2_header.pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
+        assert_eq!(page1_header.n_cells(), 1);
+        assert_eq!(page2_header.n_cells(), 0);
+    }
+
+    #[test]
+    fn load_btree_leaf_table_cell() {
+        let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let page1 = pager.get_page(1).unwrap();
+        let usable_size = load_usable_size(file.as_file()).unwrap();
+        let page1_header = BtreePageHeader::from_page(&page1);
+
+        assert_eq!(page1_header.n_cells(), 1);
+        let cell = BtreeLeafTableCell::get(&page1, 0).unwrap();
+
+        let (key, size, payload, _) = cell.parse(usable_size).unwrap();
+        assert_eq!(key, 1);
+        assert_eq!(size, payload.len() as i64);
+        assert_eq!(
+            payload,
+            &[
+                6, 23, 27, 27, 1, 63, 116, 97, 98, 108, 101, 101, 120, 97, 109, 112, 108, 101, 101,
+                120, 97, 109, 112, 108, 101, 2, 67, 82, 69, 65, 84, 69, 32, 84, 65, 66, 76, 69, 32,
+                101, 120, 97, 109, 112, 108, 101, 40, 99, 111, 108, 41
+            ]
+        );
+    }
+
+    #[test]
+    fn test_overflow_payload() {
+        let mut queries = vec!["CREATE TABLE example(col);"];
+        let mut buf = Vec::with_capacity(10000);
+        for i in 0..10000 {
+            buf.push((i % 256) as u8);
+        }
+        let query = format!(
+            "INSERT INTO example(col) VALUES (X'{}');",
+            buffer_to_hex(&buf)
+        );
+        queries.push(&query);
+        let file = create_sqlite_database(&queries);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let usable_size = load_usable_size(file.as_file()).unwrap();
+        let page_id = find_table_page_id(b"example", 1, &pager, usable_size).unwrap();
+        let page = pager.get_page(page_id).unwrap();
+        assert_eq!(BtreePageHeader::from_page(&page).n_cells(), 1);
+
+        let cell = BtreeLeafTableCell::get(&page, 0).unwrap();
+        let (_, _, mut payload, mut next_payload) = cell.parse(usable_size).unwrap();
+        let (header_size, c1) = unsafe_parse_varint(payload);
+        let (serial_type, c2) = unsafe_parse_varint(&payload[c1..]);
+        let payload_size = (serial_type - 12) / 2;
+        assert_eq!(payload_size, buf.len() as i64);
+        assert_eq!(header_size, (c1 + c2) as i64);
+        payload = &payload[header_size as usize..];
+        assert_ne!(payload.len(), buf.len());
+        assert_eq!(payload, &buf[..payload.len()]);
+        let mut cur = payload.len();
+        while cur < buf.len() {
+            assert!(next_payload.is_some());
+            let page = pager
+                .get_page(next_payload.as_ref().unwrap().page_id())
+                .unwrap();
+            (payload, next_payload) = next_payload.as_ref().unwrap().parse(&page).unwrap();
+            assert_eq!(payload, &buf[cur..cur + payload.len()]);
+            cur += payload.len();
         }
     }
 }

@@ -1,11 +1,15 @@
 mod btree;
+mod cursor;
 mod pager;
+#[cfg(test)]
+mod test_utils;
 mod utils;
 
 use thiserror::Error as ThisError;
 
 // TODO: This is to suppress the unused warning.
 pub use crate::btree::*;
+pub use crate::cursor::BtreeCursor;
 pub use crate::pager::*;
 use crate::utils::unsafe_parse_varint;
 
@@ -45,89 +49,6 @@ impl<'a> DatabaseHeader<'a> {
 
     pub fn usable_size(&self) -> u32 {
         self.pagesize() - self.reserved() as u32
-    }
-}
-
-pub struct BtreeCursor<'a> {
-    pager: &'a Pager,
-    current_page_id: PageId,
-    current_page: MemPage<'a>,
-    idx_cell: u16,
-    parent_pages: Vec<(PageId, u16)>,
-    last_error: Option<anyhow::Error>,
-}
-
-impl<'a> BtreeCursor<'a> {
-    pub fn new(root_page: PageId, pager: &'a Pager) -> Self {
-        Self {
-            pager,
-            current_page_id: root_page,
-            current_page: pager.get_page(root_page).unwrap(),
-            idx_cell: 0,
-            parent_pages: Vec::new(),
-            last_error: None,
-        }
-    }
-}
-
-impl<'a> Iterator for BtreeCursor<'a> {
-    type Item = BtreeLeafTableCell<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.current_page = match self.pager.get_page(self.current_page_id) {
-            Ok(page) => page,
-            Err(e) => {
-                self.last_error = Some(e);
-                return None;
-            }
-        };
-        let page_header = BtreePageHeader::from_page(&self.current_page);
-        if !page_header.is_leaf() && self.idx_cell == page_header.n_cells() {
-            self.idx_cell += 1;
-            self.parent_pages
-                .push((self.current_page_id, self.idx_cell));
-            self.current_page_id = page_header.right_page_id();
-            self.idx_cell = 0;
-            self.next()
-        } else if self.idx_cell >= page_header.n_cells() {
-            let (page_id, idx_cell) = match self.parent_pages.pop() {
-                Some((page_id, idx_cell)) => (page_id, idx_cell),
-                None => {
-                    return None;
-                }
-            };
-            self.current_page_id = page_id;
-            self.idx_cell = idx_cell + 1;
-            self.next()
-        } else {
-            if page_header.is_leaf() {
-                let cell = match BtreeLeafTableCell::get(&self.current_page, self.idx_cell) {
-                    Ok(cell) => cell,
-                    Err(e) => {
-                        self.last_error =
-                            Some(anyhow::anyhow!("get btree leaf table cell: {:?}", e));
-                        return None;
-                    }
-                };
-                self.idx_cell += 1;
-                Some(cell)
-            } else {
-                let cell = match BtreeInteriorTableCell::get(&self.current_page, self.idx_cell) {
-                    Ok(cell) => cell,
-                    Err(e) => {
-                        self.last_error =
-                            Some(anyhow::anyhow!("get btree interior table cell: {:?}", e));
-                        return None;
-                    }
-                };
-                let page_id = cell.page_id();
-                self.parent_pages
-                    .push((self.current_page_id, self.idx_cell));
-                self.current_page_id = page_id;
-                self.idx_cell = 0;
-                self.next()
-            }
-        }
     }
 }
 
@@ -353,17 +274,14 @@ pub fn find_table_page_id<'a>(
     pager: &'a Pager,
     usable_size: u32,
 ) -> std::result::Result<PageId, FindError> {
-    let mut cursor = BtreeCursor::new(page_id, pager);
+    let mut cursor = BtreeCursor::new(page_id, pager, usable_size);
     loop {
-        let cell = match cursor.next() {
-            Some(cell) => cell,
+        let payload = match cursor.next() {
+            Some(payload) => payload,
             None => break,
         };
-        let (_, payload, _) = cell
-            .parse(usable_size)
-            .map_err(|e| anyhow::anyhow!("parse btree leaf table cell: {:?}", e))?;
         // TODO: payload may be multi payload.
-        let schema = SQLiteSchema::from(payload)?;
+        let schema = SQLiteSchema::from(payload.buf())?;
         if schema._type == b"table" && schema.name == table {
             return Ok(schema.root_page_id()?);
         }
@@ -383,7 +301,7 @@ pub fn load_all_rows<'a>(
     let header = BtreePageHeader::from_page(page);
     for i in 0..header.n_cells() {
         let cell = BtreeLeafTableCell::get(page, i).unwrap();
-        let (_, payload, _) = cell
+        let (_, _, payload, _) = cell
             .parse(usable_size)
             .map_err(|e| anyhow::anyhow!("parse btree leaf table cell: {:?}", e))?;
         // TODO: This is not efficient.
@@ -398,13 +316,9 @@ pub fn load_all_rows<'a>(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::fs::File;
-    use std::os::unix::fs::FileExt;
-
-    use rusqlite::Connection;
-    use tempfile::NamedTempFile;
 
     use super::*;
+    use crate::test_utils::*;
 
     #[test]
     fn pagesize() {
@@ -430,34 +344,6 @@ mod tests {
         assert_eq!(header.pagesize(), 65536);
     }
 
-    fn create_sqlite_database(queries: &[&str]) -> NamedTempFile {
-        let file = NamedTempFile::new().unwrap();
-        let conn = Connection::open(file.path()).unwrap();
-        for query in queries {
-            conn.execute(&query, []).unwrap();
-        }
-        conn.close().unwrap();
-        file
-    }
-
-    fn create_pager(file: File) -> anyhow::Result<Pager> {
-        let mut header_buf = [0_u8; DATABASE_HEADER_SIZE];
-        file.read_exact_at(&mut header_buf, 0)?;
-        let header = DatabaseHeader::from(&header_buf);
-        Pager::new(file, header.pagesize() as usize)
-    }
-
-    fn load_usable_size(file: &File) -> anyhow::Result<u32> {
-        let mut header_buf = [0_u8; DATABASE_HEADER_SIZE];
-        file.read_exact_at(&mut header_buf, 0)?;
-        let header = DatabaseHeader::from(&header_buf);
-        Ok(header.usable_size())
-    }
-
-    fn buffer_to_hex(buf: &[u8]) -> String {
-        buf.iter().map(|v| format!("{:02X}", v)).collect::<String>()
-    }
-
     #[test]
     fn validate_database_header() {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
@@ -472,56 +358,13 @@ mod tests {
     }
 
     #[test]
-    fn validate_btree_page_header() {
-        let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
-        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-
-        let page1 = pager.get_page(1).unwrap();
-        let page1_header = BtreePageHeader::from(
-            page1.buffer[DATABASE_HEADER_SIZE..DATABASE_HEADER_SIZE + 12]
-                .try_into()
-                .unwrap(),
-        );
-        let page2 = pager.get_page(2).unwrap();
-        let page2_header = BtreePageHeader::from(page2.buffer[..12].try_into().unwrap());
-
-        assert_eq!(*page1_header.pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
-        assert_eq!(*page2_header.pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
-        assert_eq!(page1_header.n_cells(), 1);
-        assert_eq!(page2_header.n_cells(), 0);
-    }
-
-    #[test]
-    fn load_btree_leaf_table_cell() {
-        let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
-        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let page1 = pager.get_page(1).unwrap();
-        let usable_size = load_usable_size(file.as_file()).unwrap();
-        let page1_header = BtreePageHeader::from_page(&page1);
-
-        assert_eq!(page1_header.n_cells(), 1);
-        let cell = BtreeLeafTableCell::get(&page1, 0).unwrap();
-
-        let (key, payload, _) = cell.parse(usable_size).unwrap();
-        assert_eq!(key, 1);
-        assert_eq!(
-            payload,
-            &[
-                6, 23, 27, 27, 1, 63, 116, 97, 98, 108, 101, 101, 120, 97, 109, 112, 108, 101, 101,
-                120, 97, 109, 112, 108, 101, 2, 67, 82, 69, 65, 84, 69, 32, 84, 65, 66, 76, 69, 32,
-                101, 120, 97, 109, 112, 108, 101, 40, 99, 111, 108, 41
-            ]
-        );
-    }
-
-    #[test]
     fn parse_sqlite_schema_entry() {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let page1 = pager.get_page(1).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
         let cell = BtreeLeafTableCell::get(&page1, 0).unwrap();
-        let (_, payload, _) = cell.parse(usable_size).unwrap();
+        let (_, _, payload, _) = cell.parse(usable_size).unwrap();
         let schema = SQLiteSchema::from(payload).unwrap();
         assert_eq!(schema._type, b"table");
         assert_eq!(schema.name, b"example");
@@ -647,147 +490,5 @@ mod tests {
         );
         assert!(matches!(result[5][0], Record::Float64(_)));
         assert_eq!(result[5][0].to_f64().unwrap(), 0.5);
-    }
-
-    #[test]
-    fn test_overflow_payload() {
-        let mut queries = vec!["CREATE TABLE example(col);"];
-        let mut buf = Vec::with_capacity(10000);
-        for i in 0..10000 {
-            buf.push((i % 256) as u8);
-        }
-        let query = format!(
-            "INSERT INTO example(col) VALUES (X'{}');",
-            buffer_to_hex(&buf)
-        );
-        queries.push(&query);
-        let file = create_sqlite_database(&queries);
-        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = load_usable_size(file.as_file()).unwrap();
-        let page_id = find_table_page_id(b"example", 1, &pager, usable_size).unwrap();
-        let page = pager.get_page(page_id).unwrap();
-        assert_eq!(BtreePageHeader::from_page(&page).n_cells(), 1);
-
-        let cell = BtreeLeafTableCell::get(&page, 0).unwrap();
-        let (_, mut payload, mut next_payload) = cell.parse(usable_size).unwrap();
-        let (header_size, c1) = unsafe_parse_varint(payload);
-        let (serial_type, c2) = unsafe_parse_varint(&payload[c1..]);
-        let payload_size = (serial_type - 12) / 2;
-        assert_eq!(payload_size, buf.len() as i64);
-        assert_eq!(header_size, (c1 + c2) as i64);
-        payload = &payload[header_size as usize..];
-        assert_ne!(payload.len(), buf.len());
-        assert_eq!(payload, &buf[..payload.len()]);
-        let mut cur = payload.len();
-        while cur < buf.len() {
-            assert!(next_payload.is_some());
-            let page = pager
-                .get_page(next_payload.as_ref().unwrap().page_id())
-                .unwrap();
-            (payload, next_payload) = next_payload.as_ref().unwrap().parse(&page).unwrap();
-            assert_eq!(payload, &buf[cur..cur + payload.len()]);
-            cur += payload.len();
-        }
-    }
-
-    #[test]
-    fn test_btree_cursor_single_page() {
-        let file = create_sqlite_database(&[
-            "CREATE TABLE example(col);",
-            "INSERT INTO example(col) VALUES (0);",
-            "INSERT INTO example(col) VALUES (1);",
-            "INSERT INTO example(col) VALUES (2);",
-        ]);
-        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = load_usable_size(file.as_file()).unwrap();
-        let page_id = find_table_page_id(b"example", 1, &pager, usable_size).unwrap();
-
-        let mut cursor = BtreeCursor::new(page_id, &pager);
-
-        let cell = cursor.next();
-        assert!(cell.is_some());
-        let (_, payload, _) = cell.unwrap().parse(usable_size).unwrap();
-        let mut records = vec![Record::Null];
-        let size = parse_records(payload, &mut records).unwrap();
-        assert_eq!(size, 1);
-        assert_eq!(records[0].to_i64().unwrap(), 0);
-
-        let cell = cursor.next();
-        assert!(cell.is_some());
-        let (_, payload, _) = cell.unwrap().parse(usable_size).unwrap();
-        let mut records = vec![Record::Null];
-        let size = parse_records(payload, &mut records).unwrap();
-        assert_eq!(size, 1);
-        assert_eq!(records[0].to_i64().unwrap(), 1);
-
-        let cell = cursor.next();
-        assert!(cell.is_some());
-        let (_, payload, _) = cell.unwrap().parse(usable_size).unwrap();
-        let mut records = vec![Record::Null];
-        let size = parse_records(payload, &mut records).unwrap();
-        assert_eq!(size, 1);
-        assert_eq!(records[0].to_i64().unwrap(), 2);
-
-        assert!(cursor.next().is_none());
-    }
-
-    #[test]
-    fn test_btree_cursor_empty_records() {
-        let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
-        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = load_usable_size(file.as_file()).unwrap();
-        let page_id = find_table_page_id(b"example", 1, &pager, usable_size).unwrap();
-
-        let mut cursor = BtreeCursor::new(page_id, &pager);
-        assert!(cursor.next().is_none());
-    }
-
-    #[test]
-    fn test_btree_cursor_multiple_page() {
-        let buf = vec![0; 4000];
-        let mut inserts = Vec::new();
-        // 1000 byte blob entry occupies 1 page. These 2000 entries introduce
-        // 2 level interior pages and 1 leaf page level.
-        for i in 0..1000 {
-            inserts.push(format!(
-                "INSERT INTO example(col,buf) VALUES ({},X'{}');",
-                i,
-                buffer_to_hex(&buf)
-            ));
-        }
-        for i in 0..1000 {
-            inserts.push(format!("INSERT INTO example(col) VALUES ({});", i));
-        }
-        let mut queries = vec!["CREATE TABLE example(col,buf);"];
-        queries.extend(inserts.iter().map(|s| s.as_str()));
-        let file = create_sqlite_database(&queries);
-        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = load_usable_size(file.as_file()).unwrap();
-        let page_id = find_table_page_id(b"example", 1, &pager, usable_size).unwrap();
-
-        let mut cursor = BtreeCursor::new(page_id, &pager);
-
-        for i in 0..1000 {
-            let cell = cursor.next();
-            assert!(cell.is_some());
-            let (_, payload, _) = cell.unwrap().parse(usable_size).unwrap();
-            let mut records = vec![Record::Null, Record::Null];
-            let size = parse_records(payload, &mut records).unwrap();
-            assert_eq!(size, 2);
-            assert_eq!(records[0].to_i64().unwrap(), i);
-            assert_eq!(records[1].to_slice().unwrap().len(), 4000);
-        }
-        for i in 0..1000 {
-            let cell = cursor.next();
-            assert!(cell.is_some());
-            let (_, payload, _) = cell.unwrap().parse(usable_size).unwrap();
-            let mut records = vec![Record::Null, Record::Null];
-            let size = parse_records(payload, &mut records).unwrap();
-            assert_eq!(size, 2);
-            assert_eq!(records[0].to_i64().unwrap(), i);
-            assert!(records[1].is_null());
-        }
-
-        assert!(cursor.next().is_none());
     }
 }
