@@ -62,34 +62,10 @@ impl<'a> BtreePayload<'a> {
         let mut n_loaded = 0;
         let mut offset = offset;
         let mut buf = buf;
-        if offset < self.local_payload.len() as i64 {
-            let n = std::cmp::min(self.local_payload.len() - offset as usize, buf.len());
-            // SAFETY: n is less than buf.len() and local_payload.len() - offset.
-            // SAFETY: local_payload and buf do not overlap.
-            unsafe {
-                copy_nonoverlapping(
-                    self.local_payload[offset as usize..].as_ptr(),
-                    buf.as_mut_ptr(),
-                    n,
-                );
-            }
-            n_loaded += n;
-            offset += n as i64;
-            buf = &mut buf[n..];
-        }
-
-        let mut cur = self.local_payload.len() as i64;
+        let mut cur = 0;
+        let mut payload = self.local_payload;
         let mut overflow = self.overflow;
-        while buf.len() > 0 && offset < self.size {
-            let overflow_page = match overflow {
-                Some(overflow) => overflow,
-                None => bail!("overflow page is not found"),
-            };
-            let page = self.pager.get_page(overflow_page.page_id())?;
-            let (payload, next_overflow) = overflow_page
-                .parse(&page)
-                .map_err(|e| anyhow::anyhow!("parse overflow: {:?}", e))?;
-
+        loop {
             if offset < cur + payload.len() as i64 {
                 let local_offset = (offset - cur) as usize;
                 let n = std::cmp::min(payload.len() - local_offset, buf.len());
@@ -103,9 +79,19 @@ impl<'a> BtreePayload<'a> {
                 offset += n as i64;
                 buf = &mut buf[n..];
             }
-
             cur += payload.len() as i64;
-            overflow = next_overflow;
+            if buf.len() == 0 || cur >= self.size {
+                break;
+            }
+
+            let overflow_page = match overflow {
+                Some(overflow) => overflow,
+                None => bail!("overflow page is not found"),
+            };
+            let page = self.pager.get_page(overflow_page.page_id())?;
+            (payload, overflow) = overflow_page
+                .parse(&page)
+                .map_err(|e| anyhow::anyhow!("parse overflow: {:?}", e))?;
         }
 
         Ok(n_loaded)
