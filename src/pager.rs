@@ -7,6 +7,8 @@ use crate::DATABASE_HEADER_SIZE;
 
 pub type PageId = u32;
 
+pub const ROOT_PAGE_ID: PageId = 1;
+
 pub struct Pager {
     n_pages: u32,
     pagesize: usize,

@@ -2,15 +2,23 @@ mod btree;
 mod cursor;
 mod pager;
 #[cfg(test)]
-mod test_utils;
+pub mod test_utils;
 mod utils;
 
+use std::fs::File;
+use std::os::unix::fs::FileExt;
+use std::path::Path;
+
+use anyhow::bail;
 use thiserror::Error as ThisError;
 
 // TODO: This is to suppress the unused warning.
 pub use crate::btree::*;
-pub use crate::cursor::BtreeCursor;
-pub use crate::pager::*;
+use crate::cursor::BtreeCursor;
+use crate::pager::PageId;
+use crate::pager::Pager;
+use crate::pager::ROOT_PAGE_ID;
+use crate::utils::parse_varint;
 use crate::utils::unsafe_parse_varint;
 
 const SQLITE_MAX_PAGE_SIZE: u32 = 65536;
@@ -49,6 +57,142 @@ impl<'a> DatabaseHeader<'a> {
 
     pub fn usable_size(&self) -> u32 {
         self.pagesize() - self.reserved() as u32
+    }
+}
+
+fn parse_table_name(sql: &str) -> anyhow::Result<String> {
+    let mut chars = sql.chars();
+    let mut table_name = String::new();
+    while let Some(c) = chars.next() {
+        if c.is_whitespace() || c == ';' {
+            break;
+        }
+        if c.is_ascii_alphanumeric() {
+            table_name.push(c);
+        } else {
+            bail!("invalid table name: {}", sql);
+        }
+    }
+    Ok(table_name)
+}
+
+pub struct Connection {
+    pager: Pager,
+    usable_size: u32,
+}
+
+impl Connection {
+    pub fn open(filename: &Path) -> anyhow::Result<Self> {
+        let file = File::open(filename)?;
+        let mut buf = [0; DATABASE_HEADER_SIZE];
+        file.read_exact_at(&mut buf, 0)?;
+        let header = DatabaseHeader::from(&buf);
+        if !header.validate_magic_header() {
+            bail!("invalid magic header");
+        } else if !header.validate_pagesize() {
+            bail!("invalid pagesize");
+        } else if !header.validate_reserved() {
+            bail!("invalid reserved");
+        }
+        let pager = Pager::new(file, header.pagesize() as usize)?;
+        Ok(Self {
+            pager,
+            usable_size: header.usable_size(),
+        })
+    }
+
+    pub fn prepare(&self, sql: &str) -> anyhow::Result<Statement> {
+        const SELECT_PREFIX: &str = "SELECT * FROM ";
+        if sql.starts_with(SELECT_PREFIX) {
+            let table = parse_table_name(&sql[SELECT_PREFIX.len()..])?;
+            Ok(Statement { conn: self, table })
+        } else {
+            bail!("Unsupported SQL: {}", sql);
+        }
+    }
+}
+
+pub struct Statement<'a> {
+    conn: &'a Connection,
+    table: String,
+}
+
+impl<'a> Statement<'a> {
+    pub fn execute(&mut self) -> anyhow::Result<Rows<'a>> {
+        let table_page_id = find_table_page_id(
+            self.table.as_bytes(),
+            &self.conn.pager,
+            self.conn.usable_size,
+        )?;
+        Ok(Rows {
+            cursor: BtreeCursor::new(table_page_id, &self.conn.pager, self.conn.usable_size),
+            tmp_buf: Vec::new(),
+        })
+    }
+}
+
+pub struct Rows<'a> {
+    cursor: BtreeCursor<'a>,
+    tmp_buf: Vec<u8>,
+}
+
+impl<'a> Rows<'a> {
+    pub fn next(&mut self) -> anyhow::Result<Option<Row>> {
+        self.tmp_buf = Vec::new();
+        match self.cursor.next() {
+            Some(payload) => {
+                let payload = if payload.buf().len() as i64 == payload.size() {
+                    payload.buf()
+                } else {
+                    self.tmp_buf = vec![0; payload.size() as usize];
+                    let n = unsafe { payload.load(0, &mut self.tmp_buf) }?;
+                    if n != payload.size() as usize {
+                        bail!("payload does not have enough size");
+                    }
+                    &self.tmp_buf[..n]
+                };
+
+                let (header_size, consumed) =
+                    parse_varint(payload).ok_or_else(|| anyhow::anyhow!("invalid header size"))?;
+                let header_size: usize = header_size.try_into()?;
+                if header_size > payload.len() || header_size < consumed {
+                    bail!("invalid payload header size");
+                }
+                let mut headers = &payload[consumed..header_size];
+                let mut contents = &payload[header_size..];
+                let mut records = Vec::new();
+                while headers.len() > 0 {
+                    let (r, h, c) = parse_record(headers, contents);
+                    records.push(r);
+                    headers = h;
+                    contents = c;
+                }
+                assert!(headers.len() == 0);
+                if contents.len() > 0 {
+                    bail!("payload contents is too big");
+                }
+
+                Ok(Some(Row { records }))
+            }
+            None => self
+                .cursor
+                .last_error
+                .as_ref()
+                .map(|e| Err(anyhow::anyhow!("cursor error: {:?}", e)))
+                .unwrap_or(Ok(None)),
+        }
+    }
+}
+
+const STATIC_NULL_RECORD: Record = Record::Null;
+
+pub struct Row<'a> {
+    pub records: Vec<Record<'a>>,
+}
+
+impl<'a> Row<'a> {
+    pub fn get(&self, i: usize) -> &Record<'a> {
+        self.records.get(i).unwrap_or(&STATIC_NULL_RECORD)
     }
 }
 
@@ -270,20 +414,35 @@ pub enum FindError {
 
 pub fn find_table_page_id<'a>(
     table: &[u8],
-    page_id: PageId,
     pager: &'a Pager,
     usable_size: u32,
 ) -> std::result::Result<PageId, FindError> {
-    let mut cursor = BtreeCursor::new(page_id, pager, usable_size);
-    loop {
-        let payload = match cursor.next() {
-            Some(payload) => payload,
-            None => break,
-        };
-        // TODO: payload may be multi payload.
-        let schema = SQLiteSchema::from(payload.buf())?;
-        if schema._type == b"table" && schema.name == table {
-            return Ok(schema.root_page_id()?);
+    let mut cursor = BtreeCursor::new(ROOT_PAGE_ID, &pager, usable_size);
+    while let Some(payload) = cursor.next() {
+        if payload.size() == payload.buf().len() as i64 {
+            let schema = SQLiteSchema::from(payload.buf())?;
+            if schema._type == b"table" && schema.name == table {
+                return Ok(schema.root_page_id()?);
+            }
+        } else if payload.size() <= 10 * 4096 {
+            let mut buf = Vec::with_capacity(payload.size() as usize);
+            unsafe {
+                buf.set_len(payload.size() as usize);
+            }
+            // SAFETY: buf is not from MemPage.
+            let n = unsafe { payload.load(0, &mut buf) }?;
+            if n != payload.size() as usize {
+                Err(anyhow::anyhow!("failed to load payload: {}", n))?;
+            }
+            let schema = SQLiteSchema::from(payload.buf())?;
+            if schema._type == b"table" && schema.name == table {
+                return Ok(schema.root_page_id()?);
+            }
+        } else {
+            Err(anyhow::anyhow!(
+                "invalid schema payload size: {}",
+                payload.size()
+            ))?;
         }
     }
     cursor
@@ -292,33 +451,36 @@ pub fn find_table_page_id<'a>(
         .unwrap_or(Err(FindError::NotFound))
 }
 
-pub fn load_all_rows<'a>(
-    page: &MemPage<'a>,
-    columns: usize,
-    usable_size: u32,
-) -> anyhow::Result<Vec<Vec<Record<'a>>>> {
-    let mut result = Vec::new();
-    let header = BtreePageHeader::from_page(page);
-    for i in 0..header.n_cells() {
-        let cell = BtreeLeafTableCell::get(page, i).unwrap();
-        let (_, _, payload, _) = cell
-            .parse(usable_size)
-            .map_err(|e| anyhow::anyhow!("parse btree leaf table cell: {:?}", e))?;
-        // TODO: This is not efficient.
-        let mut records = vec![Record::Null; columns];
-        // TODO: payload may be multi payload.
-        let _ = parse_records(payload, &mut records).unwrap();
-        result.push(records);
-    }
-    Ok(result)
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
 
     use super::*;
+    use crate::btree::BtreeLeafTableCell;
+    use crate::btree::BtreePageHeader;
+    use crate::pager::MemPage;
     use crate::test_utils::*;
+
+    fn load_all_rows<'a>(
+        page: &MemPage<'a>,
+        columns: usize,
+        usable_size: u32,
+    ) -> anyhow::Result<Vec<Vec<Record<'a>>>> {
+        let mut result = Vec::new();
+        let header = BtreePageHeader::from_page(page);
+        for i in 0..header.n_cells() {
+            let cell = BtreeLeafTableCell::get(page, i).unwrap();
+            let (_, _, payload, _) = cell
+                .parse(usable_size)
+                .map_err(|e| anyhow::anyhow!("parse btree leaf table cell: {:?}", e))?;
+            // TODO: This is not efficient.
+            let mut records = vec![Record::Null; columns];
+            // TODO: payload may be multi payload.
+            let _ = parse_records(payload, &mut records).unwrap();
+            result.push(records);
+        }
+        Ok(result)
+    }
 
     #[test]
     fn pagesize() {
@@ -383,7 +545,7 @@ mod tests {
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
 
-        let page_id = find_table_page_id(b"example2", 1, &pager, usable_size).unwrap();
+        let page_id = find_table_page_id(b"example2", &pager, usable_size).unwrap();
 
         assert_eq!(page_id, 3);
     }
@@ -402,7 +564,7 @@ mod tests {
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
 
-        let page_id = find_table_page_id(b"example99", 1, &pager, usable_size).unwrap();
+        let page_id = find_table_page_id(b"example99", &pager, usable_size).unwrap();
 
         assert_eq!(page_id, 104);
     }
@@ -417,7 +579,7 @@ mod tests {
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
 
-        let result = find_table_page_id(b"invalid", 1, &pager, usable_size);
+        let result = find_table_page_id(b"invalid", &pager, usable_size);
 
         assert!(result.is_err());
     }
@@ -444,7 +606,7 @@ mod tests {
         let file = create_sqlite_database(&queries);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
-        let page_id = find_table_page_id(b"example4", 1, &pager, usable_size).unwrap();
+        let page_id = find_table_page_id(b"example4", &pager, usable_size).unwrap();
 
         let page = pager.get_page(page_id).unwrap();
         let result: Vec<Vec<Record>> = load_all_rows(&page, 4, usable_size).unwrap();
