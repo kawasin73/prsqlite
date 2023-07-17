@@ -12,7 +12,7 @@ use crate::pager::Pager;
 
 pub struct BtreePayload<'a> {
     pager: &'a Pager,
-    size: i64,
+    size: u32,
     local_payload: &'a [u8],
     overflow: Option<OverflowPage>,
 }
@@ -35,7 +35,7 @@ impl<'a> BtreePayload<'a> {
     }
 
     /// The size of the payload.
-    pub fn size(&self) -> i64 {
+    pub fn size(&self) -> u32 {
         self.size
     }
 
@@ -55,7 +55,7 @@ impl<'a> BtreePayload<'a> {
     /// # Safety
     ///
     /// The buffer must not be any [MemPage] buffer.
-    pub unsafe fn load(&self, offset: i64, buf: &mut [u8]) -> anyhow::Result<usize> {
+    pub unsafe fn load(&self, offset: u32, buf: &mut [u8]) -> anyhow::Result<usize> {
         if offset >= self.size {
             bail!("offset exceeds payload size");
         }
@@ -66,7 +66,7 @@ impl<'a> BtreePayload<'a> {
         let mut payload = self.local_payload;
         let mut overflow = self.overflow;
         loop {
-            if offset < cur + payload.len() as i64 {
+            if offset < cur + payload.len() as u32 {
                 let local_offset = (offset - cur) as usize;
                 let n = std::cmp::min(payload.len() - local_offset, buf.len());
 
@@ -76,10 +76,10 @@ impl<'a> BtreePayload<'a> {
                     copy_nonoverlapping(payload[local_offset..].as_ptr(), buf.as_mut_ptr(), n);
                 }
                 n_loaded += n;
-                offset += n as i64;
+                offset += n as u32;
                 buf = &mut buf[n..];
             }
-            cur += payload.len() as i64;
+            cur += payload.len() as u32;
             if buf.len() == 0 || cur >= self.size {
                 break;
             }

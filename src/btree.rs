@@ -97,7 +97,7 @@ fn get_cell_buffer<'page>(
 #[derive(Debug, Clone, Copy)]
 pub struct OverflowPage {
     page_id: NonZeroU32,
-    remaining_size: i64,
+    remaining_size: u32,
 }
 
 impl OverflowPage {
@@ -116,14 +116,13 @@ impl OverflowPage {
             }
         } else {
             let payload = &page.buffer[4..];
-            let remaining_size = self.remaining_size - payload.len() as i64;
-            if remaining_size > 0 {
+            if self.remaining_size > payload.len() as u32 {
                 Ok((
                     payload,
                     Some(Self {
                         // Safe because it already checks next_page_id != 0.
                         page_id: unsafe { NonZeroU32::new_unchecked(next_page_id) },
-                        remaining_size,
+                        remaining_size: self.remaining_size - payload.len() as u32,
                     }),
                 ))
             } else {
@@ -147,10 +146,12 @@ impl<'page> BtreeLeafTableCell<'page> {
     pub fn parse(
         &self,
         usable_size: u32,
-    ) -> ParseResult<(i64, i64, &'page [u8], Option<OverflowPage>)> {
-        let usable_size = usable_size as i64;
+    ) -> ParseResult<(i64, u32, &'page [u8], Option<OverflowPage>)> {
         let (payload_length, consumed1) =
             parse_varint(self.buf).map_or(Err("parse payload length varint"), |v| Ok(v))?;
+        let payload_length: u32 = payload_length
+            .try_into()
+            .map_err(|_| "payload length too large")?;
         let (key, consumed2) =
             parse_varint(&self.buf[consumed1..]).map_or(Err("parse key varint"), |v| Ok(v))?;
         let header_length = consumed1 + consumed2;
@@ -297,7 +298,7 @@ mod tests {
 
         let (key, size, payload, _) = cell.parse(usable_size).unwrap();
         assert_eq!(key, 1);
-        assert_eq!(size, payload.len() as i64);
+        assert_eq!(size as usize, payload.len());
         assert_eq!(
             payload,
             &[

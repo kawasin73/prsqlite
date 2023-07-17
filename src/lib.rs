@@ -141,7 +141,7 @@ impl<'a> Rows<'a> {
         self.tmp_buf = Vec::new();
         match self.cursor.next() {
             Some(payload) => {
-                let payload = if payload.buf().len() as i64 == payload.size() {
+                let payload = if payload.buf().len() as u32 == payload.size() {
                     payload.buf()
                 } else {
                     self.tmp_buf = vec![0; payload.size() as usize];
@@ -419,7 +419,7 @@ pub fn find_table_page_id<'a>(
 ) -> std::result::Result<PageId, FindError> {
     let mut cursor = BtreeCursor::new(ROOT_PAGE_ID, &pager, usable_size);
     while let Some(payload) = cursor.next() {
-        if payload.size() == payload.buf().len() as i64 {
+        if payload.size() == payload.buf().len() as u32 {
             let schema = SQLiteSchema::from(payload.buf())?;
             if schema._type == b"table" && schema.name == table {
                 return Ok(schema.root_page_id()?);
