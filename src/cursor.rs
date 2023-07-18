@@ -12,42 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::Range;
 use std::ptr::copy_nonoverlapping;
 
 use anyhow::bail;
 
+use crate::btree::parse_btree_leaf_table_cell;
 use crate::btree::BtreeInteriorTableCell;
-use crate::btree::BtreeLeafTableCell;
 use crate::btree::BtreePageHeader;
 use crate::btree::OverflowPage;
 use crate::pager::MemPage;
+use crate::pager::PageBuffer;
 use crate::pager::PageId;
 use crate::pager::Pager;
 
-pub struct BtreePayload<'a> {
-    pager: &'a Pager,
+pub struct BtreePayload<'a, 'pager> {
+    pager: &'pager Pager,
+    local_payload_buffer: PageBuffer<'a>,
+    local_payload_range: Range<usize>,
     size: u32,
-    local_payload: &'a [u8],
     overflow: Option<OverflowPage>,
 }
 
-impl<'a> BtreePayload<'a> {
-    fn new(
-        pager: &'a Pager,
-        usable_size: u32,
-        cell: BtreeLeafTableCell<'a>,
-    ) -> anyhow::Result<Self> {
-        let (_, size, local_payload, overflow) = cell
-            .parse(usable_size)
-            .map_err(|e| anyhow::anyhow!("parse tree leaf table cell: {:?}", e))?;
-        Ok(Self {
-            pager,
-            size,
-            local_payload,
-            overflow,
-        })
-    }
-
+impl<'a, 'pager> BtreePayload<'a, 'pager> {
     /// The size of the payload.
     pub fn size(&self) -> u32 {
         self.size
@@ -56,8 +43,8 @@ impl<'a> BtreePayload<'a> {
     /// The local payload.
     ///
     /// This may not be the entire payload if there is overflow page.
-    pub fn buf(&self) -> &'a [u8] {
-        self.local_payload
+    pub fn buf(&self) -> &[u8] {
+        &self.local_payload_buffer[self.local_payload_range.clone()]
     }
 
     /// Load the payload into the buffer.
@@ -76,10 +63,32 @@ impl<'a> BtreePayload<'a> {
         let mut n_loaded = 0;
         let mut offset = offset;
         let mut buf = buf;
-        let mut cur = 0;
-        let mut payload = self.local_payload;
+        let payload = &self.local_payload_buffer[self.local_payload_range.clone()];
+
+        if offset < payload.len() as u32 {
+            let local_offset = offset as usize;
+            let n = std::cmp::min(payload.len() - local_offset, buf.len());
+
+            // SAFETY: n is less than buf.len() and payload.len().
+            // SAFETY: payload and buf do not overlap.
+            unsafe {
+                copy_nonoverlapping(payload[local_offset..].as_ptr(), buf.as_mut_ptr(), n);
+            }
+            n_loaded += n;
+            offset += n as u32;
+            buf = &mut buf[n..];
+        }
+
+        let mut cur = payload.len() as u32;
         let mut overflow = self.overflow;
-        loop {
+        while buf.len() > 0 && cur < self.size {
+            let overflow_page =
+                overflow.ok_or_else(|| anyhow::anyhow!("overflow page is not found"))?;
+            let page = self.pager.get_page(overflow_page.page_id())?;
+            let buffer = page.buffer();
+            let (payload, next_overflow) = overflow_page
+                .parse(&buffer)
+                .map_err(|e| anyhow::anyhow!("parse overflow: {:?}", e))?;
             if offset < cur + payload.len() as u32 {
                 let local_offset = (offset - cur) as usize;
                 let n = std::cmp::min(payload.len() - local_offset, buf.len());
@@ -94,113 +103,99 @@ impl<'a> BtreePayload<'a> {
                 buf = &mut buf[n..];
             }
             cur += payload.len() as u32;
-            if buf.len() == 0 || cur >= self.size {
-                break;
-            }
-
-            let overflow_page = match overflow {
-                Some(overflow) => overflow,
-                None => bail!("overflow page is not found"),
-            };
-            let page = self.pager.get_page(overflow_page.page_id())?;
-            (payload, overflow) = overflow_page
-                .parse(&page)
-                .map_err(|e| anyhow::anyhow!("parse overflow: {:?}", e))?;
+            overflow = next_overflow;
         }
 
         Ok(n_loaded)
     }
 }
 
-pub struct BtreeCursor<'a> {
-    pager: &'a Pager,
+pub struct BtreeCursor<'pager> {
+    pager: &'pager Pager,
     usable_size: u32,
     current_page_id: PageId,
-    current_page: MemPage<'a>,
+    current_page: MemPage,
     idx_cell: u16,
     parent_pages: Vec<(PageId, u16)>,
-    pub last_error: Option<anyhow::Error>,
 }
 
-impl<'a> BtreeCursor<'a> {
-    pub fn new(root_page: PageId, pager: &'a Pager, usable_size: u32) -> Self {
-        Self {
+impl<'pager> BtreeCursor<'pager> {
+    pub fn new(root_page: PageId, pager: &'pager Pager, usable_size: u32) -> anyhow::Result<Self> {
+        Ok(Self {
             pager,
             usable_size,
             current_page_id: root_page,
-            current_page: pager.get_page(root_page).unwrap(),
+            current_page: pager.get_page(root_page)?,
             idx_cell: 0,
             parent_pages: Vec::new(),
-            last_error: None,
+        })
+    }
+
+    pub fn next<'a>(&'a mut self) -> anyhow::Result<Option<BtreePayload<'a, 'pager>>> {
+        loop {
+            let buffer = self.current_page.buffer();
+            let page_header = BtreePageHeader::from_page(&self.current_page, &buffer);
+            if !page_header.is_leaf() && self.idx_cell == page_header.n_cells() {
+                self.idx_cell += 1;
+                let page_id = page_header.right_page_id();
+                drop(buffer);
+                self.move_to_child(page_id)?;
+            } else if self.idx_cell >= page_header.n_cells() {
+                drop(buffer);
+                if !self.back_to_parent()? {
+                    return Ok(None);
+                }
+            } else {
+                if page_header.is_leaf() {
+                    let (_, size, payload_range, overflow) = parse_btree_leaf_table_cell(
+                        &self.current_page,
+                        &buffer,
+                        self.idx_cell,
+                        self.usable_size,
+                    )
+                    .map_err(|e| anyhow::anyhow!("parse tree leaf table cell: {:?}", e))?;
+                    self.idx_cell += 1;
+                    return Ok(Some(BtreePayload {
+                        pager: self.pager,
+                        local_payload_buffer: self.current_page.buffer(),
+                        local_payload_range: payload_range,
+                        size,
+                        overflow,
+                    }));
+                } else {
+                    let cell =
+                        BtreeInteriorTableCell::get(&self.current_page, &buffer, self.idx_cell)
+                            .map_err(|e| {
+                                anyhow::anyhow!("get btree interior table cell: {:?}", e)
+                            })?;
+                    let page_id = cell.page_id();
+                    drop(buffer);
+                    self.move_to_child(page_id)?;
+                }
+            }
         }
     }
-}
 
-impl<'a> Iterator for BtreeCursor<'a> {
-    type Item = BtreePayload<'a>;
+    fn move_to_child(&mut self, page_id: PageId) -> anyhow::Result<()> {
+        self.parent_pages
+            .push((self.current_page_id, self.idx_cell));
+        self.current_page_id = page_id;
+        self.current_page = self.pager.get_page(self.current_page_id)?;
+        self.idx_cell = 0;
+        Ok(())
+    }
 
-    fn next(&mut self) -> Option<Self::Item> {
-        self.current_page = match self.pager.get_page(self.current_page_id) {
-            Ok(page) => page,
-            Err(e) => {
-                self.last_error = Some(e);
-                return None;
+    fn back_to_parent(&mut self) -> anyhow::Result<bool> {
+        let (page_id, idx_cell) = match self.parent_pages.pop() {
+            Some((page_id, idx_cell)) => (page_id, idx_cell),
+            None => {
+                return Ok(false);
             }
         };
-        let page_header = BtreePageHeader::from_page(&self.current_page);
-        if !page_header.is_leaf() && self.idx_cell == page_header.n_cells() {
-            self.idx_cell += 1;
-            self.parent_pages
-                .push((self.current_page_id, self.idx_cell));
-            self.current_page_id = page_header.right_page_id();
-            self.idx_cell = 0;
-            self.next()
-        } else if self.idx_cell >= page_header.n_cells() {
-            let (page_id, idx_cell) = match self.parent_pages.pop() {
-                Some((page_id, idx_cell)) => (page_id, idx_cell),
-                None => {
-                    return None;
-                }
-            };
-            self.current_page_id = page_id;
-            self.idx_cell = idx_cell + 1;
-            self.next()
-        } else {
-            if page_header.is_leaf() {
-                let cell = match BtreeLeafTableCell::get(&self.current_page, self.idx_cell) {
-                    Ok(cell) => cell,
-                    Err(e) => {
-                        self.last_error =
-                            Some(anyhow::anyhow!("get btree leaf table cell: {:?}", e));
-                        return None;
-                    }
-                };
-                let payload = match BtreePayload::new(self.pager, self.usable_size, cell) {
-                    Ok(payload) => payload,
-                    Err(e) => {
-                        self.last_error = Some(e);
-                        return None;
-                    }
-                };
-                self.idx_cell += 1;
-                Some(payload)
-            } else {
-                let cell = match BtreeInteriorTableCell::get(&self.current_page, self.idx_cell) {
-                    Ok(cell) => cell,
-                    Err(e) => {
-                        self.last_error =
-                            Some(anyhow::anyhow!("get btree interior table cell: {:?}", e));
-                        return None;
-                    }
-                };
-                let page_id = cell.page_id();
-                self.parent_pages
-                    .push((self.current_page_id, self.idx_cell));
-                self.current_page_id = page_id;
-                self.idx_cell = 0;
-                self.next()
-            }
-        }
+        self.current_page_id = page_id;
+        self.current_page = self.pager.get_page(self.current_page_id)?;
+        self.idx_cell = idx_cell + 1;
+        Ok(true)
     }
 }
 
@@ -225,30 +220,36 @@ mod tests {
         let usable_size = load_usable_size(file.as_file()).unwrap();
         let page_id = find_table_page_id(b"example", &pager, usable_size).unwrap();
 
-        let mut cursor = BtreeCursor::new(page_id, &pager, usable_size);
+        let mut cursor = BtreeCursor::new(page_id, &pager, usable_size).unwrap();
 
-        let payload = cursor.next();
+        let payload = cursor.next().unwrap();
         assert!(payload.is_some());
+        let payload = payload.unwrap();
         let mut records = vec![Record::Null];
-        let size = parse_records(payload.unwrap().buf(), &mut records).unwrap();
+        let size = parse_records(payload.buf(), &mut records).unwrap();
         assert_eq!(size, 1);
         assert_eq!(records[0].to_i64().unwrap(), 0);
+        drop(payload);
 
-        let payload = cursor.next();
+        let payload = cursor.next().unwrap();
         assert!(payload.is_some());
+        let payload = payload.unwrap();
         let mut records = vec![Record::Null];
-        let size = parse_records(payload.unwrap().buf(), &mut records).unwrap();
+        let size = parse_records(payload.buf(), &mut records).unwrap();
         assert_eq!(size, 1);
         assert_eq!(records[0].to_i64().unwrap(), 1);
+        drop(payload);
 
-        let payload = cursor.next();
+        let payload = cursor.next().unwrap();
         assert!(payload.is_some());
+        let payload = payload.unwrap();
         let mut records = vec![Record::Null];
-        let size = parse_records(payload.unwrap().buf(), &mut records).unwrap();
+        let size = parse_records(payload.buf(), &mut records).unwrap();
         assert_eq!(size, 1);
         assert_eq!(records[0].to_i64().unwrap(), 2);
+        drop(payload);
 
-        assert!(cursor.next().is_none());
+        assert!(cursor.next().unwrap().is_none());
     }
 
     #[test]
@@ -258,8 +259,8 @@ mod tests {
         let usable_size = load_usable_size(file.as_file()).unwrap();
         let page_id = find_table_page_id(b"example", &pager, usable_size).unwrap();
 
-        let mut cursor = BtreeCursor::new(page_id, &pager, usable_size);
-        assert!(cursor.next().is_none());
+        let mut cursor = BtreeCursor::new(page_id, &pager, usable_size).unwrap();
+        assert!(cursor.next().unwrap().is_none());
     }
 
     #[test]
@@ -285,28 +286,30 @@ mod tests {
         let usable_size = load_usable_size(file.as_file()).unwrap();
         let page_id = find_table_page_id(b"example", &pager, usable_size).unwrap();
 
-        let mut cursor = BtreeCursor::new(page_id, &pager, usable_size);
+        let mut cursor = BtreeCursor::new(page_id, &pager, usable_size).unwrap();
 
         for i in 0..1000 {
-            let payload = cursor.next();
+            let payload = cursor.next().unwrap();
             assert!(payload.is_some());
+            let payload = payload.unwrap();
             let mut records = vec![Record::Null, Record::Null];
-            let size = parse_records(payload.unwrap().buf(), &mut records).unwrap();
+            let size = parse_records(payload.buf(), &mut records).unwrap();
             assert_eq!(size, 2);
             assert_eq!(records[0].to_i64().unwrap(), i);
             assert_eq!(records[1].to_slice().unwrap().len(), 4000);
         }
         for i in 0..1000 {
-            let payload = cursor.next();
+            let payload = cursor.next().unwrap();
             assert!(payload.is_some());
+            let payload = payload.unwrap();
             let mut records = vec![Record::Null, Record::Null];
-            let size = parse_records(payload.unwrap().buf(), &mut records).unwrap();
+            let size = parse_records(payload.buf(), &mut records).unwrap();
             assert_eq!(size, 2);
             assert_eq!(records[0].to_i64().unwrap(), i);
             assert!(records[1].is_null());
         }
 
-        assert!(cursor.next().is_none());
+        assert!(cursor.next().unwrap().is_none());
     }
 
     #[test]
@@ -326,9 +329,9 @@ mod tests {
         let usable_size = load_usable_size(file.as_file()).unwrap();
         let page_id = find_table_page_id(b"example", &pager, usable_size).unwrap();
 
-        let mut cursor = BtreeCursor::new(page_id, &pager, usable_size);
+        let mut cursor = BtreeCursor::new(page_id, &pager, usable_size).unwrap();
 
-        let payload = cursor.next();
+        let payload = cursor.next().unwrap();
         assert!(payload.is_some());
         let payload = payload.unwrap();
 

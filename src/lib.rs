@@ -24,6 +24,7 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 
 use anyhow::bail;
+use cursor::BtreePayload;
 use thiserror::Error as ThisError;
 
 // TODO: This is to suppress the unused warning.
@@ -126,87 +127,86 @@ impl Connection {
     }
 }
 
-pub struct Statement<'a> {
-    conn: &'a Connection,
+pub struct Statement<'conn> {
+    conn: &'conn Connection,
     table: String,
 }
 
-impl<'a> Statement<'a> {
-    pub fn execute(&mut self) -> anyhow::Result<Rows<'a>> {
+impl<'conn> Statement<'conn> {
+    pub fn execute(&mut self) -> anyhow::Result<Rows<'conn>> {
         let table_page_id = find_table_page_id(
             self.table.as_bytes(),
             &self.conn.pager,
             self.conn.usable_size,
         )?;
         Ok(Rows {
-            cursor: BtreeCursor::new(table_page_id, &self.conn.pager, self.conn.usable_size),
-            tmp_buf: Vec::new(),
+            cursor: BtreeCursor::new(table_page_id, &self.conn.pager, self.conn.usable_size)?,
         })
     }
 }
 
-pub struct Rows<'a> {
-    cursor: BtreeCursor<'a>,
-    tmp_buf: Vec<u8>,
+pub struct Rows<'conn> {
+    cursor: BtreeCursor<'conn>,
 }
 
-impl<'a> Rows<'a> {
-    pub fn next(&mut self) -> anyhow::Result<Option<Row>> {
-        self.tmp_buf = Vec::new();
-        match self.cursor.next() {
-            Some(payload) => {
-                let payload = if payload.buf().len() as u32 == payload.size() {
-                    payload.buf()
-                } else {
-                    self.tmp_buf = vec![0; payload.size() as usize];
-                    let n = unsafe { payload.load(0, &mut self.tmp_buf) }?;
-                    if n != payload.size() as usize {
-                        bail!("payload does not have enough size");
-                    }
-                    &self.tmp_buf[..n]
-                };
-
-                let (header_size, consumed) =
-                    parse_varint(payload).ok_or_else(|| anyhow::anyhow!("invalid header size"))?;
-                let header_size: usize = header_size.try_into()?;
-                if header_size > payload.len() || header_size < consumed {
-                    bail!("invalid payload header size");
-                }
-                let mut headers = &payload[consumed..header_size];
-                let mut contents = &payload[header_size..];
-                let mut records = Vec::new();
-                while headers.len() > 0 {
-                    let (r, h, c) = parse_record(headers, contents);
-                    records.push(r);
-                    headers = h;
-                    contents = c;
-                }
-                assert!(headers.len() == 0);
-                if contents.len() > 0 {
-                    bail!("payload contents is too big");
-                }
-
-                Ok(Some(Row { records }))
-            }
-            None => self
-                .cursor
-                .last_error
-                .as_ref()
-                .map(|e| Err(anyhow::anyhow!("cursor error: {:?}", e)))
-                .unwrap_or(Ok(None)),
-        }
+impl<'conn> Rows<'conn> {
+    pub fn next<'a>(&'a mut self) -> anyhow::Result<Option<Row<'a, 'conn>>> {
+        Ok(self.cursor.next()?.map(|payload| Row {
+            payload,
+            tmp_buf: Vec::new(),
+        }))
     }
 }
 
 const STATIC_NULL_RECORD: Record = Record::Null;
 
-pub struct Row<'a> {
-    pub records: Vec<Record<'a>>,
+pub struct Row<'a, 'conn> {
+    pub payload: BtreePayload<'a, 'conn>,
+    tmp_buf: Vec<u8>,
 }
 
-impl<'a> Row<'a> {
+impl<'a, 'conn> Row<'a, 'conn> {
+    pub fn parse<'b>(&'b mut self) -> anyhow::Result<Records<'b>> {
+        let payload = if self.payload.buf().len() as u32 == self.payload.size() {
+            self.payload.buf()
+        } else {
+            self.tmp_buf = vec![0; self.payload.size() as usize];
+            let n = unsafe { self.payload.load(0, &mut self.tmp_buf) }?;
+            if n != self.payload.size() as usize {
+                bail!("payload does not have enough size");
+            }
+            &self.tmp_buf[..n]
+        };
+
+        let (header_size, consumed) =
+            parse_varint(payload).ok_or_else(|| anyhow::anyhow!("invalid header size"))?;
+        let header_size: usize = header_size.try_into()?;
+        if header_size > payload.len() || header_size < consumed {
+            bail!("invalid payload header size");
+        }
+        let mut headers = &payload[consumed..header_size];
+        let mut contents = &payload[header_size..];
+        let mut records = Vec::new();
+        while headers.len() > 0 {
+            let (r, h, c) = parse_record(headers, contents);
+            records.push(r);
+            headers = h;
+            contents = c;
+        }
+        assert!(headers.len() == 0);
+        if contents.len() > 0 {
+            bail!("payload contents is too big");
+        }
+
+        Ok(Records(records))
+    }
+}
+
+pub struct Records<'a>(Vec<Record<'a>>);
+
+impl<'a> Records<'a> {
     pub fn get(&self, i: usize) -> &Record<'a> {
-        self.records.get(i).unwrap_or(&STATIC_NULL_RECORD)
+        self.0.get(i).unwrap_or(&STATIC_NULL_RECORD)
     }
 }
 
@@ -431,8 +431,8 @@ pub fn find_table_page_id<'a>(
     pager: &'a Pager,
     usable_size: u32,
 ) -> std::result::Result<PageId, FindError> {
-    let mut cursor = BtreeCursor::new(ROOT_PAGE_ID, &pager, usable_size);
-    while let Some(payload) = cursor.next() {
+    let mut cursor = BtreeCursor::new(ROOT_PAGE_ID, &pager, usable_size)?;
+    while let Some(payload) = cursor.next()? {
         if payload.size() == payload.buf().len() as u32 {
             let schema = SQLiteSchema::from(payload.buf())?;
             if schema._type == b"table" && schema.name == table {
@@ -459,10 +459,7 @@ pub fn find_table_page_id<'a>(
             ))?;
         }
     }
-    cursor
-        .last_error
-        .map(|e| Err(e.into()))
-        .unwrap_or(Err(FindError::NotFound))
+    Err(FindError::NotFound)
 }
 
 #[cfg(test)]
@@ -470,23 +467,25 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::btree::BtreeLeafTableCell;
+    use crate::btree::parse_btree_leaf_table_cell;
     use crate::btree::BtreePageHeader;
     use crate::pager::MemPage;
+    use crate::pager::PageBuffer;
     use crate::test_utils::*;
 
     fn load_all_rows<'a>(
-        page: &MemPage<'a>,
+        page: &MemPage,
+        buffer: &'a PageBuffer<'a>,
         columns: usize,
         usable_size: u32,
     ) -> anyhow::Result<Vec<Vec<Record<'a>>>> {
         let mut result = Vec::new();
-        let header = BtreePageHeader::from_page(page);
+        let header = BtreePageHeader::from_page(page, buffer);
         for i in 0..header.n_cells() {
-            let cell = BtreeLeafTableCell::get(page, i).unwrap();
-            let (_, _, payload, _) = cell
-                .parse(usable_size)
-                .map_err(|e| anyhow::anyhow!("parse btree leaf table cell: {:?}", e))?;
+            let (_, _, payload_range, _) =
+                parse_btree_leaf_table_cell(&page, &buffer, i, usable_size)
+                    .map_err(|e| anyhow::anyhow!("parse btree leaf table cell: {:?}", e))?;
+            let payload = &buffer[payload_range];
             // TODO: This is not efficient.
             let mut records = vec![Record::Null; columns];
             // TODO: payload may be multi payload.
@@ -537,10 +536,12 @@ mod tests {
     fn parse_sqlite_schema_entry() {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let page1 = pager.get_page(1).unwrap();
+        let page = pager.get_page(1).unwrap();
+        let buffer = page.buffer();
         let usable_size = load_usable_size(file.as_file()).unwrap();
-        let cell = BtreeLeafTableCell::get(&page1, 0).unwrap();
-        let (_, _, payload, _) = cell.parse(usable_size).unwrap();
+        let (_, _, payload_range, _) =
+            parse_btree_leaf_table_cell(&page, &buffer, 0, usable_size).unwrap();
+        let payload = &buffer[payload_range];
         let schema = SQLiteSchema::from(payload).unwrap();
         assert_eq!(schema._type, b"table");
         assert_eq!(schema.name, b"example");
@@ -623,7 +624,8 @@ mod tests {
         let page_id = find_table_page_id(b"example4", &pager, usable_size).unwrap();
 
         let page = pager.get_page(page_id).unwrap();
-        let result: Vec<Vec<Record>> = load_all_rows(&page, 4, usable_size).unwrap();
+        let buffer = page.buffer();
+        let result: Vec<Vec<Record>> = load_all_rows(&page, &buffer, 4, usable_size).unwrap();
 
         assert!(matches!(result[0][0], Record::Null));
         assert!(matches!(result[0][1], Record::One));

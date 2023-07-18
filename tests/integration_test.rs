@@ -45,24 +45,30 @@ fn test_select_all_from_table() {
     let mut stmt = conn.prepare("SELECT * FROM example3;").unwrap();
     let mut rows = stmt.execute().unwrap();
 
-    let row = rows.next().unwrap().unwrap();
-    assert!(matches!(row.get(0), Record::Null));
-    assert!(matches!(row.get(1), Record::One));
-    assert!(matches!(row.get(2), Record::Zero));
-    assert!(matches!(row.get(3), Record::Null));
+    let mut row = rows.next().unwrap().unwrap();
+    let records = row.parse().unwrap();
+    assert!(matches!(records.get(0), Record::Null));
+    assert!(matches!(records.get(1), Record::One));
+    assert!(matches!(records.get(2), Record::Zero));
+    assert!(matches!(records.get(3), Record::Null));
+    drop(row);
 
-    let row = rows.next().unwrap().unwrap();
-    assert_eq!(row.get(0).to_i64().unwrap(), 10000);
-    assert!(matches!(row.get(1), Record::Null));
-    assert!(matches!(row.get(2), Record::Text(b"hello")));
-    assert!(matches!(row.get(3), Record::Null));
+    let mut row = rows.next().unwrap().unwrap();
+    let records = row.parse().unwrap();
+    assert_eq!(records.get(0).to_i64().unwrap(), 10000);
+    assert!(matches!(records.get(1), Record::Null));
+    assert!(matches!(records.get(2), Record::Text(b"hello")));
+    assert!(matches!(records.get(3), Record::Null));
+    drop(row);
 
-    let row = rows.next().unwrap().unwrap();
-    assert!(matches!(row.get(0), Record::Blob(_)));
-    assert_eq!(row.get(0).to_slice().unwrap(), &[0xFF; 10000]);
-    assert_eq!(row.get(1).to_i64().unwrap(), 20000);
-    assert!(matches!(row.get(2), Record::Null));
-    assert!(matches!(row.get(3), Record::Null));
+    let mut row = rows.next().unwrap().unwrap();
+    let records = row.parse().unwrap();
+    assert!(matches!(records.get(0), Record::Blob(_)));
+    assert_eq!(records.get(0).to_slice().unwrap(), &[0xFF; 10000]);
+    assert_eq!(records.get(1).to_i64().unwrap(), 20000);
+    assert!(matches!(records.get(2), Record::Null));
+    assert!(matches!(records.get(3), Record::Null));
+    drop(row);
 
     assert!(rows.next().unwrap().is_none());
 }
