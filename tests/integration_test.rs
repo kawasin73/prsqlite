@@ -42,7 +42,7 @@ fn test_select_all_from_table() {
     queries.push(&blob_query);
     let file = create_sqlite_database(&queries);
 
-    let conn = Connection::open(file.path()).unwrap();
+    let mut conn = Connection::open(file.path()).unwrap();
     let mut stmt = conn.prepare("SELECT * FROM example3;").unwrap();
     let mut rows = stmt.execute().unwrap();
 
@@ -58,7 +58,7 @@ fn test_select_all_from_table() {
     let columns = row.parse().unwrap();
     assert_eq!(columns.get(0), &Value::Integer(10000));
     assert_eq!(columns.get(1), &Value::Null);
-    assert_eq!(columns.get(2), &Value::Text(b"hello"));
+    assert_eq!(columns.get(2), &Value::Text("hello"));
     assert_eq!(columns.get(3), &Value::Null);
     drop(row);
 

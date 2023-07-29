@@ -67,6 +67,12 @@ impl Pager {
             }
         }
     }
+
+    // TODO: this is currently only used for testing.
+    #[allow(dead_code)]
+    pub fn num_pages(&self) -> u32 {
+        self.n_pages
+    }
 }
 
 pub struct MemPage {

@@ -20,6 +20,7 @@ mod record;
 pub mod test_utils;
 mod utils;
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
@@ -95,6 +96,7 @@ fn parse_table_name(sql: &str) -> anyhow::Result<String> {
 pub struct Connection {
     pager: Pager,
     usable_size: u32,
+    schema: Option<Schema>,
 }
 
 impl Connection {
@@ -114,10 +116,11 @@ impl Connection {
         Ok(Self {
             pager,
             usable_size: header.usable_size(),
+            schema: None,
         })
     }
 
-    pub fn prepare(&self, sql: &str) -> anyhow::Result<Statement> {
+    pub fn prepare(&mut self, sql: &str) -> anyhow::Result<Statement> {
         const SELECT_PREFIX: &str = "SELECT * FROM ";
         if let Some(sql) = sql.strip_prefix(SELECT_PREFIX) {
             let table = parse_table_name(sql)?;
@@ -128,18 +131,81 @@ impl Connection {
     }
 }
 
+struct Schema {
+    tables: HashMap<String, Table>,
+}
+
+impl Schema {
+    fn generate(pager: &Pager, usable_size: u32) -> anyhow::Result<Schema> {
+        let mut rows = Rows {
+            cursor: BtreeCursor::new(ROOT_PAGE_ID, pager, usable_size)?,
+        };
+        let mut tables = HashMap::new();
+        while let Some(mut row) = rows.next()? {
+            let columns = row.parse()?;
+            match columns.get(0) {
+                &Value::Text("table") => {
+                    if columns.get(1) != columns.get(2) {
+                        bail!(
+                            "table name does not match: name={:?}, table_name={:?}",
+                            columns.get(1),
+                            columns.get(2)
+                        );
+                    }
+                    if let &Value::Text(table) = columns.get(1) {
+                        if let &Value::Integer(page_id) = columns.get(3) {
+                            tables.insert(
+                                table.to_string(),
+                                Table {
+                                    root_page_id: page_id.try_into()?,
+                                },
+                            );
+                        }
+                    }
+                }
+                &Value::Text("index") => {
+                    // TODO: support index
+                }
+                &Value::Text("view") => {
+                    // TODO: support view
+                }
+                &Value::Text("trigger") => {
+                    // TODO: support trigger
+                }
+                type_ => {
+                    bail!("unsupported type: {:?}", type_);
+                }
+            }
+        }
+        Ok(Self { tables })
+    }
+
+    fn get_table_page_id(&self, table: &str) -> Option<PageId> {
+        self.tables.get(table).map(|table| table.root_page_id)
+    }
+}
+
+struct Table {
+    root_page_id: PageId,
+}
+
+// TODO: make Connection non mut and support multiple statements.
 pub struct Statement<'conn> {
-    conn: &'conn Connection,
+    conn: &'conn mut Connection,
     table: String,
 }
 
 impl<'conn> Statement<'conn> {
-    pub fn execute(&mut self) -> anyhow::Result<Rows<'conn>> {
-        let table_page_id = find_table_page_id(
-            self.table.as_bytes(),
-            &self.conn.pager,
-            self.conn.usable_size,
-        )?;
+    pub fn execute(&'conn mut self) -> anyhow::Result<Rows<'conn>> {
+        if self.conn.schema.is_none() {
+            self.conn.schema = Some(Schema::generate(&self.conn.pager, self.conn.usable_size)?);
+        }
+        let schema = self.conn.schema.as_ref().unwrap();
+        let table_page_id = if let Some(table_page_id) = schema.get_table_page_id(&self.table) {
+            table_page_id
+        } else {
+            bail!("table not found: {}", self.table);
+        };
         Ok(Rows {
             cursor: BtreeCursor::new(table_page_id, &self.conn.pager, self.conn.usable_size)?,
         })
@@ -210,23 +276,6 @@ impl<'a> Columns<'a> {
     }
 }
 
-pub fn find_table_page_id(table: &[u8], pager: &Pager, usable_size: u32) -> anyhow::Result<PageId> {
-    let mut rows = Rows {
-        cursor: BtreeCursor::new(ROOT_PAGE_ID, pager, usable_size)?,
-    };
-    while let Some(mut row) = rows.next()? {
-        let columns = row.parse()?;
-        if columns.get(0) == &Value::Text(b"table") && columns.get(1) == &Value::Text(table) {
-            if let &Value::Integer(page_id) = columns.get(3) {
-                return Ok(page_id.try_into()?);
-            } else {
-                bail!("invalid root page id");
-            }
-        }
-    }
-    bail!("table not found");
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -272,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn find_table_page_id_success() {
+    fn get_table_page_id_success() {
         let file = create_sqlite_database(&[
             "CREATE TABLE example(col);",
             "CREATE TABLE example2(col1, col2);",
@@ -281,13 +330,14 @@ mod tests {
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
 
-        let page_id = find_table_page_id(b"example2", &pager, usable_size).unwrap();
+        let schema = Schema::generate(&pager, usable_size).unwrap();
+        let page_id = schema.get_table_page_id("example2").unwrap();
 
         assert_eq!(page_id, 3);
     }
 
     #[test]
-    fn find_table_page_id_interior_success() {
+    fn get_table_page_id_interior_success() {
         let mut queries = Vec::with_capacity(100);
         for i in 0..100 {
             queries.push(format!(
@@ -297,15 +347,17 @@ mod tests {
         let file =
             create_sqlite_database(&queries.iter().map(|q| q.as_str()).collect::<Vec<&str>>());
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        assert!(pager.num_pages() > 1);
         let usable_size = load_usable_size(file.as_file()).unwrap();
 
-        let page_id = find_table_page_id(b"example99", &pager, usable_size).unwrap();
+        let schema = Schema::generate(&pager, usable_size).unwrap();
+        let page_id = schema.get_table_page_id("example99").unwrap();
 
         assert_eq!(page_id, 104);
     }
 
     #[test]
-    fn find_table_not_found() {
+    fn get_table_page_id_not_found() {
         let file = create_sqlite_database(&[
             "CREATE TABLE example(col);",
             "CREATE TABLE example2(col1, col2);",
@@ -314,8 +366,8 @@ mod tests {
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
 
-        let result = find_table_page_id(b"invalid", &pager, usable_size);
+        let schema = Schema::generate(&pager, usable_size).unwrap();
 
-        assert!(result.is_err());
+        assert!(schema.get_table_page_id("invalid").is_none());
     }
 }

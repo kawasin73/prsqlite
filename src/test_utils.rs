@@ -18,8 +18,10 @@ use std::os::unix::fs::FileExt;
 use rusqlite::Connection;
 use tempfile::NamedTempFile;
 
+use crate::pager::PageId;
 use crate::pager::Pager;
 use crate::DatabaseHeader;
+use crate::Schema;
 use crate::DATABASE_HEADER_SIZE;
 
 pub fn create_sqlite_database(queries: &[&str]) -> NamedTempFile {
@@ -48,4 +50,9 @@ pub fn load_usable_size(file: &File) -> anyhow::Result<u32> {
 
 pub fn buffer_to_hex(buf: &[u8]) -> String {
     buf.iter().map(|v| format!("{v:02X}")).collect::<String>()
+}
+
+pub fn find_table_page_id(table: &str, pager: &Pager, usable_size: u32) -> PageId {
+    let schema = Schema::generate(pager, usable_size).unwrap();
+    schema.get_table_page_id(table).unwrap()
 }

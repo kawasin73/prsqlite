@@ -24,7 +24,7 @@ pub enum Value<'a> {
     Integer(i64),
     Float(f64),
     Blob(&'a [u8]),
-    Text(&'a [u8]),
+    Text(&'a str),
 }
 
 pub struct SerialType(u32);
@@ -84,7 +84,7 @@ impl SerialType {
                 if n & 1 == 0 {
                     Value::Blob(buf)
                 } else {
-                    Value::Text(buf)
+                    Value::Text(std::str::from_utf8(buf).context("parse text")?)
                 }
             }
         };
@@ -138,7 +138,6 @@ mod tests {
     use super::*;
 
     use crate::cursor::BtreeCursor;
-    use crate::find_table_page_id;
     use crate::test_utils::*;
 
     fn parse_record<'a>(payload: &BtreePayload, buf: &'a mut Vec<u8>) -> Vec<Value<'a>> {
@@ -170,7 +169,7 @@ mod tests {
         let file = create_sqlite_database(&queries);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
-        let table_page_id = find_table_page_id(b"example", &pager, usable_size).unwrap();
+        let table_page_id = find_table_page_id("example", &pager, usable_size);
         let mut buf = Vec::new();
 
         let mut cursor = BtreeCursor::new(table_page_id, &pager, usable_size).unwrap();
@@ -211,7 +210,7 @@ mod tests {
         let result = parse_record(&payload, &mut buf);
         assert_eq!(result[0], Value::Integer(0));
         assert_eq!(result[1], Value::Integer(1));
-        assert_eq!(result[2], Value::Text(b"hello"));
+        assert_eq!(result[2], Value::Text("hello"));
         assert_eq!(
             result[3],
             Value::Blob(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef])

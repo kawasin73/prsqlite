@@ -198,7 +198,6 @@ impl<'pager> BtreeCursor<'pager> {
 mod tests {
     use super::*;
 
-    use crate::find_table_page_id;
     use crate::test_utils::*;
 
     #[test]
@@ -211,7 +210,7 @@ mod tests {
         ]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
-        let page_id = find_table_page_id(b"example", &pager, usable_size).unwrap();
+        let page_id = find_table_page_id("example", &pager, usable_size);
 
         let mut cursor = BtreeCursor::new(page_id, &pager, usable_size).unwrap();
 
@@ -244,7 +243,7 @@ mod tests {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
-        let page_id = find_table_page_id(b"example", &pager, usable_size).unwrap();
+        let page_id = find_table_page_id("example", &pager, usable_size);
 
         let mut cursor = BtreeCursor::new(page_id, &pager, usable_size).unwrap();
         assert!(cursor.next().unwrap().is_none());
@@ -274,7 +273,7 @@ mod tests {
         let file = create_sqlite_database(&queries);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
-        let page_id = find_table_page_id(b"example", &pager, usable_size).unwrap();
+        let page_id = find_table_page_id("example", &pager, usable_size);
 
         let mut cursor = BtreeCursor::new(page_id, &pager, usable_size).unwrap();
 
@@ -311,7 +310,7 @@ mod tests {
         let file = create_sqlite_database(&queries);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
-        let page_id = find_table_page_id(b"example", &pager, usable_size).unwrap();
+        let page_id = find_table_page_id("example", &pager, usable_size);
 
         let mut cursor = BtreeCursor::new(page_id, &pager, usable_size).unwrap();
 

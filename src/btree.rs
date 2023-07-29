@@ -269,7 +269,6 @@ impl<'page> BtreeInteriorTableCell<'page> {
 mod tests {
     use super::*;
 
-    use crate::find_table_page_id;
     use crate::test_utils::*;
     use crate::utils::unsafe_parse_varint;
     use crate::DATABASE_HEADER_SIZE;
@@ -372,7 +371,7 @@ mod tests {
         let file = create_sqlite_database(&queries);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
-        let page_id = find_table_page_id(b"example", &pager, usable_size).unwrap();
+        let page_id = find_table_page_id("example", &pager, usable_size);
         let page = pager.get_page(page_id).unwrap();
         let buffer = page.buffer();
         assert_eq!(BtreePageHeader::from_page(&page, &buffer).n_cells(), 1);
