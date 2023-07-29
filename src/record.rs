@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Display;
+
 use anyhow::{bail, Context};
 
 use crate::cursor::BtreePayload;
@@ -25,6 +27,18 @@ pub enum Value<'a> {
     Float(f64),
     Blob(&'a [u8]),
     Text(&'a str),
+}
+
+impl<'a> Display for Value<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Null => Ok(()),
+            Value::Integer(i) => write!(f, "{i}"),
+            Value::Float(d) => write!(f, "{d}"),
+            Value::Blob(b) => write!(f, "{b:?}"),
+            Value::Text(t) => write!(f, "{t}"),
+        }
+    }
 }
 
 pub struct SerialType(u32);

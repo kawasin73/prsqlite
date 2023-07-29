@@ -13,6 +13,14 @@ include = [
     "Cargo.toml",
 ]
 
+[lib]
+name = "prsqlite"
+path = "src/lib.rs"
+
+[[bin]]
+name = "prsqlite"
+path = "src/main.rs"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]

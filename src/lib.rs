@@ -84,7 +84,7 @@ fn parse_table_name(sql: &str) -> anyhow::Result<String> {
         if c.is_whitespace() || c == ';' {
             break;
         }
-        if c.is_ascii_alphanumeric() {
+        if c.is_ascii_alphanumeric() || c == '_' {
             table_name.push(c);
         } else {
             bail!("invalid table name: {}", sql);
@@ -181,7 +181,11 @@ impl Schema {
     }
 
     fn get_table_page_id(&self, table: &str) -> Option<PageId> {
-        self.tables.get(table).map(|table| table.root_page_id)
+        if table == "sqlite_schema" {
+            Some(ROOT_PAGE_ID)
+        } else {
+            self.tables.get(table).map(|table| table.root_page_id)
+        }
     }
 }
 
@@ -273,6 +277,14 @@ pub struct Columns<'a>(Vec<Value<'a>>);
 impl<'a> Columns<'a> {
     pub fn get(&self, i: usize) -> &Value<'a> {
         self.0.get(i).unwrap_or(&STATIC_NULL_VALUE)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 
