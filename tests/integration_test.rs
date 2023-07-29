@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use prsqlite::{Connection, Record};
+use prsqlite::Connection;
+use prsqlite::Value;
 use tempfile::NamedTempFile;
 
 fn create_sqlite_database(queries: &[&str]) -> NamedTempFile {
@@ -46,28 +47,27 @@ fn test_select_all_from_table() {
     let mut rows = stmt.execute().unwrap();
 
     let mut row = rows.next().unwrap().unwrap();
-    let records = row.parse().unwrap();
-    assert!(matches!(records.get(0), Record::Null));
-    assert!(matches!(records.get(1), Record::One));
-    assert!(matches!(records.get(2), Record::Zero));
-    assert!(matches!(records.get(3), Record::Null));
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.get(0), &Value::Null);
+    assert_eq!(columns.get(1), &Value::Integer(1));
+    assert_eq!(columns.get(2), &Value::Integer(0));
+    assert_eq!(columns.get(3), &Value::Null);
     drop(row);
 
     let mut row = rows.next().unwrap().unwrap();
-    let records = row.parse().unwrap();
-    assert_eq!(records.get(0).to_i64().unwrap(), 10000);
-    assert!(matches!(records.get(1), Record::Null));
-    assert!(matches!(records.get(2), Record::Text(b"hello")));
-    assert!(matches!(records.get(3), Record::Null));
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.get(0), &Value::Integer(10000));
+    assert_eq!(columns.get(1), &Value::Null);
+    assert_eq!(columns.get(2), &Value::Text(b"hello"));
+    assert_eq!(columns.get(3), &Value::Null);
     drop(row);
 
     let mut row = rows.next().unwrap().unwrap();
-    let records = row.parse().unwrap();
-    assert!(matches!(records.get(0), Record::Blob(_)));
-    assert_eq!(records.get(0).to_slice().unwrap(), &[0xFF; 10000]);
-    assert_eq!(records.get(1).to_i64().unwrap(), 20000);
-    assert!(matches!(records.get(2), Record::Null));
-    assert!(matches!(records.get(3), Record::Null));
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.get(0), &Value::Blob(&[0xFF; 10000]));
+    assert_eq!(columns.get(1), &Value::Integer(20000));
+    assert_eq!(columns.get(2), &Value::Null);
+    assert_eq!(columns.get(3), &Value::Null);
     drop(row);
 
     assert!(rows.next().unwrap().is_none());

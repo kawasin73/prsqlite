@@ -204,9 +204,7 @@ mod tests {
     use super::*;
 
     use crate::find_table_page_id;
-    use crate::parse_records;
     use crate::test_utils::*;
-    use crate::Record;
 
     #[test]
     fn test_btree_cursor_single_page() {
@@ -225,28 +223,22 @@ mod tests {
         let payload = cursor.next().unwrap();
         assert!(payload.is_some());
         let payload = payload.unwrap();
-        let mut records = vec![Record::Null];
-        let size = parse_records(payload.buf(), &mut records).unwrap();
-        assert_eq!(size, 1);
-        assert_eq!(records[0].to_i64().unwrap(), 0);
+        assert_eq!(payload.buf(), &[2, 8]);
+        assert_eq!(payload.size(), payload.buf().len() as u32);
         drop(payload);
 
         let payload = cursor.next().unwrap();
         assert!(payload.is_some());
         let payload = payload.unwrap();
-        let mut records = vec![Record::Null];
-        let size = parse_records(payload.buf(), &mut records).unwrap();
-        assert_eq!(size, 1);
-        assert_eq!(records[0].to_i64().unwrap(), 1);
+        assert_eq!(payload.buf(), &[2, 9]);
+        assert_eq!(payload.size(), payload.buf().len() as u32);
         drop(payload);
 
         let payload = cursor.next().unwrap();
         assert!(payload.is_some());
         let payload = payload.unwrap();
-        let mut records = vec![Record::Null];
-        let size = parse_records(payload.buf(), &mut records).unwrap();
-        assert_eq!(size, 1);
-        assert_eq!(records[0].to_i64().unwrap(), 2);
+        assert_eq!(payload.buf(), &[2, 1, 2]);
+        assert_eq!(payload.size(), payload.buf().len() as u32);
         drop(payload);
 
         assert!(cursor.next().unwrap().is_none());
@@ -277,7 +269,10 @@ mod tests {
             ));
         }
         for i in 0..1000 {
-            inserts.push(format!("INSERT INTO example(col) VALUES ({});", i));
+            inserts.push(format!(
+                "INSERT INTO example(col) VALUES ({});",
+                i % 100 + 2
+            ));
         }
         let mut queries = vec!["CREATE TABLE example(col,buf);"];
         queries.extend(inserts.iter().map(|s| s.as_str()));
@@ -288,25 +283,19 @@ mod tests {
 
         let mut cursor = BtreeCursor::new(page_id, &pager, usable_size).unwrap();
 
-        for i in 0..1000 {
+        for _ in 0..1000 {
             let payload = cursor.next().unwrap();
             assert!(payload.is_some());
             let payload = payload.unwrap();
-            let mut records = vec![Record::Null, Record::Null];
-            let size = parse_records(payload.buf(), &mut records).unwrap();
-            assert_eq!(size, 2);
-            assert_eq!(records[0].to_i64().unwrap(), i);
-            assert_eq!(records[1].to_slice().unwrap().len(), 4000);
+            assert!(payload.size() > 4000);
+            assert_eq!(payload.size(), payload.buf().len() as u32);
         }
         for i in 0..1000 {
             let payload = cursor.next().unwrap();
             assert!(payload.is_some());
             let payload = payload.unwrap();
-            let mut records = vec![Record::Null, Record::Null];
-            let size = parse_records(payload.buf(), &mut records).unwrap();
-            assert_eq!(size, 2);
-            assert_eq!(records[0].to_i64().unwrap(), i);
-            assert!(records[1].is_null());
+            assert_eq!(payload.buf(), &[3, 1, 0, ((i % 100) + 2) as u8]);
+            assert_eq!(payload.size(), payload.buf().len() as u32);
         }
 
         assert!(cursor.next().unwrap().is_none());
