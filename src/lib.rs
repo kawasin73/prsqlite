@@ -55,7 +55,7 @@ impl<'a> DatabaseHeader<'a> {
 
     pub fn validate_pagesize(&self) -> bool {
         let pagesize = self.pagesize();
-        pagesize >= 512 && pagesize <= SQLITE_MAX_PAGE_SIZE && (pagesize - 1) & pagesize == 0
+        (512..=SQLITE_MAX_PAGE_SIZE).contains(&pagesize) && (pagesize - 1) & pagesize == 0
     }
 
     pub fn validate_reserved(&self) -> bool {
@@ -77,9 +77,9 @@ impl<'a> DatabaseHeader<'a> {
 }
 
 fn parse_table_name(sql: &str) -> anyhow::Result<String> {
-    let mut chars = sql.chars();
+    let chars = sql.chars();
     let mut table_name = String::new();
-    while let Some(c) = chars.next() {
+    for c in chars {
         if c.is_whitespace() || c == ';' {
             break;
         }
@@ -119,8 +119,8 @@ impl Connection {
 
     pub fn prepare(&self, sql: &str) -> anyhow::Result<Statement> {
         const SELECT_PREFIX: &str = "SELECT * FROM ";
-        if sql.starts_with(SELECT_PREFIX) {
-            let table = parse_table_name(&sql[SELECT_PREFIX.len()..])?;
+        if let Some(sql) = sql.strip_prefix(SELECT_PREFIX) {
+            let table = parse_table_name(sql)?;
             Ok(Statement { conn: self, table })
         } else {
             bail!("Unsupported SQL: {}", sql);
@@ -167,10 +167,10 @@ pub struct Row<'a, 'conn> {
 }
 
 impl<'a, 'conn> Row<'a, 'conn> {
-    pub fn parse<'b>(&'b mut self) -> anyhow::Result<Columns<'b>> {
+    pub fn parse(&mut self) -> anyhow::Result<Columns> {
         let headers = parse_record_header(&self.payload)?;
 
-        if headers.len() == 0 {
+        if headers.is_empty() {
             return Ok(Columns(Vec::new()));
         }
 
@@ -210,11 +210,7 @@ impl<'a> Columns<'a> {
     }
 }
 
-pub fn find_table_page_id<'a>(
-    table: &[u8],
-    pager: &'a Pager,
-    usable_size: u32,
-) -> anyhow::Result<PageId> {
+pub fn find_table_page_id(table: &[u8], pager: &Pager, usable_size: u32) -> anyhow::Result<PageId> {
     let mut rows = Rows {
         cursor: BtreeCursor::new(ROOT_PAGE_ID, pager, usable_size)?,
     };
@@ -295,8 +291,7 @@ mod tests {
         let mut queries = Vec::with_capacity(100);
         for i in 0..100 {
             queries.push(format!(
-                "CREATE TABLE example{}(col1,col2,col3,col4,col5,col6,col7,col8,col9,col10);",
-                i
+                "CREATE TABLE example{i}(col1,col2,col3,col4,col5,col6,col7,col8,col9,col10);"
             ));
         }
         let file =

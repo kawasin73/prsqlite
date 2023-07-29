@@ -81,7 +81,7 @@ impl<'a, 'pager> BtreePayload<'a, 'pager> {
 
         let mut cur = payload.len() as u32;
         let mut overflow = self.overflow;
-        while buf.len() > 0 && cur < self.size {
+        while !buf.is_empty() && cur < self.size {
             let overflow_page =
                 overflow.ok_or_else(|| anyhow::anyhow!("overflow page is not found"))?;
             let page = self.pager.get_page(overflow_page.page_id())?;
@@ -145,33 +145,28 @@ impl<'pager> BtreeCursor<'pager> {
                 if !self.back_to_parent()? {
                     return Ok(None);
                 }
+            } else if page_header.is_leaf() {
+                let (_, size, payload_range, overflow) = parse_btree_leaf_table_cell(
+                    &self.current_page,
+                    &buffer,
+                    self.idx_cell,
+                    self.usable_size,
+                )
+                .map_err(|e| anyhow::anyhow!("parse tree leaf table cell: {:?}", e))?;
+                self.idx_cell += 1;
+                return Ok(Some(BtreePayload {
+                    pager: self.pager,
+                    local_payload_buffer: self.current_page.buffer(),
+                    local_payload_range: payload_range,
+                    size,
+                    overflow,
+                }));
             } else {
-                if page_header.is_leaf() {
-                    let (_, size, payload_range, overflow) = parse_btree_leaf_table_cell(
-                        &self.current_page,
-                        &buffer,
-                        self.idx_cell,
-                        self.usable_size,
-                    )
-                    .map_err(|e| anyhow::anyhow!("parse tree leaf table cell: {:?}", e))?;
-                    self.idx_cell += 1;
-                    return Ok(Some(BtreePayload {
-                        pager: self.pager,
-                        local_payload_buffer: self.current_page.buffer(),
-                        local_payload_range: payload_range,
-                        size,
-                        overflow,
-                    }));
-                } else {
-                    let cell =
-                        BtreeInteriorTableCell::get(&self.current_page, &buffer, self.idx_cell)
-                            .map_err(|e| {
-                                anyhow::anyhow!("get btree interior table cell: {:?}", e)
-                            })?;
-                    let page_id = cell.page_id();
-                    drop(buffer);
-                    self.move_to_child(page_id)?;
-                }
+                let cell = BtreeInteriorTableCell::get(&self.current_page, &buffer, self.idx_cell)
+                    .map_err(|e| anyhow::anyhow!("get btree interior table cell: {:?}", e))?;
+                let page_id = cell.page_id();
+                drop(buffer);
+                self.move_to_child(page_id)?;
             }
         }
     }

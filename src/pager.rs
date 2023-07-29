@@ -75,7 +75,7 @@ pub struct MemPage {
 }
 
 impl MemPage {
-    pub fn buffer<'a>(&'a self) -> PageBuffer<'a> {
+    pub fn buffer(&self) -> PageBuffer {
         self.page.borrow()
     }
 }

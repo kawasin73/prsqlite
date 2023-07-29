@@ -20,7 +20,7 @@ fn create_sqlite_database(queries: &[&str]) -> NamedTempFile {
     let file = NamedTempFile::new().unwrap();
     let conn = rusqlite::Connection::open(file.path()).unwrap();
     for query in queries {
-        conn.execute(&query, []).unwrap();
+        conn.execute(query, []).unwrap();
     }
     conn.close().unwrap();
     file

@@ -30,9 +30,7 @@ fn valid_varint_buffer(buf: &[u8]) -> bool {
     let mut count = 0;
     for b in buf {
         count += 1;
-        if count == 9 {
-            return true;
-        } else if b & VARINT_FLAG_MASK == 0 {
+        if count == 9 || b & VARINT_FLAG_MASK == 0 {
             return true;
         }
     }
@@ -45,6 +43,7 @@ pub fn unsafe_parse_varint(buf: &[u8]) -> (i64, usize) {
         (buf[0] as i64, 1)
     } else {
         let mut v = (buf[0] & VARINT_VAR_MASK) as i64;
+        #[allow(clippy::needless_range_loop)]
         for i in 1..8 {
             v <<= 7;
             v |= (buf[i] & VARINT_VAR_MASK) as i64;
@@ -95,8 +94,8 @@ mod tests {
             (&[255, 255, 255, 255, 255, 255, 255, 255, 255], -1),
         ] {
             let (result, consumed) = unsafe_parse_varint(buf);
-            assert_eq!(consumed, buf.len(), "buf: {:?}", buf);
-            assert_eq!(result, v, "buf: {:?}", buf);
+            assert_eq!(consumed, buf.len(), "buf: {buf:?}");
+            assert_eq!(result, v, "buf: {buf:?}");
 
             // valid as varint
             assert!(parse_varint(buf).is_some());

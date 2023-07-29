@@ -33,7 +33,7 @@ impl SerialType {
     pub fn content_size(&self) -> u32 {
         // TODO: use pre-calculated table for first 128 serial types.
         match self.0 {
-            n if n <= 4 => n as u32,
+            n if n <= 4 => n,
             5 => 6,
             6 | 7 => 8,
             8 | 9 => 0,
@@ -142,7 +142,7 @@ mod tests {
     use crate::test_utils::*;
 
     fn parse_record<'a>(payload: &BtreePayload, buf: &'a mut Vec<u8>) -> Vec<Value<'a>> {
-        let headers = parse_record_header(&payload).unwrap();
+        let headers = parse_record_header(payload).unwrap();
         assert_eq!(headers.len(), 4);
         *buf = vec![0; payload.size() as usize];
         let _ = unsafe { payload.load(0, buf).unwrap() };
@@ -157,12 +157,12 @@ mod tests {
         let tables = ["CREATE TABLE example(col1, col2, col3, col4);"];
         const ONE: i64 = 1;
         let inserts = [
-            format!("INSERT INTO example(col1, col2, col4) VALUES (null, true, false);"),
+            "INSERT INTO example(col1, col2, col4) VALUES (null, true, false);".to_string(),
             format!("INSERT INTO example(col1, col2, col3, col4) VALUES ({}, {}, {}, {});", i8::MAX, i8::MIN, i16::MAX, i16::MIN),
             format!("INSERT INTO example(col1, col2, col3, col4) VALUES ({}, {}, {}, {});", (ONE << 23)-1, -(ONE<<23), i32::MAX, i32::MIN),
             format!("INSERT INTO example(col1, col2, col3, col4) VALUES ({}, {}, {}, {});", (ONE << 47)-1, -(ONE<<47), i64::MAX, i64::MIN),
-            format!("INSERT INTO example(col1, col2, col3, col4) VALUES (0, 1, \"hello\", X'0123456789abcdef');"),
-            format!("INSERT INTO example(col1) VALUES (0.5);"),
+            "INSERT INTO example(col1, col2, col3, col4) VALUES (0, 1, \"hello\", X'0123456789abcdef');".to_string(),
+            "INSERT INTO example(col1) VALUES (0.5);".to_string(),
         ];
         let mut queries = Vec::new();
         queries.extend(tables);

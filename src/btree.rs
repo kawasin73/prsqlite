@@ -184,13 +184,13 @@ pub fn parse_btree_leaf_table_cell(
 ) -> ParseResult<(i64, u32, Range<usize>, Option<OverflowPage>)> {
     let cell_offset =
         get_cell_offset(page, buffer, cell_idx, BTREE_PAGE_LEAF_HEADER_SIZE as u8).unwrap();
-    let (payload_length, consumed1) = parse_varint(&buffer[cell_offset..])
-        .map_or(Err("parse payload length varint"), |v| Ok(v))?;
+    let (payload_length, consumed1) =
+        parse_varint(&buffer[cell_offset..]).map_or(Err("parse payload length varint"), Ok)?;
     let payload_length: u32 = payload_length
         .try_into()
         .map_err(|_| "payload length too large")?;
-    let (key, consumed2) = parse_varint(&buffer[cell_offset + consumed1..])
-        .map_or(Err("parse key varint"), |v| Ok(v))?;
+    let (key, consumed2) =
+        parse_varint(&buffer[cell_offset + consumed1..]).map_or(Err("parse key varint"), Ok)?;
     let header_length = consumed1 + consumed2;
 
     let x = usable_size - 35;
@@ -260,7 +260,7 @@ impl<'page> BtreeInteriorTableCell<'page> {
 
     pub fn key(&self) -> ParseResult<i64> {
         let (key, _) =
-            parse_varint(&self.buf[4..]).map_or(Err("parse payload length varint"), |v| Ok(v))?;
+            parse_varint(&self.buf[4..]).map_or(Err("parse payload length varint"), Ok)?;
         Ok(key)
     }
 }

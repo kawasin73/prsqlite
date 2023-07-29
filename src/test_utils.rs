@@ -26,7 +26,7 @@ pub fn create_sqlite_database(queries: &[&str]) -> NamedTempFile {
     let file = NamedTempFile::new().unwrap();
     let conn = Connection::open(file.path()).unwrap();
     for query in queries {
-        conn.execute(&query, []).unwrap();
+        conn.execute(query, []).unwrap();
     }
     conn.close().unwrap();
     file
@@ -47,5 +47,5 @@ pub fn load_usable_size(file: &File) -> anyhow::Result<u32> {
 }
 
 pub fn buffer_to_hex(buf: &[u8]) -> String {
-    buf.iter().map(|v| format!("{:02X}", v)).collect::<String>()
+    buf.iter().map(|v| format!("{v:02X}")).collect::<String>()
 }
