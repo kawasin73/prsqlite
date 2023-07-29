@@ -247,17 +247,16 @@ impl<'a, 'conn> Row<'a, 'conn> {
         let content_offset = headers[0].1;
         let last_header = &headers[headers.len() - 1];
         let content_size = last_header.1 + last_header.0.content_size() - content_offset;
-        let contents_buffer =
-            if self.payload.buf().len() >= (content_offset + content_size) as usize {
-                &self.payload.buf()[content_offset as usize..]
-            } else {
-                self.tmp_buf = vec![0; content_size as usize];
-                let n = unsafe { self.payload.load(content_offset, &mut self.tmp_buf) }?;
-                if n != content_size as usize {
-                    bail!("payload does not have enough size");
-                }
-                &self.tmp_buf
-            };
+        let contents_buffer = if self.payload.buf().len() >= (content_offset + content_size) as usize {
+            &self.payload.buf()[content_offset as usize..]
+        } else {
+            self.tmp_buf = vec![0; content_size as usize];
+            let n = unsafe { self.payload.load(content_offset, &mut self.tmp_buf) }?;
+            if n != content_size as usize {
+                bail!("payload does not have enough size");
+            }
+            &self.tmp_buf
+        };
 
         let mut columns = Vec::with_capacity(headers.len());
         for (serial_type, offset) in headers {
@@ -356,8 +355,7 @@ mod tests {
                 "CREATE TABLE example{i}(col1,col2,col3,col4,col5,col6,col7,col8,col9,col10);"
             ));
         }
-        let file =
-            create_sqlite_database(&queries.iter().map(|q| q.as_str()).collect::<Vec<&str>>());
+        let file = create_sqlite_database(&queries.iter().map(|q| q.as_str()).collect::<Vec<&str>>());
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         assert!(pager.num_pages() > 1);
         let usable_size = load_usable_size(file.as_file()).unwrap();

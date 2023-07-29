@@ -60,10 +60,7 @@ impl Pager {
                     self.file.read_exact_at(&mut buffer, offset as u64)?;
                 }
                 let header_offset = if id == 1 { DATABASE_HEADER_SIZE } else { 0 };
-                Ok(MemPage {
-                    page,
-                    header_offset,
-                })
+                Ok(MemPage { page, header_offset })
             }
         }
     }

@@ -71,9 +71,7 @@ impl SerialType {
             1 => Value::Integer(i8::from_be_bytes(buf[..1].try_into().unwrap()) as i64),
             2 => Value::Integer(i16::from_be_bytes(buf[..2].try_into().unwrap()) as i64),
             // TODO: use std::mem::transmute.
-            3 => Value::Integer(
-                ((buf[0] as i64) << 56 | (buf[1] as i64) << 48 | (buf[2] as i64) << 40) >> 40,
-            ),
+            3 => Value::Integer(((buf[0] as i64) << 56 | (buf[1] as i64) << 48 | (buf[2] as i64) << 40) >> 40),
             4 => Value::Integer(i32::from_be_bytes(buf[..4].try_into().unwrap()) as i64),
             // TODO: use std::mem::transmute.
             5 => Value::Integer(
@@ -135,8 +133,7 @@ pub fn parse_record_header(payload: &BtreePayload) -> anyhow::Result<Vec<(Serial
 
     let mut parsed = Vec::new();
     while header_offset < header_size {
-        let (serial_type, consumed) =
-            parse_varint(&buf[header_offset as usize..]).context("parse serial type")?;
+        let (serial_type, consumed) = parse_varint(&buf[header_offset as usize..]).context("parse serial type")?;
         let serial_type = SerialType(serial_type.try_into().context("serial type is too large")?);
         let content_size = serial_type.content_size();
         parsed.push((serial_type, content_offset));
@@ -171,9 +168,27 @@ mod tests {
         const ONE: i64 = 1;
         let inserts = [
             "INSERT INTO example(col1, col2, col4) VALUES (null, true, false);".to_string(),
-            format!("INSERT INTO example(col1, col2, col3, col4) VALUES ({}, {}, {}, {});", i8::MAX, i8::MIN, i16::MAX, i16::MIN),
-            format!("INSERT INTO example(col1, col2, col3, col4) VALUES ({}, {}, {}, {});", (ONE << 23)-1, -(ONE<<23), i32::MAX, i32::MIN),
-            format!("INSERT INTO example(col1, col2, col3, col4) VALUES ({}, {}, {}, {});", (ONE << 47)-1, -(ONE<<47), i64::MAX, i64::MIN),
+            format!(
+                "INSERT INTO example(col1, col2, col3, col4) VALUES ({}, {}, {}, {});",
+                i8::MAX,
+                i8::MIN,
+                i16::MAX,
+                i16::MIN
+            ),
+            format!(
+                "INSERT INTO example(col1, col2, col3, col4) VALUES ({}, {}, {}, {});",
+                (ONE << 23) - 1,
+                -(ONE << 23),
+                i32::MAX,
+                i32::MIN
+            ),
+            format!(
+                "INSERT INTO example(col1, col2, col3, col4) VALUES ({}, {}, {}, {});",
+                (ONE << 47) - 1,
+                -(ONE << 47),
+                i64::MAX,
+                i64::MIN
+            ),
             "INSERT INTO example(col1, col2, col3, col4) VALUES (0, 1, \"hello\", X'0123456789abcdef');".to_string(),
             "INSERT INTO example(col1) VALUES (0.5);".to_string(),
         ];

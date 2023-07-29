@@ -82,8 +82,7 @@ impl<'a, 'pager> BtreePayload<'a, 'pager> {
         let mut cur = payload.len() as u32;
         let mut overflow = self.overflow;
         while !buf.is_empty() && cur < self.size {
-            let overflow_page =
-                overflow.ok_or_else(|| anyhow::anyhow!("overflow page is not found"))?;
+            let overflow_page = overflow.ok_or_else(|| anyhow::anyhow!("overflow page is not found"))?;
             let page = self.pager.get_page(overflow_page.page_id())?;
             let buffer = page.buffer();
             let (payload, next_overflow) = overflow_page
@@ -146,13 +145,9 @@ impl<'pager> BtreeCursor<'pager> {
                     return Ok(None);
                 }
             } else if page_header.is_leaf() {
-                let (_, size, payload_range, overflow) = parse_btree_leaf_table_cell(
-                    &self.current_page,
-                    &buffer,
-                    self.idx_cell,
-                    self.usable_size,
-                )
-                .map_err(|e| anyhow::anyhow!("parse tree leaf table cell: {:?}", e))?;
+                let (_, size, payload_range, overflow) =
+                    parse_btree_leaf_table_cell(&self.current_page, &buffer, self.idx_cell, self.usable_size)
+                        .map_err(|e| anyhow::anyhow!("parse tree leaf table cell: {:?}", e))?;
                 self.idx_cell += 1;
                 return Ok(Some(BtreePayload {
                     pager: self.pager,
@@ -172,8 +167,7 @@ impl<'pager> BtreeCursor<'pager> {
     }
 
     fn move_to_child(&mut self, page_id: PageId) -> anyhow::Result<()> {
-        self.parent_pages
-            .push((self.current_page_id, self.idx_cell));
+        self.parent_pages.push((self.current_page_id, self.idx_cell));
         self.current_page_id = page_id;
         self.current_page = self.pager.get_page(self.current_page_id)?;
         self.idx_cell = 0;
@@ -263,10 +257,7 @@ mod tests {
             ));
         }
         for i in 0..1000 {
-            inserts.push(format!(
-                "INSERT INTO example(col) VALUES ({});",
-                i % 100 + 2
-            ));
+            inserts.push(format!("INSERT INTO example(col) VALUES ({});", i % 100 + 2));
         }
         let mut queries = vec!["CREATE TABLE example(col,buf);"];
         queries.extend(inserts.iter().map(|s| s.as_str()));
@@ -302,10 +293,7 @@ mod tests {
         for i in 0..10000 {
             buf.push((i % 256) as u8);
         }
-        let query = format!(
-            "INSERT INTO example(col) VALUES (X'{}');",
-            buffer_to_hex(&buf)
-        );
+        let query = format!("INSERT INTO example(col) VALUES (X'{}');", buffer_to_hex(&buf));
         queries.push(&query);
         let file = create_sqlite_database(&queries);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
