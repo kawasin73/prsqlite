@@ -37,6 +37,7 @@ use crate::pager::Pager;
 use crate::pager::ROOT_PAGE_ID;
 use crate::record::parse_record_header;
 pub use crate::record::Value;
+use crate::utils::upper_to_lower;
 
 const SQLITE_MAX_PAGE_SIZE: u32 = 65536;
 pub const DATABASE_HEADER_SIZE: usize = 100;
@@ -132,7 +133,8 @@ impl Connection {
 }
 
 struct Schema {
-    tables: HashMap<String, Table>,
+    // TODO: Use the reference of table name in the value as the key.
+    tables: HashMap<Vec<u8>, Table>,
 }
 
 impl Schema {
@@ -152,14 +154,14 @@ impl Schema {
                             columns.get(2)
                         );
                     }
-                    if let &Value::Text(table) = columns.get(1) {
+                    if let &Value::Text(name) = columns.get(1) {
                         if let &Value::Integer(page_id) = columns.get(3) {
-                            tables.insert(
-                                table.to_string(),
-                                Table {
-                                    root_page_id: page_id.try_into()?,
-                                },
-                            );
+                            let table = Table {
+                                root_page_id: page_id.try_into()?,
+                            };
+                            let mut key = name.as_bytes().to_vec();
+                            upper_to_lower(&mut key);
+                            tables.insert(key, table);
                         }
                     }
                 }
@@ -181,10 +183,13 @@ impl Schema {
     }
 
     fn get_table_page_id(&self, table: &str) -> Option<PageId> {
-        if table == "sqlite_schema" {
+        if table.to_lowercase() == "sqlite_schema" {
             Some(ROOT_PAGE_ID)
         } else {
-            self.tables.get(table).map(|table| table.root_page_id)
+            // TODO: use the reference of given table name.
+            let mut key = table.as_bytes().to_vec();
+            upper_to_lower(&mut key);
+            self.tables.get(&key).map(|table| table.root_page_id)
         }
     }
 }
@@ -340,11 +345,9 @@ mod tests {
         ]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
-
         let schema = Schema::generate(&pager, usable_size).unwrap();
-        let page_id = schema.get_table_page_id("example2").unwrap();
 
-        assert_eq!(page_id, 3);
+        assert_eq!(schema.get_table_page_id("example2").unwrap(), 3);
     }
 
     #[test]
@@ -359,11 +362,39 @@ mod tests {
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         assert!(pager.num_pages() > 1);
         let usable_size = load_usable_size(file.as_file()).unwrap();
-
         let schema = Schema::generate(&pager, usable_size).unwrap();
-        let page_id = schema.get_table_page_id("example99").unwrap();
 
-        assert_eq!(page_id, 104);
+        assert_eq!(schema.get_table_page_id("example99").unwrap(), 104);
+    }
+
+    #[test]
+    fn get_table_page_id_sqlite_schema() {
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col);",
+            "CREATE TABLE example2(col1, col2);",
+            "CREATE TABLE example3(col1, col2, col3);",
+        ]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let usable_size = load_usable_size(file.as_file()).unwrap();
+        let schema = Schema::generate(&pager, usable_size).unwrap();
+
+        assert_eq!(schema.get_table_page_id("sqlite_schema").unwrap(), ROOT_PAGE_ID);
+    }
+
+    #[test]
+    fn get_table_page_id_case_insensitive() {
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col);",
+            "CREATE TABLE exAmple2(col1, col2);",
+            "CREATE TABLE example3(col1, col2, col3);",
+        ]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let usable_size = load_usable_size(file.as_file()).unwrap();
+        let schema = Schema::generate(&pager, usable_size).unwrap();
+
+        assert_eq!(schema.get_table_page_id("example2").unwrap(), 3);
+        assert_eq!(schema.get_table_page_id("exaMple2").unwrap(), 3);
+        assert_eq!(schema.get_table_page_id("sqlite_Schema").unwrap(), ROOT_PAGE_ID);
     }
 
     #[test]
@@ -375,7 +406,6 @@ mod tests {
         ]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
-
         let schema = Schema::generate(&pager, usable_size).unwrap();
 
         assert!(schema.get_table_page_id("invalid").is_none());
