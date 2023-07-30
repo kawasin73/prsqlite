@@ -35,9 +35,13 @@ pub use crate::btree::*;
 use crate::cursor::BtreeCursor;
 use crate::cursor::BtreePayload;
 use crate::pager::Pager;
+use crate::parser::parse_select;
+use crate::parser::ResultColumn;
 use crate::record::parse_record_header;
 pub use crate::record::Value;
 use crate::schema::Schema;
+use crate::token::get_token_no_space;
+use crate::token::Token;
 
 const SQLITE_MAX_PAGE_SIZE: u32 = 65536;
 pub const DATABASE_HEADER_SIZE: usize = 100;
@@ -78,22 +82,6 @@ impl<'a> DatabaseHeader<'a> {
     }
 }
 
-fn parse_table_name(sql: &str) -> anyhow::Result<String> {
-    let chars = sql.chars();
-    let mut table_name = String::new();
-    for c in chars {
-        if c.is_whitespace() || c == ';' {
-            break;
-        }
-        if c.is_ascii_alphanumeric() || c == '_' {
-            table_name.push(c);
-        } else {
-            bail!("invalid table name: {}", sql);
-        }
-    }
-    Ok(table_name)
-}
-
 pub struct Connection {
     pager: Pager,
     usable_size: u32,
@@ -122,27 +110,53 @@ impl Connection {
     }
 
     pub fn prepare(&mut self, sql: &str) -> anyhow::Result<Statement> {
-        const SELECT_PREFIX: &str = "SELECT * FROM ";
-        if let Some(sql) = sql.strip_prefix(SELECT_PREFIX) {
-            let table = parse_table_name(sql)?;
-            if self.schema.is_none() {
-                let schema_table = Schema::schema_table();
-                let columns = (0..schema_table.columns.len()).collect::<Vec<usize>>();
-                self.schema = Some(Schema::generate(
-                    Statement::new(self, schema_table.root_page_id, columns),
-                    schema_table,
-                )?);
+        let input = sql.as_bytes();
+        let (n, select) = parse_select(input).map_err(|e| anyhow::anyhow!("parse select: {}", e))?;
+        if let Some((nn, Token::Semicolon)) = get_token_no_space(&input[n..]) {
+            if nn + n != input.len() {
+                bail!("extra characters after semicolon");
             }
-            let schema = self.schema.as_ref().unwrap();
-            let table = schema
-                .get_table(&table)
-                .ok_or(anyhow::anyhow!("table not found: {}", &table))?;
-            let table_page_id = table.root_page_id;
-            let columns = (0..table.columns.len()).collect::<Vec<usize>>();
-            Ok(Statement::new(self, table_page_id, columns))
         } else {
-            bail!("Unsupported SQL: {}", sql);
+            bail!("no semicolon");
         }
+        if self.schema.is_none() {
+            let schema_table = Schema::schema_table();
+            let columns = (0..schema_table.columns.len()).collect::<Vec<usize>>();
+            self.schema = Some(Schema::generate(
+                Statement::new(self, schema_table.root_page_id, columns),
+                schema_table,
+            )?);
+        }
+        let schema = self.schema.as_ref().unwrap();
+        let table = schema.get_table(select.table_name).ok_or(anyhow::anyhow!(
+            "table not found: {:?}",
+            std::str::from_utf8(select.table_name).unwrap_or_default()
+        ))?;
+
+        let mut columns = Vec::new();
+        for column in select.columns.iter() {
+            match column {
+                ResultColumn::All => {
+                    for i in 0..table.columns.len() {
+                        columns.push(i);
+                    }
+                }
+                ResultColumn::ColumnName(column_name) => {
+                    let column_idx = table
+                        .columns
+                        .iter()
+                        .position(|c| c == column_name)
+                        .ok_or(anyhow::anyhow!(
+                            "column not found: {}",
+                            std::str::from_utf8(column_name).unwrap_or_default()
+                        ))?;
+                    columns.push(column_idx);
+                }
+            }
+        }
+
+        let table_page_id = table.root_page_id;
+        Ok(Statement::new(self, table_page_id, columns))
     }
 }
 

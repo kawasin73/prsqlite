@@ -73,6 +73,65 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
     Ok((len_input - input.len(), CreateTable { table_name, columns }))
 }
 
+pub struct Select<'a> {
+    pub table_name: &'a [u8],
+    pub columns: Vec<ResultColumn<'a>>,
+}
+
+// Parse SELECT statement.
+//
+// https://www.sqlite.org/lang_select.html
+pub fn parse_select(input: &[u8]) -> Result<(usize, Select)> {
+    let mut input = input;
+    let len_input = input.len();
+
+    if let Some((n, Token::Select)) = get_token_no_space(input) {
+        input = &input[n..];
+    } else {
+        return Err("no select");
+    }
+    let (n, result_column) = parse_result_column(input)?;
+    input = &input[n..];
+    let mut columns = vec![result_column];
+    loop {
+        match get_token_no_space(input) {
+            Some((n, Token::Comma)) => {
+                input = &input[n..];
+                let (n, result_column) = parse_result_column(input)?;
+                input = &input[n..];
+                columns.push(result_column);
+            }
+            Some((n, Token::From)) => {
+                input = &input[n..];
+                break;
+            }
+            _ => return Err("no from"),
+        }
+    }
+    let table_name = if let Some((n, Token::Identifier(table_name))) = get_token_no_space(input) {
+        input = &input[n..];
+        table_name
+    } else {
+        return Err("no table_name");
+    };
+
+    Ok((len_input - input.len(), Select { table_name, columns }))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ResultColumn<'a> {
+    All,
+    ColumnName(&'a [u8]),
+}
+
+fn parse_result_column(input: &[u8]) -> Result<(usize, ResultColumn)> {
+    match get_token_no_space(input) {
+        Some((n, Token::Identifier(id))) => Ok((n, ResultColumn::ColumnName(id))),
+        Some((n, Token::Asterisk)) => Ok((n, ResultColumn::All)),
+        _ => Err("no result column name"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,6 +160,39 @@ mod tests {
     fn test_parse_create_table_fail() {
         // no right paren.
         let input = b"create table foo (id, name ";
+        assert!(parse_create_table(input).is_err());
+    }
+
+    #[test]
+    fn test_parse_select_all() {
+        let input = b"select * from foo";
+        let (n, select) = parse_select(input).unwrap();
+        assert_eq!(n, input.len());
+        assert_eq!(select.table_name, b"foo");
+        assert_eq!(select.columns, vec![ResultColumn::All]);
+    }
+
+    #[test]
+    fn test_parse_select_columns() {
+        let input = b"select id,name,*,col from foo";
+        let (n, select) = parse_select(input).unwrap();
+        assert_eq!(n, input.len());
+        assert_eq!(select.table_name, b"foo");
+        assert_eq!(
+            select.columns,
+            vec![
+                ResultColumn::ColumnName(b"id"),
+                ResultColumn::ColumnName(b"name"),
+                ResultColumn::All,
+                ResultColumn::ColumnName(b"col")
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_select_fail() {
+        // no table name.
+        let input = b"select col from ";
         assert!(parse_create_table(input).is_err());
     }
 }

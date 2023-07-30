@@ -63,5 +63,5 @@ pub fn find_table_page_id(table: &str, filepath: &Path) -> PageId {
         schema_table,
     )
     .unwrap();
-    schema.get_table(table).unwrap().root_page_id
+    schema.get_table(table.as_bytes()).unwrap().root_page_id
 }

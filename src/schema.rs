@@ -148,13 +148,13 @@ impl Schema {
         Ok(Self { schema_table, tables })
     }
 
-    pub fn get_table(&self, table: &str) -> Option<&Table> {
-        if table.to_lowercase() == "sqlite_schema" {
+    pub fn get_table(&self, table: &[u8]) -> Option<&Table> {
+        // TODO: use the reference of given table name.
+        let mut key = table.to_vec();
+        upper_to_lower(&mut key);
+        if key == b"sqlite_schema" {
             Some(&self.schema_table)
         } else {
-            // TODO: use the reference of given table name.
-            let mut key = table.as_bytes().to_vec();
-            upper_to_lower(&mut key);
             self.tables.get(&key)
         }
     }
@@ -194,7 +194,7 @@ mod tests {
         ]);
         let schema = generate_schema(file.path());
 
-        assert_eq!(schema.get_table("example2").unwrap().root_page_id, 3);
+        assert_eq!(schema.get_table(b"example2").unwrap().root_page_id, 3);
     }
 
     #[test]
@@ -210,7 +210,7 @@ mod tests {
         let schema = generate_schema(file.path());
 
         assert!(pager.num_pages() > 1);
-        assert_eq!(schema.get_table("example99").unwrap().root_page_id, 104);
+        assert_eq!(schema.get_table(b"example99").unwrap().root_page_id, 104);
     }
 
     #[test]
@@ -222,7 +222,7 @@ mod tests {
         ]);
         let schema = generate_schema(file.path());
 
-        assert_eq!(schema.get_table("sqlite_schema").unwrap().root_page_id, ROOT_PAGE_ID);
+        assert_eq!(schema.get_table(b"sqlite_schema").unwrap().root_page_id, ROOT_PAGE_ID);
     }
 
     #[test]
@@ -234,9 +234,9 @@ mod tests {
         ]);
         let schema = generate_schema(file.path());
 
-        assert_eq!(schema.get_table("example2").unwrap().root_page_id, 3);
-        assert_eq!(schema.get_table("exaMple2").unwrap().root_page_id, 3);
-        assert_eq!(schema.get_table("sqlite_Schema").unwrap().root_page_id, ROOT_PAGE_ID);
+        assert_eq!(schema.get_table(b"example2").unwrap().root_page_id, 3);
+        assert_eq!(schema.get_table(b"exaMple2").unwrap().root_page_id, 3);
+        assert_eq!(schema.get_table(b"sqlite_Schema").unwrap().root_page_id, ROOT_PAGE_ID);
     }
 
     #[test]
@@ -248,7 +248,7 @@ mod tests {
         ]);
         let schema = generate_schema(file.path());
 
-        assert!(schema.get_table("invalid").is_none());
+        assert!(schema.get_table(b"invalid").is_none());
     }
 
     #[test]
@@ -260,13 +260,13 @@ mod tests {
         ]);
         let schema = generate_schema(file.path());
 
-        assert_eq!(schema.get_table("example").unwrap().columns, vec![b"col".to_vec()]);
+        assert_eq!(schema.get_table(b"example").unwrap().columns, vec![b"col".to_vec()]);
         assert_eq!(
-            schema.get_table("example2").unwrap().columns,
+            schema.get_table(b"example2").unwrap().columns,
             vec![b"col1".to_vec(), b"col2".to_vec()]
         );
         assert_eq!(
-            schema.get_table("example3").unwrap().columns,
+            schema.get_table(b"example3").unwrap().columns,
             vec![b"COL1".to_vec(), b"COL2".to_vec(), b"COL3".to_vec(), b"_".to_vec()]
         );
     }
