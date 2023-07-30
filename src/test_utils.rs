@@ -14,19 +14,21 @@
 
 use std::fs::File;
 use std::os::unix::fs::FileExt;
+use std::path::Path;
 
-use rusqlite::Connection;
 use tempfile::NamedTempFile;
 
 use crate::pager::PageId;
 use crate::pager::Pager;
+use crate::schema::Schema;
+use crate::Connection;
 use crate::DatabaseHeader;
-use crate::Schema;
+use crate::Statement;
 use crate::DATABASE_HEADER_SIZE;
 
 pub fn create_sqlite_database(queries: &[&str]) -> NamedTempFile {
     let file = NamedTempFile::new().unwrap();
-    let conn = Connection::open(file.path()).unwrap();
+    let conn = rusqlite::Connection::open(file.path()).unwrap();
     for query in queries {
         conn.execute(query, []).unwrap();
     }
@@ -52,7 +54,14 @@ pub fn buffer_to_hex(buf: &[u8]) -> String {
     buf.iter().map(|v| format!("{v:02X}")).collect::<String>()
 }
 
-pub fn find_table_page_id(table: &str, pager: &Pager, usable_size: u32) -> PageId {
-    let schema = Schema::generate(pager, usable_size).unwrap();
-    schema.get_table_page_id(table).unwrap()
+pub fn find_table_page_id(table: &str, filepath: &Path) -> PageId {
+    let mut conn = Connection::open(filepath).unwrap();
+    let schema_table = Schema::schema_table();
+    let columns = (0..schema_table.columns.len()).collect::<Vec<_>>();
+    let schema = Schema::generate(
+        Statement::new(&mut conn, schema_table.root_page_id, columns),
+        schema_table,
+    )
+    .unwrap();
+    schema.get_table(table).unwrap().root_page_id
 }

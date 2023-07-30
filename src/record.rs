@@ -198,7 +198,7 @@ mod tests {
         let file = create_sqlite_database(&queries);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
-        let table_page_id = find_table_page_id("example", &pager, usable_size);
+        let table_page_id = find_table_page_id("example", file.path());
         let mut buf = Vec::new();
 
         let mut cursor = BtreeCursor::new(table_page_id, &pager, usable_size).unwrap();

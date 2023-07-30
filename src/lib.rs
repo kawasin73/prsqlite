@@ -15,12 +15,14 @@
 mod btree;
 mod cursor;
 mod pager;
+mod parser;
 mod record;
+mod schema;
 #[cfg(test)]
 pub mod test_utils;
+mod token;
 mod utils;
 
-use std::collections::HashMap;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
@@ -32,12 +34,10 @@ use anyhow::Context;
 pub use crate::btree::*;
 use crate::cursor::BtreeCursor;
 use crate::cursor::BtreePayload;
-use crate::pager::PageId;
 use crate::pager::Pager;
-use crate::pager::ROOT_PAGE_ID;
 use crate::record::parse_record_header;
 pub use crate::record::Value;
-use crate::utils::upper_to_lower;
+use crate::schema::Schema;
 
 const SQLITE_MAX_PAGE_SIZE: u32 = 65536;
 pub const DATABASE_HEADER_SIZE: usize = 100;
@@ -125,109 +125,61 @@ impl Connection {
         const SELECT_PREFIX: &str = "SELECT * FROM ";
         if let Some(sql) = sql.strip_prefix(SELECT_PREFIX) {
             let table = parse_table_name(sql)?;
-            Ok(Statement { conn: self, table })
+            if self.schema.is_none() {
+                let schema_table = Schema::schema_table();
+                let columns = (0..schema_table.columns.len()).collect::<Vec<usize>>();
+                self.schema = Some(Schema::generate(
+                    Statement::new(self, schema_table.root_page_id, columns),
+                    schema_table,
+                )?);
+            }
+            let schema = self.schema.as_ref().unwrap();
+            let table = schema
+                .get_table(&table)
+                .ok_or(anyhow::anyhow!("table not found: {}", &table))?;
+            let table_page_id = table.root_page_id;
+            let columns = (0..table.columns.len()).collect::<Vec<usize>>();
+            Ok(Statement::new(self, table_page_id, columns))
         } else {
             bail!("Unsupported SQL: {}", sql);
         }
     }
 }
 
-struct Schema {
-    // TODO: Use the reference of table name in the value as the key.
-    tables: HashMap<Vec<u8>, Table>,
-}
-
-impl Schema {
-    fn generate(pager: &Pager, usable_size: u32) -> anyhow::Result<Schema> {
-        let mut rows = Rows {
-            cursor: BtreeCursor::new(ROOT_PAGE_ID, pager, usable_size)?,
-        };
-        let mut tables = HashMap::new();
-        while let Some(mut row) = rows.next()? {
-            let columns = row.parse()?;
-            match columns.get(0) {
-                &Value::Text("table") => {
-                    if columns.get(1) != columns.get(2) {
-                        bail!(
-                            "table name does not match: name={:?}, table_name={:?}",
-                            columns.get(1),
-                            columns.get(2)
-                        );
-                    }
-                    if let &Value::Text(name) = columns.get(1) {
-                        if let &Value::Integer(page_id) = columns.get(3) {
-                            let table = Table {
-                                root_page_id: page_id.try_into()?,
-                            };
-                            let mut key = name.as_bytes().to_vec();
-                            upper_to_lower(&mut key);
-                            tables.insert(key, table);
-                        }
-                    }
-                }
-                &Value::Text("index") => {
-                    // TODO: support index
-                }
-                &Value::Text("view") => {
-                    // TODO: support view
-                }
-                &Value::Text("trigger") => {
-                    // TODO: support trigger
-                }
-                type_ => {
-                    bail!("unsupported type: {:?}", type_);
-                }
-            }
-        }
-        Ok(Self { tables })
-    }
-
-    fn get_table_page_id(&self, table: &str) -> Option<PageId> {
-        if table.to_lowercase() == "sqlite_schema" {
-            Some(ROOT_PAGE_ID)
-        } else {
-            // TODO: use the reference of given table name.
-            let mut key = table.as_bytes().to_vec();
-            upper_to_lower(&mut key);
-            self.tables.get(&key).map(|table| table.root_page_id)
-        }
-    }
-}
-
-struct Table {
-    root_page_id: PageId,
-}
-
 // TODO: make Connection non mut and support multiple statements.
 pub struct Statement<'conn> {
     conn: &'conn mut Connection,
-    table: String,
+    table_page_id: u32,
+    columns: Vec<usize>,
 }
 
 impl<'conn> Statement<'conn> {
-    pub fn execute(&'conn mut self) -> anyhow::Result<Rows<'conn>> {
-        if self.conn.schema.is_none() {
-            self.conn.schema = Some(Schema::generate(&self.conn.pager, self.conn.usable_size)?);
+    pub(crate) fn new(conn: &'conn mut Connection, table_page_id: u32, columns: Vec<usize>) -> Self {
+        Self {
+            conn,
+            table_page_id,
+            columns,
         }
-        let schema = self.conn.schema.as_ref().unwrap();
-        let table_page_id = if let Some(table_page_id) = schema.get_table_page_id(&self.table) {
-            table_page_id
-        } else {
-            bail!("table not found: {}", self.table);
-        };
+    }
+
+    pub fn execute(&'conn mut self) -> anyhow::Result<Rows<'conn>> {
+        // TODO: check schema version.
         Ok(Rows {
-            cursor: BtreeCursor::new(table_page_id, &self.conn.pager, self.conn.usable_size)?,
+            stmt: self,
+            cursor: BtreeCursor::new(self.table_page_id, &self.conn.pager, self.conn.usable_size)?,
         })
     }
 }
 
 pub struct Rows<'conn> {
+    stmt: &'conn Statement<'conn>,
     cursor: BtreeCursor<'conn>,
 }
 
 impl<'conn> Rows<'conn> {
     pub fn next<'a>(&'a mut self) -> anyhow::Result<Option<Row<'a, 'conn>>> {
         Ok(self.cursor.next()?.map(|payload| Row {
+            stmt: self.stmt,
             payload,
             tmp_buf: Vec::new(),
         }))
@@ -237,6 +189,7 @@ impl<'conn> Rows<'conn> {
 const STATIC_NULL_VALUE: Value = Value::Null;
 
 pub struct Row<'a, 'conn> {
+    stmt: &'conn Statement<'conn>,
     pub payload: BtreePayload<'a, 'conn>,
     tmp_buf: Vec<u8>,
 }
@@ -263,13 +216,17 @@ impl<'a, 'conn> Row<'a, 'conn> {
             &self.tmp_buf
         };
 
-        let mut columns = Vec::with_capacity(headers.len());
-        for (serial_type, offset) in headers {
-            columns.push(
-                serial_type
-                    .parse(&contents_buffer[(offset - content_offset) as usize..])
-                    .context("parse value")?,
-            );
+        let mut columns = Vec::with_capacity(self.stmt.columns.len());
+        for column_idx in self.stmt.columns.iter() {
+            if let Some((serial_type, offset)) = headers.get(*column_idx) {
+                columns.push(
+                    serial_type
+                        .parse(&contents_buffer[(offset - content_offset) as usize..])
+                        .context("parse value")?,
+                );
+            } else {
+                columns.push(STATIC_NULL_VALUE);
+            }
         }
 
         Ok(Columns(columns))
@@ -334,80 +291,5 @@ mod tests {
         assert_eq!(header.pagesize(), 4096);
         assert!(header.validate_pagesize());
         assert!(header.validate_reserved());
-    }
-
-    #[test]
-    fn get_table_page_id_success() {
-        let file = create_sqlite_database(&[
-            "CREATE TABLE example(col);",
-            "CREATE TABLE example2(col1, col2);",
-            "CREATE TABLE example3(col1, col2, col3);",
-        ]);
-        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = load_usable_size(file.as_file()).unwrap();
-        let schema = Schema::generate(&pager, usable_size).unwrap();
-
-        assert_eq!(schema.get_table_page_id("example2").unwrap(), 3);
-    }
-
-    #[test]
-    fn get_table_page_id_interior_success() {
-        let mut queries = Vec::with_capacity(100);
-        for i in 0..100 {
-            queries.push(format!(
-                "CREATE TABLE example{i}(col1,col2,col3,col4,col5,col6,col7,col8,col9,col10);"
-            ));
-        }
-        let file = create_sqlite_database(&queries.iter().map(|q| q.as_str()).collect::<Vec<&str>>());
-        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        assert!(pager.num_pages() > 1);
-        let usable_size = load_usable_size(file.as_file()).unwrap();
-        let schema = Schema::generate(&pager, usable_size).unwrap();
-
-        assert_eq!(schema.get_table_page_id("example99").unwrap(), 104);
-    }
-
-    #[test]
-    fn get_table_page_id_sqlite_schema() {
-        let file = create_sqlite_database(&[
-            "CREATE TABLE example(col);",
-            "CREATE TABLE example2(col1, col2);",
-            "CREATE TABLE example3(col1, col2, col3);",
-        ]);
-        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = load_usable_size(file.as_file()).unwrap();
-        let schema = Schema::generate(&pager, usable_size).unwrap();
-
-        assert_eq!(schema.get_table_page_id("sqlite_schema").unwrap(), ROOT_PAGE_ID);
-    }
-
-    #[test]
-    fn get_table_page_id_case_insensitive() {
-        let file = create_sqlite_database(&[
-            "CREATE TABLE example(col);",
-            "CREATE TABLE exAmple2(col1, col2);",
-            "CREATE TABLE example3(col1, col2, col3);",
-        ]);
-        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = load_usable_size(file.as_file()).unwrap();
-        let schema = Schema::generate(&pager, usable_size).unwrap();
-
-        assert_eq!(schema.get_table_page_id("example2").unwrap(), 3);
-        assert_eq!(schema.get_table_page_id("exaMple2").unwrap(), 3);
-        assert_eq!(schema.get_table_page_id("sqlite_Schema").unwrap(), ROOT_PAGE_ID);
-    }
-
-    #[test]
-    fn get_table_page_id_not_found() {
-        let file = create_sqlite_database(&[
-            "CREATE TABLE example(col);",
-            "CREATE TABLE example2(col1, col2);",
-            "CREATE TABLE example3(col1, col2, col3);",
-        ]);
-        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = load_usable_size(file.as_file()).unwrap();
-        let schema = Schema::generate(&pager, usable_size).unwrap();
-
-        assert!(schema.get_table_page_id("invalid").is_none());
     }
 }

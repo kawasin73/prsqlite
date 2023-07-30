@@ -335,7 +335,7 @@ mod tests {
         let file = create_sqlite_database(&queries);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let usable_size = load_usable_size(file.as_file()).unwrap();
-        let page_id = find_table_page_id("example", &pager, usable_size);
+        let page_id = find_table_page_id("example", file.path());
         let page = pager.get_page(page_id).unwrap();
         let buffer = page.buffer();
         assert_eq!(BtreePageHeader::from_page(&page, &buffer).n_cells(), 1);
