@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::record::Value;
 use crate::token::get_token_no_space;
 use crate::token::Token;
 
@@ -76,6 +77,7 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
 pub struct Select<'a> {
     pub table_name: &'a [u8],
     pub columns: Vec<ResultColumn<'a>>,
+    pub selection: Option<Expr<'a>>,
 }
 
 // Parse SELECT statement.
@@ -115,7 +117,23 @@ pub fn parse_select(input: &[u8]) -> Result<(usize, Select)> {
         return Err("no table_name");
     };
 
-    Ok((len_input - input.len(), Select { table_name, columns }))
+    let selection = if let Some((n, Token::Where)) = get_token_no_space(input) {
+        input = &input[n..];
+        let (n, expr) = parse_expr(input)?;
+        input = &input[n..];
+        Some(expr)
+    } else {
+        None
+    };
+
+    Ok((
+        len_input - input.len(),
+        Select {
+            table_name,
+            columns,
+            selection,
+        },
+    ))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -130,6 +148,64 @@ fn parse_result_column(input: &[u8]) -> Result<(usize, ResultColumn)> {
         Some((n, Token::Asterisk)) => Ok((n, ResultColumn::All)),
         _ => Err("no result column name"),
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum BinaryOperator {
+    /// Equal to
+    Eq,
+    /// Not equal to
+    Ne,
+    /// Greater than
+    Gt,
+    /// Greater than or equal to
+    Ge,
+    /// Less than
+    Lt,
+    /// Less than or equal to
+    Le,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Expr<'a> {
+    Column(&'a [u8]),
+    BinaryOperator {
+        operator: BinaryOperator,
+        left: Box<Expr<'a>>,
+        right: Box<Expr<'a>>,
+    },
+    LiteralValue(Value<'a>),
+}
+
+fn parse_expr(input: &[u8]) -> Result<(usize, Expr)> {
+    let input_len = input.len();
+    let (n, left) = match get_token_no_space(input) {
+        Some((n, Token::Identifier(id))) => (n, Expr::Column(id)),
+        Some((n, Token::Integer(i))) => (n, Expr::LiteralValue(Value::Integer(i))),
+        _ => return Err("no expr"),
+    };
+    let input = &input[n..];
+    let (n, operator) = match get_token_no_space(input) {
+        Some((n, Token::Eq)) => (n, BinaryOperator::Eq),
+        Some((n, Token::Ne)) => (n, BinaryOperator::Ne),
+        Some((n, Token::Gt)) => (n, BinaryOperator::Gt),
+        Some((n, Token::Ge)) => (n, BinaryOperator::Ge),
+        Some((n, Token::Lt)) => (n, BinaryOperator::Lt),
+        Some((n, Token::Le)) => (n, BinaryOperator::Le),
+        _ => return Ok((n, left)),
+    };
+    let input = &input[n..];
+
+    let (n, right) = parse_expr(input)?;
+
+    Ok((
+        input_len - input.len() + n,
+        Expr::BinaryOperator {
+            operator,
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -186,6 +262,24 @@ mod tests {
                 ResultColumn::All,
                 ResultColumn::ColumnName(b"col")
             ]
+        );
+    }
+
+    #[test]
+    fn test_parse_select_where() {
+        let input = b"select * from foo where id = 5";
+        let (n, select) = parse_select(input).unwrap();
+        assert_eq!(n, input.len());
+        assert_eq!(select.table_name, b"foo");
+        assert_eq!(select.columns, vec![ResultColumn::All,]);
+        assert!(select.selection.is_some());
+        assert_eq!(
+            select.selection.unwrap(),
+            Expr::BinaryOperator {
+                operator: BinaryOperator::Eq,
+                left: Box::new(Expr::Column(b"id")),
+                right: Box::new(Expr::LiteralValue(Value::Integer(5))),
+            }
         );
     }
 

@@ -24,6 +24,7 @@ use crate::parser::parse_create_table;
 use crate::record::Value;
 use crate::utils::upper_to_lower;
 use crate::Columns;
+use crate::NextRow;
 use crate::Statement;
 
 struct SchemaRecord<'a> {
@@ -95,7 +96,12 @@ impl Schema {
         let mut stmt = stmt;
         let mut rows = stmt.execute()?;
         let mut tables = HashMap::new();
-        while let Some(mut row) = rows.next()? {
+        loop {
+            let row = match rows.next()? {
+                NextRow::Some(row) => row,
+                NextRow::Skip => continue,
+                NextRow::None => break,
+            };
             let columns = row.parse()?;
             let schema = SchemaRecord::parse(columns)?;
             match schema.type_ {
@@ -165,6 +171,12 @@ pub struct Table {
     pub columns: Vec<Vec<u8>>,
 }
 
+impl Table {
+    pub fn get_column_index(&self, column: &[u8]) -> Option<usize> {
+        self.columns.iter().position(|c| c == column)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -179,7 +191,7 @@ mod tests {
         let schema_table = Schema::schema_table();
         let columns = (0..schema_table.columns.len()).collect::<Vec<_>>();
         Schema::generate(
-            Statement::new(&mut conn, schema_table.root_page_id, columns),
+            Statement::new(&mut conn, schema_table.root_page_id, columns, None),
             schema_table,
         )
         .unwrap()

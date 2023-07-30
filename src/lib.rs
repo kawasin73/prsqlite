@@ -36,10 +36,14 @@ use crate::cursor::BtreeCursor;
 use crate::cursor::BtreePayload;
 use crate::pager::Pager;
 use crate::parser::parse_select;
+use crate::parser::BinaryOperator;
+use crate::parser::Expr;
 use crate::parser::ResultColumn;
 use crate::record::parse_record_header;
+use crate::record::SerialType;
 pub use crate::record::Value;
 use crate::schema::Schema;
+use crate::schema::Table;
 use crate::token::get_token_no_space;
 use crate::token::Token;
 
@@ -123,7 +127,7 @@ impl Connection {
             let schema_table = Schema::schema_table();
             let columns = (0..schema_table.columns.len()).collect::<Vec<usize>>();
             self.schema = Some(Schema::generate(
-                Statement::new(self, schema_table.root_page_id, columns),
+                Statement::new(self, schema_table.root_page_id, columns, None),
                 schema_table,
             )?);
         }
@@ -142,21 +146,84 @@ impl Connection {
                     }
                 }
                 ResultColumn::ColumnName(column_name) => {
-                    let column_idx = table
-                        .columns
-                        .iter()
-                        .position(|c| c == column_name)
-                        .ok_or(anyhow::anyhow!(
-                            "column not found: {}",
-                            std::str::from_utf8(column_name).unwrap_or_default()
-                        ))?;
+                    let column_idx = table.get_column_index(column_name).ok_or(anyhow::anyhow!(
+                        "column not found: {}",
+                        std::str::from_utf8(column_name).unwrap_or_default()
+                    ))?;
                     columns.push(column_idx);
                 }
             }
         }
 
+        let selection = select.selection.map(|expr| Selection::from(expr, table)).transpose()?;
+
         let table_page_id = table.root_page_id;
-        Ok(Statement::new(self, table_page_id, columns))
+        Ok(Statement::new(self, table_page_id, columns, selection))
+    }
+}
+
+enum Selection {
+    Column(usize),
+    BinaryOperator {
+        operator: BinaryOperator,
+        left: Box<Selection>,
+        right: Box<Selection>,
+    },
+    LiteralValue(i64),
+}
+
+impl Selection {
+    fn execute(&self, row: &Row) -> anyhow::Result<i64> {
+        match self {
+            Self::Column(idx) => {
+                let value = row.get_column(*idx)?;
+                match value {
+                    Value::Integer(i) => Ok(i),
+                    _ => bail!("invalid value for selection: {:?}", value),
+                }
+            }
+            Self::BinaryOperator { operator, left, right } => {
+                let left = left.execute(row)?;
+                let right = right.execute(row)?;
+                let result = match operator {
+                    BinaryOperator::Eq => left == right,
+                    BinaryOperator::Ne => left != right,
+                    BinaryOperator::Lt => left < right,
+                    BinaryOperator::Le => left <= right,
+                    BinaryOperator::Gt => left > right,
+                    BinaryOperator::Ge => left >= right,
+                };
+                if result {
+                    Ok(1)
+                } else {
+                    Ok(0)
+                }
+            }
+            Self::LiteralValue(value) => Ok(*value),
+        }
+    }
+}
+
+impl Selection {
+    fn from(expr: Expr, table: &Table) -> anyhow::Result<Self> {
+        match expr {
+            Expr::LiteralValue(value) => match value {
+                Value::Integer(i) => Ok(Self::LiteralValue(i)),
+                _ => bail!("unsupported literal value: {:?}", value),
+            },
+            Expr::BinaryOperator { operator, left, right } => Ok(Self::BinaryOperator {
+                operator,
+                left: Box::new(Self::from(*left, table)?),
+                right: Box::new(Self::from(*right, table)?),
+            }),
+            Expr::Column(column_name) => table
+                .get_column_index(column_name)
+                .map(Self::Column)
+                .ok_or(anyhow::anyhow!(
+                    "column not found: {}",
+                    std::str::from_utf8(column_name).unwrap_or_default()
+                )),
+        }
     }
 }
 
@@ -165,14 +232,21 @@ pub struct Statement<'conn> {
     conn: &'conn mut Connection,
     table_page_id: u32,
     columns: Vec<usize>,
+    selection: Option<Selection>,
 }
 
 impl<'conn> Statement<'conn> {
-    pub(crate) fn new(conn: &'conn mut Connection, table_page_id: u32, columns: Vec<usize>) -> Self {
+    pub(crate) fn new(
+        conn: &'conn mut Connection,
+        table_page_id: u32,
+        columns: Vec<usize>,
+        selection: Option<Selection>,
+    ) -> Self {
         Self {
             conn,
             table_page_id,
             columns,
+            selection,
         }
     }
 
@@ -190,52 +264,141 @@ pub struct Rows<'conn> {
     cursor: BtreeCursor<'conn>,
 }
 
+/// TODO: Skip should be encapuslated inside [Rows::next]. However we need this due to Rust borrow checker limitation.
+/// This is a workaround for the limitation. This is fixed with `RUSTFLAGS="-Zpolonius"`. polonius is a new borrow
+/// checker but not settled yet.
+///
+/// With original `continue` implementation, we get this error:
+///
+/// ```text
+/// error[E0499]: cannot borrow `self.cursor` as mutable more than once at a time
+///    --> src/lib.rs:295:35
+///    |
+/// 294 |       pub fn next<'a>(&'a mut self) -> anyhow::Result<NextRow<'a, 'conn>> {
+///    |                   -- lifetime `'a` defined here
+/// 295 |           while let Some(payload) = self.cursor.next()? {
+///    |                                     ^^^^^^^^^^^^^^^^^^ `self.cursor` was mutably borrowed here in the previous iteration of the loop
+/// ...
+/// 299 |                   return Ok(NextRow::Row(Row {
+///    |  ________________________-
+/// 300 | |                     stmt: self.stmt,
+/// 301 | |                     payload,
+/// 302 | |                     headers,
+/// ...   |
+/// 305 | |                     tmp_buf: Vec::new(),
+/// 306 | |                 }));
+///    | |___________________- returning this value requires that `self.cursor` is borrowed for `'a`
+/// ```
+///
+/// PoC: https://play.rust-lang.org/?version=stable&mode=debug&edition=2021&gist=0f11c057d716d62ac2f56c90dcf52512
+/// Link: https://users.rust-lang.org/t/mutably-borrowed-in-previous-iteration-despite-no-chance-of-conflicting-borrow/83274
+pub enum NextRow<'a, 'conn> {
+    Some(Row<'a, 'conn>),
+    Skip,
+    None,
+}
+
+impl<'a, 'conn> NextRow<'a, 'conn> {
+    pub fn unwrap(self) -> Row<'a, 'conn> {
+        match self {
+            Self::Some(row) => row,
+            Self::Skip => panic!("called `NextRow::unwrap()` on a `Skip` value"),
+            Self::None => panic!("called `NextRow::unwrap()` on a `None` value"),
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
 impl<'conn> Rows<'conn> {
-    pub fn next<'a>(&'a mut self) -> anyhow::Result<Option<Row<'a, 'conn>>> {
-        Ok(self.cursor.next()?.map(|payload| Row {
-            stmt: self.stmt,
-            payload,
-            tmp_buf: Vec::new(),
-        }))
+    pub fn next<'a>(&'a mut self) -> anyhow::Result<NextRow<'a, 'conn>> {
+        // TODO: Keep this never_loop to make it clear that [NextRow] is a workaround for borrow checker limitation.
+        #[allow(clippy::never_loop)]
+        while let Some(payload) = self.cursor.next()? {
+            let headers = parse_record_header(&payload)?;
+
+            if headers.is_empty() {
+                return Ok(NextRow::Some(Row {
+                    stmt: self.stmt,
+                    payload,
+                    headers,
+                    content_offset: 0,
+                    use_local_buffer: true,
+                    tmp_buf: Vec::new(),
+                }));
+            }
+
+            let content_offset = headers[0].1;
+            let last_header = &headers[headers.len() - 1];
+            let content_size = last_header.1 + last_header.0.content_size() - content_offset;
+            let use_local_buffer = payload.buf().len() >= (content_offset + content_size) as usize;
+            let mut tmp_buf;
+            if use_local_buffer {
+                tmp_buf = Vec::new();
+            } else {
+                tmp_buf = vec![0; content_size as usize];
+                let n = unsafe { payload.load(content_offset, &mut tmp_buf) }?;
+                if n != content_size as usize {
+                    bail!("payload does not have enough size");
+                }
+            };
+
+            let row = Row {
+                stmt: self.stmt,
+                headers,
+                payload,
+                content_offset,
+                use_local_buffer,
+                tmp_buf,
+            };
+
+            if let Some(selection) = &self.stmt.selection {
+                if selection.execute(&row)? == 0 {
+                    // TODO: continue is what we want. However Rust borrow checker does not allow it by accident.
+                    // See the comment of [NextRow] for more details.
+
+                    // continue;
+                    return Ok(NextRow::Skip);
+                }
+            }
+
+            return Ok(NextRow::Some(row));
+        }
+        Ok(NextRow::None)
     }
 }
 
 const STATIC_NULL_VALUE: Value = Value::Null;
 
 pub struct Row<'a, 'conn> {
-    stmt: &'conn Statement<'conn>,
+    stmt: &'a Statement<'conn>,
     pub payload: BtreePayload<'a, 'conn>,
+    headers: Vec<(SerialType, u32)>,
+    content_offset: u32,
+    use_local_buffer: bool,
     tmp_buf: Vec<u8>,
 }
 
 impl<'a, 'conn> Row<'a, 'conn> {
-    pub fn parse(&mut self) -> anyhow::Result<Columns> {
-        let headers = parse_record_header(&self.payload)?;
-
-        if headers.is_empty() {
+    pub fn parse(&self) -> anyhow::Result<Columns> {
+        if self.headers.is_empty() {
             return Ok(Columns(Vec::new()));
         }
 
-        let content_offset = headers[0].1;
-        let last_header = &headers[headers.len() - 1];
-        let content_size = last_header.1 + last_header.0.content_size() - content_offset;
-        let contents_buffer = if self.payload.buf().len() >= (content_offset + content_size) as usize {
-            &self.payload.buf()[content_offset as usize..]
+        let contents_buffer = if self.use_local_buffer {
+            &self.payload.buf()[self.content_offset as usize..]
         } else {
-            self.tmp_buf = vec![0; content_size as usize];
-            let n = unsafe { self.payload.load(content_offset, &mut self.tmp_buf) }?;
-            if n != content_size as usize {
-                bail!("payload does not have enough size");
-            }
             &self.tmp_buf
         };
 
         let mut columns = Vec::with_capacity(self.stmt.columns.len());
         for column_idx in self.stmt.columns.iter() {
-            if let Some((serial_type, offset)) = headers.get(*column_idx) {
+            if let Some((serial_type, offset)) = self.headers.get(*column_idx) {
                 columns.push(
                     serial_type
-                        .parse(&contents_buffer[(offset - content_offset) as usize..])
+                        .parse(&contents_buffer[(offset - self.content_offset) as usize..])
                         .context("parse value")?,
                 );
             } else {
@@ -244,6 +407,21 @@ impl<'a, 'conn> Row<'a, 'conn> {
         }
 
         Ok(Columns(columns))
+    }
+
+    fn get_column(&self, column_idx: usize) -> anyhow::Result<Value> {
+        if let Some((serial_type, offset)) = self.headers.get(column_idx) {
+            let contents_buffer = if self.use_local_buffer {
+                &self.payload.buf()[self.content_offset as usize..]
+            } else {
+                &self.tmp_buf
+            };
+            serial_type
+                .parse(&contents_buffer[(offset - self.content_offset) as usize..])
+                .context("parse value")
+        } else {
+            Ok(STATIC_NULL_VALUE)
+        }
     }
 }
 

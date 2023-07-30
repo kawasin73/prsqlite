@@ -22,8 +22,8 @@ const CHAR_INVALID: u8 = 0xFF;
 static CHAR_LOOKUP_TABLE: [u8; 256] = [
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, b' ', b' ', 0xFF, b' ', b' ', 0xFF, 0xFF, 0xFF, // 0x00 - 0x0F
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0x10 - 0x1F
-    b' ', 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, b'(', b')', b'*', 0xFF, b',', 0xFF, 0xFF, 0xFF, // 0x20 - 0x2F
-    0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0xFF, b';', 0xFF, 0xFF, 0xFF, 0xFF, // 0x30 - 0x3F
+    b' ', b'!', 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, b'(', b')', b'*', 0xFF, b',', 0xFF, 0xFF, 0xFF, // 0x20 - 0x2F
+    0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0xFF, b';', b'<', b'=', b'>', 0xFF, // 0x30 - 0x3F
     0xFF, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, // 0x40 - 0x4F
     0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0x02, // 0x50 - 0x5F
     0xFF, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, // 0x60 - 0x6F
@@ -42,6 +42,7 @@ static CHAR_LOOKUP_TABLE: [u8; 256] = [
 pub enum Token<'a> {
     Select,
     From,
+    Where,
     Create,
     Table,
     Space,
@@ -50,7 +51,21 @@ pub enum Token<'a> {
     Asterisk,
     Comma,
     Semicolon,
+    /// Equal to
+    Eq,
+    /// Not equal to
+    Ne,
+    /// Greater than
+    Gt,
+    /// Greater than or equal to
+    Ge,
+    /// Less than
+    Lt,
+    /// Less than or equal to
+    Le,
     Identifier(&'a [u8]),
+    Integer(i64),
+    Illegal,
 }
 
 pub fn get_token_no_space(input: &[u8]) -> Option<(usize, Token)> {
@@ -76,11 +91,43 @@ pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
             }
             Some((input.len(), Token::Space))
         }
+        b'!' => {
+            if input.len() >= 2 && input[1] == b'=' {
+                Some((2, Token::Ne))
+            } else {
+                Some((1, Token::Illegal))
+            }
+        }
         b'(' => Some((1, Token::LeftParen)),
         b')' => Some((1, Token::RightParen)),
         b'*' => Some((1, Token::Asterisk)),
         b',' => Some((1, Token::Comma)),
         b';' => Some((1, Token::Semicolon)),
+        b'<' => {
+            if input.len() >= 2 {
+                match input[1] {
+                    b'=' => Some((2, Token::Le)),
+                    b'>' => Some((2, Token::Ne)),
+                    _ => Some((1, Token::Lt)),
+                }
+            } else {
+                Some((1, Token::Lt))
+            }
+        }
+        b'=' => {
+            if input.len() >= 2 && input[1] == b'=' {
+                Some((2, Token::Eq))
+            } else {
+                Some((1, Token::Eq))
+            }
+        }
+        b'>' => {
+            if input.len() >= 2 && input[1] == b'=' {
+                Some((2, Token::Ge))
+            } else {
+                Some((1, Token::Gt))
+            }
+        }
         CHAR_ALPHABET | CHAR_UNDERSCORE => {
             let len = len_identifier(input);
             let id = &input[..len];
@@ -92,6 +139,7 @@ pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
                 match &lower_id {
                     b"select" => Some((len, Token::Select)),
                     b"from\0\0" => Some((len, Token::From)),
+                    b"where\0" => Some((len, Token::Where)),
                     b"create" => Some((len, Token::Create)),
                     b"table\0" => Some((len, Token::Table)),
                     _ => Some((len, Token::Identifier(id))),
@@ -101,11 +149,20 @@ pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
             }
         }
         CHAR_DIGIT => {
-            todo!("digits");
+            let mut value = (input[0] - b'0') as i64;
+            let mut len = 1;
+            for &byte in input.iter().skip(1) {
+                match CHAR_LOOKUP_TABLE[byte as usize] {
+                    CHAR_DIGIT => {
+                        value = value * 10 + (byte - b'0') as i64;
+                        len += 1;
+                    }
+                    _ => break,
+                }
+            }
+            Some((len, Token::Integer(value)))
         }
-        CHAR_INVALID => {
-            todo!("error handling");
-        }
+        CHAR_INVALID => Some((1, Token::Illegal)),
         c => {
             unreachable!("unexpected char code: ({}), char: {}", c, input[0]);
         }
@@ -136,9 +193,9 @@ mod tests {
             (';', Token::Semicolon),
         ] {
             let input = format!("{c}");
-            assert_eq!(get_token(input.as_bytes()), Some((1, token)));
+            assert_eq!(get_token(input.as_bytes()), Some((1, token)), "{}", input);
             let input = format!("{c}abc");
-            assert_eq!(get_token(input.as_bytes()), Some((1, token)));
+            assert_eq!(get_token(input.as_bytes()), Some((1, token)), "{}", input);
         }
     }
 
@@ -190,6 +247,7 @@ mod tests {
         for (keyword, token) in [
             ("select", Token::Select),
             ("from", Token::From),
+            ("where", Token::Where),
             ("create", Token::Create),
             ("table", Token::Table),
         ] {
@@ -213,6 +271,26 @@ mod tests {
                 get_token(input.as_bytes()),
                 Some((input.len() - 1, Token::Identifier(&input.as_bytes()[..input.len() - 1])))
             );
+        }
+    }
+
+    #[test]
+    fn test_binary_operators() {
+        for (s, token) in [
+            ("!", Token::Illegal),
+            ("!=", Token::Ne),
+            ("<", Token::Lt),
+            ("<=", Token::Le),
+            ("<>", Token::Ne),
+            ("=", Token::Eq),
+            ("==", Token::Eq),
+            (">", Token::Gt),
+            (">=", Token::Ge),
+        ] {
+            let input = format!("{s}");
+            assert_eq!(get_token(input.as_bytes()), Some((s.len(), token)), "{}", input);
+            let input = format!("{s}abc");
+            assert_eq!(get_token(input.as_bytes()), Some((s.len(), token)), "{}", input);
         }
     }
 
@@ -279,6 +357,27 @@ mod tests {
                 ],
             ),
             (
+                "select(col1,col2)from table1 where col1=10;",
+                vec![
+                    Token::Select,
+                    Token::LeftParen,
+                    Token::Identifier(b"col1"),
+                    Token::Comma,
+                    Token::Identifier(b"col2"),
+                    Token::RightParen,
+                    Token::From,
+                    Token::Space,
+                    Token::Identifier(b"table1"),
+                    Token::Space,
+                    Token::Where,
+                    Token::Space,
+                    Token::Identifier(b"col1"),
+                    Token::Eq,
+                    Token::Integer(10),
+                    Token::Semicolon,
+                ],
+            ),
+            (
                 "CREATE TABLE table1(col1, col2);",
                 vec![
                     Token::Create,
@@ -302,7 +401,7 @@ mod tests {
                 output_tokens.push(token);
                 input_bytes = &input_bytes[len..];
             }
-            assert_eq!(output_tokens, tokens);
+            assert_eq!(output_tokens, tokens, "{}", input);
         }
     }
 }

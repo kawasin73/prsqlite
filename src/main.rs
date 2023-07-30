@@ -36,7 +36,16 @@ fn main() {
                     }
                 };
                 let mut rows = stmt.execute().expect("execute statement");
-                while let Some(mut row) = rows.next().expect("next row") {
+                loop {
+                    let row = match rows.next() {
+                        Ok(prsqlite::NextRow::Some(row)) => row,
+                        Ok(prsqlite::NextRow::Skip) => continue,
+                        Ok(prsqlite::NextRow::None) => break,
+                        Err(e) => {
+                            eprintln!("{e}");
+                            break;
+                        }
+                    };
                     let columns = row.parse().expect("parse row");
                     for i in 0..columns.len() {
                         if i > 0 {
