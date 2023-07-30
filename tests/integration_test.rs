@@ -78,6 +78,82 @@ fn test_select_all_from_table() {
 }
 
 #[test]
+fn test_select_rowid() {
+    let file = create_sqlite_database(&[
+        "CREATE TABLE example(col);",
+        "CREATE TABLE example2(col, roWid);",
+        "INSERT INTO example(col) VALUES (10);",
+        "INSERT INTO example(col) VALUES (20);",
+        "INSERT INTO example2(col) VALUES (10);",
+        "INSERT INTO example2(col, rowid) VALUES (20, 100);",
+    ]);
+
+    let mut conn = Connection::open(file.path()).unwrap();
+    let mut stmt = conn.prepare("SELECT col, RoWid FROM example;").unwrap();
+    let mut rows = stmt.execute().unwrap();
+
+    let row = rows.next().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns.get(0), &Value::Integer(10));
+    assert_eq!(columns.get(1), &Value::Integer(1));
+    drop(row);
+
+    let row = rows.next().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns.get(0), &Value::Integer(20));
+    assert_eq!(columns.get(1), &Value::Integer(2));
+    drop(row);
+
+    assert!(rows.next().unwrap().is_none());
+
+    let mut conn = Connection::open(file.path()).unwrap();
+    let mut stmt = conn.prepare("SELECT col, Rowid FROM example2;").unwrap();
+    let mut rows = stmt.execute().unwrap();
+
+    let row = rows.next().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns.get(0), &Value::Integer(10));
+    assert_eq!(columns.get(1), &Value::Null);
+    drop(row);
+
+    let row = rows.next().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns.get(0), &Value::Integer(20));
+    assert_eq!(columns.get(1), &Value::Integer(100));
+    drop(row);
+
+    assert!(rows.next().unwrap().is_none());
+}
+
+#[test]
+fn test_select_filter_with_rowid() {
+    let file = create_sqlite_database(&[
+        "CREATE TABLE example(col);",
+        "INSERT INTO example(col) VALUES (10);",
+        "INSERT INTO example(col) VALUES (20);",
+    ]);
+
+    let mut conn = Connection::open(file.path()).unwrap();
+    let mut stmt = conn.prepare("SELECT col, RoWid FROM example WHERE rowid = 2;").unwrap();
+    let mut rows = stmt.execute().unwrap();
+
+    assert!(matches!(rows.next().unwrap(), NextRow::Skip));
+
+    let row = rows.next().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns.get(0), &Value::Integer(20));
+    assert_eq!(columns.get(1), &Value::Integer(2));
+    drop(row);
+
+    assert!(rows.next().unwrap().is_none());
+}
+
+#[test]
 fn test_select_partial() {
     let file = create_sqlite_database(&[
         "CREATE TABLE example(col1, col2, col3);",

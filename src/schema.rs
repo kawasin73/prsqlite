@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::iter::Iterator;
 
 use anyhow::bail;
 use anyhow::Context;
@@ -23,6 +24,7 @@ use crate::pager::ROOT_PAGE_ID;
 use crate::parser::parse_create_table;
 use crate::record::Value;
 use crate::utils::upper_to_lower;
+use crate::utils::UpperToLowerBytes;
 use crate::Columns;
 use crate::NextRow;
 use crate::Statement;
@@ -171,9 +173,30 @@ pub struct Table {
     pub columns: Vec<Vec<u8>>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum ColumnIndex {
+    RowId,
+    Column(usize),
+}
+
 impl Table {
-    pub fn get_column_index(&self, column: &[u8]) -> Option<usize> {
-        self.columns.iter().position(|c| c == column)
+    pub fn get_column_index(&self, column: &[u8]) -> Option<ColumnIndex> {
+        let column = UpperToLowerBytes::from(column);
+        if let Some(i) = self
+            .columns
+            .iter()
+            .position(|c| UpperToLowerBytes::from(&c[..]) == column)
+        {
+            Some(ColumnIndex::Column(i))
+        } else if column.equal_to_lower_bytes(&b"rowid"[..]) {
+            Some(ColumnIndex::RowId)
+        } else {
+            None
+        }
+    }
+
+    pub fn all_column_index(&self) -> impl Iterator<Item = ColumnIndex> + '_ {
+        self.columns.iter().enumerate().map(|(i, _)| ColumnIndex::Column(i))
     }
 }
 
@@ -189,7 +212,7 @@ mod tests {
     fn generate_schema(filepath: &Path) -> Schema {
         let mut conn = Connection::open(filepath).unwrap();
         let schema_table = Schema::schema_table();
-        let columns = (0..schema_table.columns.len()).collect::<Vec<_>>();
+        let columns = schema_table.all_column_index().collect::<Vec<_>>();
         Schema::generate(
             Statement::new(&mut conn, schema_table.root_page_id, columns, None),
             schema_table,
@@ -281,5 +304,46 @@ mod tests {
             schema.get_table(b"example3").unwrap().columns,
             vec![b"COL1".to_vec(), b"COL2".to_vec(), b"COL3".to_vec(), b"_".to_vec()]
         );
+    }
+
+    #[test]
+    fn test_table_get_column_index() {
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col);",
+            "CREATE TABLE example2(col1, col2, rowid);",
+        ]);
+        let schema = generate_schema(file.path());
+
+        let table = schema.get_table(b"example").unwrap();
+        assert_eq!(table.get_column_index(b"col"), Some(ColumnIndex::Column(0)));
+        assert_eq!(table.get_column_index(b"rowid"), Some(ColumnIndex::RowId));
+        assert_eq!(table.get_column_index(b"invalid"), None);
+
+        let table = schema.get_table(b"example2").unwrap();
+        assert_eq!(table.get_column_index(b"col1"), Some(ColumnIndex::Column(0)));
+        assert_eq!(table.get_column_index(b"col2"), Some(ColumnIndex::Column(1)));
+        assert_eq!(table.get_column_index(b"rowid"), Some(ColumnIndex::Column(2)));
+        assert_eq!(table.get_column_index(b"invalid"), None);
+    }
+
+    #[test]
+    fn test_table_all_column_index() {
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col);",
+            "CREATE TABLE example2(col1, col2, rowid);",
+        ]);
+        let schema = generate_schema(file.path());
+
+        let table = schema.get_table(b"example").unwrap();
+        let mut iter = table.all_column_index();
+        assert_eq!(iter.next(), Some(ColumnIndex::Column(0)));
+        assert_eq!(iter.next(), None);
+
+        let table = schema.get_table(b"example2").unwrap();
+        let mut iter = table.all_column_index();
+        assert_eq!(iter.next(), Some(ColumnIndex::Column(0)));
+        assert_eq!(iter.next(), Some(ColumnIndex::Column(1)));
+        assert_eq!(iter.next(), Some(ColumnIndex::Column(2)));
+        assert_eq!(iter.next(), None);
     }
 }

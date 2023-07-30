@@ -85,6 +85,45 @@ pub fn upper_to_lower(buf: &mut [u8]) {
     }
 }
 
+/// A wrapper for bytes to compare each other case insensitively with zero allocation.
+#[derive(Eq)]
+pub struct UpperToLowerBytes<'a>(&'a [u8]);
+
+impl UpperToLowerBytes<'_> {
+    /// Compare with lower case bytes.
+    pub fn equal_to_lower_bytes(&self, other: &[u8]) -> bool {
+        if self.0.len() != other.len() {
+            return false;
+        }
+        for (i, b) in self.0.iter().enumerate() {
+            if UPPER_TO_LOWER[*b as usize] != other[i] {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl<'a> From<&'a [u8]> for UpperToLowerBytes<'a> {
+    fn from(bytes: &'a [u8]) -> Self {
+        UpperToLowerBytes(bytes)
+    }
+}
+
+impl PartialEq for UpperToLowerBytes<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.0.len() != other.0.len() {
+            return false;
+        }
+        for (i, b) in self.0.iter().enumerate() {
+            if UPPER_TO_LOWER[*b as usize] != UPPER_TO_LOWER[other.0[i] as usize] {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +206,25 @@ mod tests {
             }
             assert_eq!(UPPER_TO_LOWER[c as usize], c);
         }
+    }
+
+    #[test]
+    fn test_upper_to_lower_bytes() {
+        assert!(UpperToLowerBytes::from("".as_bytes()) == (UpperToLowerBytes::from("".as_bytes())));
+        assert!(UpperToLowerBytes::from("abc".as_bytes()) != (UpperToLowerBytes::from("abcd".as_bytes())));
+        assert!(UpperToLowerBytes::from("abc".as_bytes()) == (UpperToLowerBytes::from("abc".as_bytes())));
+        assert!(UpperToLowerBytes::from("ABc".as_bytes()) == (UpperToLowerBytes::from("aBC".as_bytes())));
+        assert!(UpperToLowerBytes::from("abc".as_bytes()) != (UpperToLowerBytes::from("abd".as_bytes())));
+    }
+
+    #[test]
+    fn test_equal_to_lower_bytes() {
+        assert!(UpperToLowerBytes::from("".as_bytes()).equal_to_lower_bytes("".as_bytes()));
+        assert!(!UpperToLowerBytes::from("abc".as_bytes()).equal_to_lower_bytes("abcd".as_bytes()));
+        assert!(UpperToLowerBytes::from("abc".as_bytes()).equal_to_lower_bytes("abc".as_bytes()));
+        assert!(UpperToLowerBytes::from("ABC".as_bytes()).equal_to_lower_bytes("abc".as_bytes()));
+        assert!(UpperToLowerBytes::from("AbC".as_bytes()).equal_to_lower_bytes("abc".as_bytes()));
+        // If the other part is not lower case, it always returns false.
+        assert!(!UpperToLowerBytes::from("abc".as_bytes()).equal_to_lower_bytes("Abc".as_bytes()));
     }
 }

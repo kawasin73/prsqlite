@@ -27,6 +27,7 @@ use crate::pager::PageId;
 use crate::pager::Pager;
 
 pub struct BtreePayload<'a, 'pager> {
+    key: i64,
     pager: &'pager Pager,
     local_payload_buffer: PageBuffer<'a>,
     local_payload_range: Range<usize>,
@@ -35,6 +36,11 @@ pub struct BtreePayload<'a, 'pager> {
 }
 
 impl<'a, 'pager> BtreePayload<'a, 'pager> {
+    /// The key of the cell.
+    pub fn key(&self) -> i64 {
+        self.key
+    }
+
     /// The size of the payload.
     pub fn size(&self) -> u32 {
         self.size
@@ -145,11 +151,12 @@ impl<'pager> BtreeCursor<'pager> {
                     return Ok(None);
                 }
             } else if page_header.is_leaf() {
-                let (_, size, payload_range, overflow) =
+                let (key, size, payload_range, overflow) =
                     parse_btree_leaf_table_cell(&self.current_page, &buffer, self.idx_cell, self.usable_size)
                         .map_err(|e| anyhow::anyhow!("parse tree leaf table cell: {:?}", e))?;
                 self.idx_cell += 1;
                 return Ok(Some(BtreePayload {
+                    key,
                     pager: self.pager,
                     local_payload_buffer: self.current_page.buffer(),
                     local_payload_range: payload_range,

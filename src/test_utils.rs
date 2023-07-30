@@ -57,7 +57,7 @@ pub fn buffer_to_hex(buf: &[u8]) -> String {
 pub fn find_table_page_id(table: &str, filepath: &Path) -> PageId {
     let mut conn = Connection::open(filepath).unwrap();
     let schema_table = Schema::schema_table();
-    let columns = (0..schema_table.columns.len()).collect::<Vec<_>>();
+    let columns = schema_table.all_column_index().collect::<Vec<_>>();
     let schema = Schema::generate(
         Statement::new(&mut conn, schema_table.root_page_id, columns, None),
         schema_table,

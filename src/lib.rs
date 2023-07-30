@@ -42,6 +42,7 @@ use crate::parser::ResultColumn;
 use crate::record::parse_record_header;
 use crate::record::SerialType;
 pub use crate::record::Value;
+use crate::schema::ColumnIndex;
 use crate::schema::Schema;
 use crate::schema::Table;
 use crate::token::get_token_no_space;
@@ -125,7 +126,7 @@ impl Connection {
         }
         if self.schema.is_none() {
             let schema_table = Schema::schema_table();
-            let columns = (0..schema_table.columns.len()).collect::<Vec<usize>>();
+            let columns = schema_table.all_column_index().collect::<Vec<_>>();
             self.schema = Some(Schema::generate(
                 Statement::new(self, schema_table.root_page_id, columns, None),
                 schema_table,
@@ -141,8 +142,8 @@ impl Connection {
         for column in select.columns.iter() {
             match column {
                 ResultColumn::All => {
-                    for i in 0..table.columns.len() {
-                        columns.push(i);
+                    for column_idx in table.all_column_index() {
+                        columns.push(column_idx);
                     }
                 }
                 ResultColumn::ColumnName(column_name) => {
@@ -163,7 +164,7 @@ impl Connection {
 }
 
 enum Selection {
-    Column(usize),
+    Column(ColumnIndex),
     BinaryOperator {
         operator: BinaryOperator,
         left: Box<Selection>,
@@ -176,7 +177,7 @@ impl Selection {
     fn execute(&self, row: &Row) -> anyhow::Result<i64> {
         match self {
             Self::Column(idx) => {
-                let value = row.get_column(*idx)?;
+                let value = row.get_column(idx)?;
                 match value {
                     Value::Integer(i) => Ok(i),
                     _ => bail!("invalid value for selection: {:?}", value),
@@ -231,7 +232,7 @@ impl Selection {
 pub struct Statement<'conn> {
     conn: &'conn mut Connection,
     table_page_id: u32,
-    columns: Vec<usize>,
+    columns: Vec<ColumnIndex>,
     selection: Option<Selection>,
 }
 
@@ -239,7 +240,7 @@ impl<'conn> Statement<'conn> {
     pub(crate) fn new(
         conn: &'conn mut Connection,
         table_page_id: u32,
-        columns: Vec<usize>,
+        columns: Vec<ColumnIndex>,
         selection: Option<Selection>,
     ) -> Self {
         Self {
@@ -383,44 +384,31 @@ pub struct Row<'a, 'conn> {
 
 impl<'a, 'conn> Row<'a, 'conn> {
     pub fn parse(&self) -> anyhow::Result<Columns> {
-        if self.headers.is_empty() {
-            return Ok(Columns(Vec::new()));
-        }
-
-        let contents_buffer = if self.use_local_buffer {
-            &self.payload.buf()[self.content_offset as usize..]
-        } else {
-            &self.tmp_buf
-        };
-
         let mut columns = Vec::with_capacity(self.stmt.columns.len());
         for column_idx in self.stmt.columns.iter() {
-            if let Some((serial_type, offset)) = self.headers.get(*column_idx) {
-                columns.push(
-                    serial_type
-                        .parse(&contents_buffer[(offset - self.content_offset) as usize..])
-                        .context("parse value")?,
-                );
-            } else {
-                columns.push(STATIC_NULL_VALUE);
-            }
+            columns.push(self.get_column(column_idx)?);
         }
 
         Ok(Columns(columns))
     }
 
-    fn get_column(&self, column_idx: usize) -> anyhow::Result<Value> {
-        if let Some((serial_type, offset)) = self.headers.get(column_idx) {
-            let contents_buffer = if self.use_local_buffer {
-                &self.payload.buf()[self.content_offset as usize..]
-            } else {
-                &self.tmp_buf
-            };
-            serial_type
-                .parse(&contents_buffer[(offset - self.content_offset) as usize..])
-                .context("parse value")
-        } else {
-            Ok(STATIC_NULL_VALUE)
+    fn get_column(&self, column_idx: &ColumnIndex) -> anyhow::Result<Value> {
+        match column_idx {
+            ColumnIndex::Column(idx) => {
+                if let Some((serial_type, offset)) = self.headers.get(*idx) {
+                    let contents_buffer = if self.use_local_buffer {
+                        &self.payload.buf()[self.content_offset as usize..]
+                    } else {
+                        &self.tmp_buf
+                    };
+                    serial_type
+                        .parse(&contents_buffer[(offset - self.content_offset) as usize..])
+                        .context("parse value")
+                } else {
+                    Ok(STATIC_NULL_VALUE)
+                }
+            }
+            ColumnIndex::RowId => Ok(Value::Integer(self.payload.key())),
         }
     }
 }
