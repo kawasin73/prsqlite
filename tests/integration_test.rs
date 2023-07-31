@@ -154,6 +154,33 @@ fn test_select_filter_with_rowid() {
 }
 
 #[test]
+fn test_select_filter_with_primary_key() {
+    let file = create_sqlite_database(&[
+        "CREATE TABLE example(id integer primary key, col text);",
+        "INSERT INTO example(id, col) VALUES (1, '10');",
+        "INSERT INTO example(id, col) VALUES (3, '20');",
+        "INSERT INTO example(id, col) VALUES (5, '30');",
+        "INSERT INTO example(id, col) VALUES (6, '40');",
+    ]);
+    let mut conn = Connection::open(file.path()).unwrap();
+
+    let mut stmt = conn.prepare("SELECT col, RoWid FROM example WHERE id = 3;").unwrap();
+    let mut rows = stmt.execute().unwrap();
+    let row = rows.next().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns.get(0), &Value::Text("20"));
+    assert_eq!(columns.get(1), &Value::Integer(3));
+    drop(row);
+    assert!(rows.next().unwrap().is_none());
+
+    let mut stmt = conn.prepare("SELECT col, RoWid FROM example WHERE id = 4;").unwrap();
+    let mut rows = stmt.execute().unwrap();
+    assert!(matches!(rows.next().unwrap(), NextRow::Skip));
+    assert!(rows.next().unwrap().is_none());
+}
+
+#[test]
 fn test_select_partial() {
     let file = create_sqlite_database(&[
         "CREATE TABLE example(col1, col2, col3);",

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::hash::{Hash, Hasher};
+
 const VARINT_FLAG_MASK: u8 = 0b1000_0000;
 const VARINT_VAR_MASK: u8 = !VARINT_FLAG_MASK;
 
@@ -87,9 +89,9 @@ pub fn upper_to_lower(buf: &mut [u8]) {
 
 /// A wrapper for bytes to compare each other case insensitively with zero allocation.
 #[derive(Eq)]
-pub struct UpperToLowerBytes<'a>(&'a [u8]);
+pub struct CaseInsensitiveBytes<'a>(&'a [u8]);
 
-impl UpperToLowerBytes<'_> {
+impl CaseInsensitiveBytes<'_> {
     /// Compare with lower case bytes.
     pub fn equal_to_lower_bytes(&self, other: &[u8]) -> bool {
         if self.0.len() != other.len() {
@@ -104,13 +106,13 @@ impl UpperToLowerBytes<'_> {
     }
 }
 
-impl<'a> From<&'a [u8]> for UpperToLowerBytes<'a> {
+impl<'a> From<&'a [u8]> for CaseInsensitiveBytes<'a> {
     fn from(bytes: &'a [u8]) -> Self {
-        UpperToLowerBytes(bytes)
+        CaseInsensitiveBytes(bytes)
     }
 }
 
-impl PartialEq for UpperToLowerBytes<'_> {
+impl PartialEq for CaseInsensitiveBytes<'_> {
     fn eq(&self, other: &Self) -> bool {
         if self.0.len() != other.0.len() {
             return false;
@@ -121,6 +123,14 @@ impl PartialEq for UpperToLowerBytes<'_> {
             }
         }
         true
+    }
+}
+
+impl Hash for CaseInsensitiveBytes<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        for b in self.0.iter() {
+            state.write_u8(UPPER_TO_LOWER[*b as usize]);
+        }
     }
 }
 
@@ -209,22 +219,22 @@ mod tests {
     }
 
     #[test]
-    fn test_upper_to_lower_bytes() {
-        assert!(UpperToLowerBytes::from("".as_bytes()) == (UpperToLowerBytes::from("".as_bytes())));
-        assert!(UpperToLowerBytes::from("abc".as_bytes()) != (UpperToLowerBytes::from("abcd".as_bytes())));
-        assert!(UpperToLowerBytes::from("abc".as_bytes()) == (UpperToLowerBytes::from("abc".as_bytes())));
-        assert!(UpperToLowerBytes::from("ABc".as_bytes()) == (UpperToLowerBytes::from("aBC".as_bytes())));
-        assert!(UpperToLowerBytes::from("abc".as_bytes()) != (UpperToLowerBytes::from("abd".as_bytes())));
+    fn test_case_insensitive_bytes() {
+        assert!(CaseInsensitiveBytes::from("".as_bytes()) == (CaseInsensitiveBytes::from("".as_bytes())));
+        assert!(CaseInsensitiveBytes::from("abc".as_bytes()) != (CaseInsensitiveBytes::from("abcd".as_bytes())));
+        assert!(CaseInsensitiveBytes::from("abc".as_bytes()) == (CaseInsensitiveBytes::from("abc".as_bytes())));
+        assert!(CaseInsensitiveBytes::from("ABc".as_bytes()) == (CaseInsensitiveBytes::from("aBC".as_bytes())));
+        assert!(CaseInsensitiveBytes::from("abc".as_bytes()) != (CaseInsensitiveBytes::from("abd".as_bytes())));
     }
 
     #[test]
     fn test_equal_to_lower_bytes() {
-        assert!(UpperToLowerBytes::from("".as_bytes()).equal_to_lower_bytes("".as_bytes()));
-        assert!(!UpperToLowerBytes::from("abc".as_bytes()).equal_to_lower_bytes("abcd".as_bytes()));
-        assert!(UpperToLowerBytes::from("abc".as_bytes()).equal_to_lower_bytes("abc".as_bytes()));
-        assert!(UpperToLowerBytes::from("ABC".as_bytes()).equal_to_lower_bytes("abc".as_bytes()));
-        assert!(UpperToLowerBytes::from("AbC".as_bytes()).equal_to_lower_bytes("abc".as_bytes()));
+        assert!(CaseInsensitiveBytes::from("".as_bytes()).equal_to_lower_bytes("".as_bytes()));
+        assert!(!CaseInsensitiveBytes::from("abc".as_bytes()).equal_to_lower_bytes("abcd".as_bytes()));
+        assert!(CaseInsensitiveBytes::from("abc".as_bytes()).equal_to_lower_bytes("abc".as_bytes()));
+        assert!(CaseInsensitiveBytes::from("ABC".as_bytes()).equal_to_lower_bytes("abc".as_bytes()));
+        assert!(CaseInsensitiveBytes::from("AbC".as_bytes()).equal_to_lower_bytes("abc".as_bytes()));
         // If the other part is not lower case, it always returns false.
-        assert!(!UpperToLowerBytes::from("abc".as_bytes()).equal_to_lower_bytes("Abc".as_bytes()));
+        assert!(!CaseInsensitiveBytes::from("abc".as_bytes()).equal_to_lower_bytes("Abc".as_bytes()));
     }
 }

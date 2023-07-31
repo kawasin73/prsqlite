@@ -15,13 +15,34 @@
 use crate::record::Value;
 use crate::token::get_token_no_space;
 use crate::token::Token;
+use crate::utils::CaseInsensitiveBytes;
 
 pub type Error = &'static str;
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct CreateTable<'a> {
     pub table_name: &'a [u8],
-    pub columns: Vec<&'a [u8]>,
+    pub columns: Vec<ColumnDef<'a>>,
+}
+
+/// Definition of a column in a table.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ColumnDef<'a> {
+    pub name: &'a [u8],
+    pub data_type: Option<DataType>,
+    pub primary_key: bool,
+}
+
+/// Data Type.
+///
+/// https://www.sqlite.org/datatype3.html
+#[derive(Debug, PartialEq, Eq)]
+pub enum DataType {
+    Null,
+    Integer,
+    Real,
+    Text,
+    Blob,
 }
 
 /// Parse CREATE TABLE statement.
@@ -54,23 +75,75 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
     }
     let mut columns = Vec::new();
     loop {
-        if let Some((n, Token::Identifier(column_name))) = get_token_no_space(input) {
+        let name = if let Some((n, Token::Identifier(column_name))) = get_token_no_space(input) {
             input = &input[n..];
-            columns.push(column_name);
+            column_name
         } else {
             return Err("no column name");
-        }
-        match get_token_no_space(input) {
-            Some((n, Token::Comma)) => {
+        };
+
+        let (mut n, mut token) = get_token_no_space(input).ok_or("no right paren")?;
+        input = &input[n..];
+        let data_type = match token {
+            Token::Null => {
+                (n, token) = get_token_no_space(input).ok_or("no right paren")?;
+                input = &input[n..];
+                Some(DataType::Null)
+            }
+            Token::Identifier(data_type) => {
+                (n, token) = get_token_no_space(input).ok_or("no right paren")?;
+                input = &input[n..];
+
+                // TODO: compare the performance of UpperToLowerBytes::equal_to_lower_bytes or match + [u8;7]
+                let data_type = CaseInsensitiveBytes::from(data_type);
+                let data_type = if data_type.equal_to_lower_bytes(b"integer") {
+                    DataType::Integer
+                } else if data_type.equal_to_lower_bytes(b"real") {
+                    DataType::Real
+                } else if data_type.equal_to_lower_bytes(b"text") {
+                    DataType::Text
+                } else if data_type.equal_to_lower_bytes(b"blob") {
+                    DataType::Blob
+                } else {
+                    return Err("unknown data type");
+                };
+                Some(data_type)
+            }
+            _ => None,
+        };
+
+        let primary_key = if let Token::Primary = token {
+            match get_token_no_space(input) {
+                Some((n, Token::Key)) => {
+                    input = &input[n..];
+                }
+                _ => return Err("no key"),
+            }
+            (n, token) = get_token_no_space(input).ok_or("no right paren")?;
+            input = &input[n..];
+
+            true
+        } else {
+            false
+        };
+
+        columns.push(ColumnDef {
+            name,
+            data_type,
+            primary_key,
+        });
+
+        match token {
+            Token::Comma => {
                 input = &input[n..];
             }
-            Some((n, Token::RightParen)) => {
-                input = &input[n..];
+            Token::RightParen => {
                 break;
             }
             _ => return Err("no right paren"),
         }
     }
+
     Ok((len_input - input.len(), CreateTable { table_name, columns }))
 }
 
@@ -214,12 +287,45 @@ mod tests {
 
     #[test]
     fn test_parse_create_table() {
-        let input = b"create table foo (id, name)";
+        let input = b"create table foo (id integer primary key, name text, real real, blob blob, empty null, no_type)";
         let (n, create_table) = parse_create_table(input).unwrap();
         assert_eq!(n, input.len());
         assert_eq!(create_table.table_name, b"foo");
-        let expected_columns: Vec<&[u8]> = vec![b"id", b"name"];
-        assert_eq!(create_table.columns, expected_columns);
+        assert_eq!(
+            create_table.columns,
+            vec![
+                ColumnDef {
+                    name: b"id",
+                    data_type: Some(DataType::Integer),
+                    primary_key: true,
+                },
+                ColumnDef {
+                    name: b"name",
+                    data_type: Some(DataType::Text),
+                    primary_key: false,
+                },
+                ColumnDef {
+                    name: b"real",
+                    data_type: Some(DataType::Real),
+                    primary_key: false,
+                },
+                ColumnDef {
+                    name: b"blob",
+                    data_type: Some(DataType::Blob),
+                    primary_key: false,
+                },
+                ColumnDef {
+                    name: b"empty",
+                    data_type: Some(DataType::Null),
+                    primary_key: false,
+                },
+                ColumnDef {
+                    name: b"no_type",
+                    data_type: None,
+                    primary_key: false,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -228,15 +334,33 @@ mod tests {
         let (n, create_table) = parse_create_table(input).unwrap();
         assert_eq!(n, input.len() - 4);
         assert_eq!(create_table.table_name, b"Foo");
-        let expected_columns: Vec<&[u8]> = vec![b"Id", b"Name"];
-        assert_eq!(create_table.columns, expected_columns);
+        assert_eq!(
+            create_table.columns,
+            vec![
+                ColumnDef {
+                    name: b"Id",
+                    data_type: None,
+                    primary_key: false,
+                },
+                ColumnDef {
+                    name: b"Name",
+                    data_type: None,
+                    primary_key: false,
+                }
+            ]
+        );
     }
 
     #[test]
     fn test_parse_create_table_fail() {
         // no right paren.
-        let input = b"create table foo (id, name ";
-        assert!(parse_create_table(input).is_err());
+        assert!(parse_create_table(b"create table foo (id, name ").is_err());
+        // invalid data_type.
+        assert!(parse_create_table(b"create table foo (id, name invalid)").is_err());
+        // primary without key.
+        assert!(parse_create_table(b"create table foo (id primary, name)").is_err());
+        // key without primary.
+        assert!(parse_create_table(b"create table foo (id key, name)").is_err());
     }
 
     #[test]

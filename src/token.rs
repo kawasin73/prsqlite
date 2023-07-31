@@ -45,6 +45,9 @@ pub enum Token<'a> {
     Where,
     Create,
     Table,
+    Primary,
+    Key,
+    Null,
     Space,
     LeftParen,
     RightParen,
@@ -131,17 +134,21 @@ pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
         CHAR_ALPHABET | CHAR_UNDERSCORE => {
             let len = len_identifier(input);
             let id = &input[..len];
-            if len <= 6 {
-                let mut lower_id = [0; 6];
-                for (i, &byte) in id.iter().take(6).enumerate() {
+            const MAX_KEYWORD_LEN: usize = 7;
+            if len <= MAX_KEYWORD_LEN {
+                let mut lower_id = [0; MAX_KEYWORD_LEN];
+                for (i, &byte) in id.iter().take(MAX_KEYWORD_LEN).enumerate() {
                     lower_id[i] = UPPER_TO_LOWER[byte as usize];
                 }
                 match &lower_id {
-                    b"select" => Some((len, Token::Select)),
-                    b"from\0\0" => Some((len, Token::From)),
-                    b"where\0" => Some((len, Token::Where)),
-                    b"create" => Some((len, Token::Create)),
-                    b"table\0" => Some((len, Token::Table)),
+                    b"select\0" => Some((len, Token::Select)),
+                    b"from\0\0\0" => Some((len, Token::From)),
+                    b"where\0\0" => Some((len, Token::Where)),
+                    b"create\0" => Some((len, Token::Create)),
+                    b"table\0\0" => Some((len, Token::Table)),
+                    b"primary" => Some((len, Token::Primary)),
+                    b"key\0\0\0\0" => Some((len, Token::Key)),
+                    b"null\0\0\0" => Some((len, Token::Null)),
                     _ => Some((len, Token::Identifier(id))),
                 }
             } else {
@@ -250,6 +257,8 @@ mod tests {
             ("where", Token::Where),
             ("create", Token::Create),
             ("table", Token::Table),
+            ("primary", Token::Primary),
+            ("key", Token::Key),
         ] {
             assert_eq!(get_token(keyword.as_bytes()), Some((keyword.len(), token)));
             let input = format!("{keyword} ");
@@ -378,7 +387,7 @@ mod tests {
                 ],
             ),
             (
-                "CREATE TABLE table1(col1, col2);",
+                "CREATE TABLE table1(col1, col2, col3 integer primary key);",
                 vec![
                     Token::Create,
                     Token::Space,
@@ -390,6 +399,15 @@ mod tests {
                     Token::Comma,
                     Token::Space,
                     Token::Identifier(b"col2"),
+                    Token::Comma,
+                    Token::Space,
+                    Token::Identifier(b"col3"),
+                    Token::Space,
+                    Token::Identifier(b"integer"),
+                    Token::Space,
+                    Token::Primary,
+                    Token::Space,
+                    Token::Key,
                     Token::RightParen,
                     Token::Semicolon,
                 ],

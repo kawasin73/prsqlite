@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::iter::Iterator;
 
 use anyhow::bail;
@@ -22,9 +23,10 @@ pub use crate::btree::*;
 use crate::pager::PageId;
 use crate::pager::ROOT_PAGE_ID;
 use crate::parser::parse_create_table;
+pub use crate::parser::DataType;
 use crate::record::Value;
 use crate::utils::upper_to_lower;
-use crate::utils::UpperToLowerBytes;
+use crate::utils::CaseInsensitiveBytes;
 use crate::Columns;
 use crate::NextRow;
 use crate::Statement;
@@ -42,27 +44,27 @@ impl<'a> SchemaRecord<'a> {
         let type_ = if let &Value::Text(type_) = columns.get(0) {
             type_
         } else {
-            bail!("invalid type");
+            bail!("invalid type: {:?}", columns.get(0));
         };
         let name = if let &Value::Text(name) = columns.get(1) {
             name
         } else {
-            bail!("invalid name");
+            bail!("invalid name: {:?}", columns.get(1));
         };
         let table_name = if let &Value::Text(table_name) = columns.get(2) {
             table_name
         } else {
-            bail!("invalid table name");
+            bail!("invalid tbl_name: {:?}", columns.get(2));
         };
         let root_page_id = if let &Value::Integer(root_page_id) = columns.get(3) {
             root_page_id.try_into().context("parse root_page_id")?
         } else {
-            bail!("invalid table name");
+            bail!("invalid root_page_id: {:?}", columns.get(3));
         };
-        let sql = if let &Value::Text(sql) = columns.get(4) {
-            sql
-        } else {
-            bail!("invalid table name");
+        let sql = match *columns.get(4) {
+            Value::Null => "",
+            Value::Text(sql) => sql,
+            _ => bail!("invalid sql: {:?}", columns.get(4)),
         };
         Ok(Self {
             type_,
@@ -85,11 +87,31 @@ impl Schema {
         Table {
             root_page_id: ROOT_PAGE_ID,
             columns: vec![
-                b"type".to_vec(),
-                b"name".to_vec(),
-                b"tbl_name".to_vec(),
-                b"rootpage".to_vec(),
-                b"sql".to_vec(),
+                Column {
+                    name: b"type".to_vec(),
+                    data_type: Some(DataType::Text),
+                    primary_key: false,
+                },
+                Column {
+                    name: b"name".to_vec(),
+                    data_type: Some(DataType::Text),
+                    primary_key: false,
+                },
+                Column {
+                    name: b"tbl_name".to_vec(),
+                    data_type: Some(DataType::Text),
+                    primary_key: false,
+                },
+                Column {
+                    name: b"rootpage".to_vec(),
+                    data_type: Some(DataType::Integer),
+                    primary_key: false,
+                },
+                Column {
+                    name: b"sql".to_vec(),
+                    data_type: Some(DataType::Text),
+                    primary_key: false,
+                },
             ],
         }
     }
@@ -115,26 +137,15 @@ impl Schema {
                             schema.table_name
                         );
                     }
-                    let (n, create_table) = parse_create_table(schema.sql.as_bytes())
-                        .map_err(|e| anyhow::anyhow!("parse create table sql: {:?}", e))?;
-                    if create_table.table_name != schema.name.as_bytes() {
+                    let (table_name, table) =
+                        Table::parse(schema.sql, schema.root_page_id).context("parse create table sql")?;
+                    if table_name != schema.name.as_bytes() {
                         bail!(
                             "table name does not match: table_name={:?}, parsed_table_name={:?}",
                             schema.table_name,
-                            create_table.table_name
+                            table_name
                         );
                     }
-                    if n != schema.sql.as_bytes().len() {
-                        bail!(
-                            "create table sql in sqlite_schema contains useless contents at the tail: {}",
-                            schema.sql
-                        );
-                    }
-                    let columns = create_table.columns.iter().map(|name| name.to_vec()).collect();
-                    let table = Table {
-                        root_page_id: schema.root_page_id,
-                        columns,
-                    };
                     let mut key = schema.name.as_bytes().to_vec();
                     upper_to_lower(&mut key);
                     tables.insert(key, table);
@@ -168,9 +179,11 @@ impl Schema {
     }
 }
 
-pub struct Table {
-    pub root_page_id: PageId,
-    pub columns: Vec<Vec<u8>>,
+#[derive(Debug, PartialEq, Eq)]
+pub struct Column {
+    pub name: Vec<u8>,
+    pub data_type: Option<DataType>,
+    pub primary_key: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -179,15 +192,61 @@ pub enum ColumnIndex {
     Column(usize),
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct Table {
+    pub root_page_id: PageId,
+    pub columns: Vec<Column>,
+}
+
 impl Table {
+    fn parse(sql: &str, root_page_id: PageId) -> anyhow::Result<(Vec<u8>, Self)> {
+        let (n, create_table) =
+            parse_create_table(sql.as_bytes()).map_err(|e| anyhow::anyhow!("parse create table sql: {:?}", e))?;
+        if n != sql.as_bytes().len() {
+            bail!(
+                "create table sql in sqlite_schema contains useless contents at the tail: {}",
+                sql
+            );
+        }
+        let name = create_table.table_name.to_vec();
+        let mut columns = Vec::with_capacity(create_table.columns.len());
+        let mut has_primary_key = false;
+        let mut column_name_set = HashSet::new();
+        for column_def in create_table.columns {
+            if column_def.primary_key {
+                if has_primary_key {
+                    bail!("multiple primary key");
+                }
+                has_primary_key = true;
+            }
+            let column_name = CaseInsensitiveBytes::from(column_def.name);
+            if column_name_set.contains(&column_name) {
+                bail!("duplicate column name: {:?}", column_def.name);
+            }
+            column_name_set.insert(column_name);
+
+            columns.push(Column {
+                name: column_def.name.to_vec(),
+                data_type: column_def.data_type,
+                primary_key: column_def.primary_key,
+            });
+        }
+        Ok((name, Table { root_page_id, columns }))
+    }
+
     pub fn get_column_index(&self, column: &[u8]) -> Option<ColumnIndex> {
-        let column = UpperToLowerBytes::from(column);
+        let column = CaseInsensitiveBytes::from(column);
         if let Some(i) = self
             .columns
             .iter()
-            .position(|c| UpperToLowerBytes::from(&c[..]) == column)
+            .position(|c| CaseInsensitiveBytes::from(&c.name[..]) == column)
         {
-            Some(ColumnIndex::Column(i))
+            let column = &self.columns[i];
+            if column.primary_key && column.data_type == Some(DataType::Integer) {
+                Some(ColumnIndex::RowId)
+            } else {
+                Some(ColumnIndex::Column(i))
+            }
         } else if column.equal_to_lower_bytes(&b"rowid"[..]) {
             Some(ColumnIndex::RowId)
         } else {
@@ -196,7 +255,13 @@ impl Table {
     }
 
     pub fn all_column_index(&self) -> impl Iterator<Item = ColumnIndex> + '_ {
-        self.columns.iter().enumerate().map(|(i, _)| ColumnIndex::Column(i))
+        self.columns.iter().enumerate().map(|(i, column)| {
+            if column.primary_key && column.data_type == Some(DataType::Integer) {
+                ColumnIndex::RowId
+            } else {
+                ColumnIndex::Column(i)
+            }
+        })
     }
 }
 
@@ -287,22 +352,92 @@ mod tests {
     }
 
     #[test]
-    fn get_table_columns() {
+    fn parse_table_failure() {
+        // multiple primary key
+        assert!(Table::parse(
+            "create table example(col, col1 integer primary key, col2 text primary key)",
+            1
+        )
+        .is_err());
+        // duplicated column name
+        assert!(Table::parse("create table example(col, col integer)", 2).is_err());
+    }
+
+    #[test]
+    fn get_table() {
         let file = create_sqlite_database(&[
             "CREATE TABLE example(col);",
-            "CREATE TABLE example2(col1, col2);",
-            "CREATE TABLE example3(COL1, COL2, COL3, _);",
+            "CREATE TABLE example2(col1 null, col2 integer);",
+            "CREATE TABLE example3(COL1 real, Col2 text primary key, cOL3 blob, _);",
+            "CREATE TABLE example4(id integer primary key, col);",
         ]);
         let schema = generate_schema(file.path());
 
-        assert_eq!(schema.get_table(b"example").unwrap().columns, vec![b"col".to_vec()]);
+        assert_eq!(
+            schema.get_table(b"example").unwrap(),
+            &Table {
+                root_page_id: 2,
+                columns: vec![Column {
+                    name: b"col".to_vec(),
+                    data_type: None,
+                    primary_key: false,
+                }]
+            }
+        );
         assert_eq!(
             schema.get_table(b"example2").unwrap().columns,
-            vec![b"col1".to_vec(), b"col2".to_vec()]
+            vec![
+                Column {
+                    name: b"col1".to_vec(),
+                    data_type: Some(DataType::Null),
+                    primary_key: false,
+                },
+                Column {
+                    name: b"col2".to_vec(),
+                    data_type: Some(DataType::Integer),
+                    primary_key: false,
+                }
+            ]
         );
         assert_eq!(
             schema.get_table(b"example3").unwrap().columns,
-            vec![b"COL1".to_vec(), b"COL2".to_vec(), b"COL3".to_vec(), b"_".to_vec()]
+            vec![
+                Column {
+                    name: b"COL1".to_vec(),
+                    data_type: Some(DataType::Real),
+                    primary_key: false,
+                },
+                Column {
+                    name: b"Col2".to_vec(),
+                    data_type: Some(DataType::Text),
+                    primary_key: true,
+                },
+                Column {
+                    name: b"cOL3".to_vec(),
+                    data_type: Some(DataType::Blob),
+                    primary_key: false,
+                },
+                Column {
+                    name: b"_".to_vec(),
+                    data_type: None,
+                    primary_key: false,
+                }
+            ]
+        );
+        assert_eq!(
+            schema.get_table(b"example4").unwrap().columns,
+            vec![
+                Column {
+                    name: b"id".to_vec(),
+                    data_type: Some(DataType::Integer),
+                    primary_key: true,
+                },
+                Column {
+                    name: b"col".to_vec(),
+                    data_type: None,
+                    primary_key: false,
+                }
+            ]
         );
     }
 
@@ -310,7 +445,9 @@ mod tests {
     fn test_table_get_column_index() {
         let file = create_sqlite_database(&[
             "CREATE TABLE example(col);",
-            "CREATE TABLE example2(col1, col2, rowid);",
+            "CREATE TABLE example2(col1 integer, col2, rowid);",
+            "CREATE TABLE example3(id integer primary key, col);",
+            "CREATE TABLE example4(id text primary key, col);",
         ]);
         let schema = generate_schema(file.path());
 
@@ -324,6 +461,16 @@ mod tests {
         assert_eq!(table.get_column_index(b"col2"), Some(ColumnIndex::Column(1)));
         assert_eq!(table.get_column_index(b"rowid"), Some(ColumnIndex::Column(2)));
         assert_eq!(table.get_column_index(b"invalid"), None);
+
+        let table = schema.get_table(b"example3").unwrap();
+        assert_eq!(table.get_column_index(b"id"), Some(ColumnIndex::RowId));
+        assert_eq!(table.get_column_index(b"col"), Some(ColumnIndex::Column(1)));
+        assert_eq!(table.get_column_index(b"rowid"), Some(ColumnIndex::RowId));
+
+        let table = schema.get_table(b"example4").unwrap();
+        assert_eq!(table.get_column_index(b"id"), Some(ColumnIndex::Column(0)));
+        assert_eq!(table.get_column_index(b"col"), Some(ColumnIndex::Column(1)));
+        assert_eq!(table.get_column_index(b"rowid"), Some(ColumnIndex::RowId));
     }
 
     #[test]
@@ -331,6 +478,8 @@ mod tests {
         let file = create_sqlite_database(&[
             "CREATE TABLE example(col);",
             "CREATE TABLE example2(col1, col2, rowid);",
+            "CREATE TABLE example3(col1, id integer primary key, col2);",
+            "CREATE TABLE example4(col1, id text primary key, col2);",
         ]);
         let schema = generate_schema(file.path());
 
@@ -340,6 +489,20 @@ mod tests {
         assert_eq!(iter.next(), None);
 
         let table = schema.get_table(b"example2").unwrap();
+        let mut iter = table.all_column_index();
+        assert_eq!(iter.next(), Some(ColumnIndex::Column(0)));
+        assert_eq!(iter.next(), Some(ColumnIndex::Column(1)));
+        assert_eq!(iter.next(), Some(ColumnIndex::Column(2)));
+        assert_eq!(iter.next(), None);
+
+        let table = schema.get_table(b"example3").unwrap();
+        let mut iter = table.all_column_index();
+        assert_eq!(iter.next(), Some(ColumnIndex::Column(0)));
+        assert_eq!(iter.next(), Some(ColumnIndex::RowId));
+        assert_eq!(iter.next(), Some(ColumnIndex::Column(2)));
+        assert_eq!(iter.next(), None);
+
+        let table = schema.get_table(b"example4").unwrap();
         let mut iter = table.all_column_index();
         assert_eq!(iter.next(), Some(ColumnIndex::Column(0)));
         assert_eq!(iter.next(), Some(ColumnIndex::Column(1)));
