@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cmp::Ordering;
 use std::ops::Range;
 use std::ptr::copy_nonoverlapping;
 
@@ -21,6 +22,7 @@ use crate::btree::parse_btree_leaf_table_cell;
 use crate::btree::BtreeInteriorTableCell;
 use crate::btree::BtreePageHeader;
 use crate::btree::OverflowPage;
+use crate::btree::TableCellKeyParser;
 use crate::pager::MemPage;
 use crate::pager::PageBuffer;
 use crate::pager::PageId;
@@ -136,6 +138,55 @@ impl<'pager> BtreeCursor<'pager> {
         })
     }
 
+    /// Move to the specified cell with the key.
+    ///
+    /// If it does not exist, move to the next cell.
+    pub fn move_to(&mut self, key: i64) -> anyhow::Result<()> {
+        // TODO: optimize for sequential access. i.e. key == previouse key + 1
+        self.move_to_root()?;
+        loop {
+            let buffer = self.current_page.buffer();
+            let page_header = BtreePageHeader::from_page(&self.current_page, &buffer);
+            let n_cells = page_header.n_cells();
+            let mut i_min = 0;
+            let mut i_max = n_cells as usize;
+            let cell_key_parser = TableCellKeyParser::new(&self.current_page, &buffer);
+
+            while i_min < i_max {
+                let i_mid = (i_min + i_max) / 2;
+                let cell_key = cell_key_parser
+                    .get_cell_key(i_mid as u16)
+                    .map_err(|e| anyhow::anyhow!("parse table cell key: {:?}", e))?;
+                match cell_key.cmp(&key) {
+                    Ordering::Less => {
+                        i_min = i_mid + 1;
+                    }
+                    Ordering::Equal => {
+                        i_min = i_mid;
+                        break;
+                    }
+                    Ordering::Greater => {
+                        i_max = i_mid;
+                    }
+                }
+            }
+            self.idx_cell = i_min as u16;
+            if page_header.is_leaf() {
+                return Ok(());
+            }
+
+            let next_page_id = if i_min == n_cells as usize {
+                page_header.right_page_id()
+            } else {
+                let cell = BtreeInteriorTableCell::get(&self.current_page, &buffer, self.idx_cell)
+                    .map_err(|e| anyhow::anyhow!("get btree interior table cell: {:?}", e))?;
+                cell.page_id()
+            };
+            drop(buffer);
+            self.move_to_child(next_page_id)?;
+        }
+    }
+
     pub fn next<'a>(&'a mut self) -> anyhow::Result<Option<BtreePayload<'a, 'pager>>> {
         loop {
             let buffer = self.current_page.buffer();
@@ -171,6 +222,16 @@ impl<'pager> BtreeCursor<'pager> {
                 self.move_to_child(page_id)?;
             }
         }
+    }
+
+    fn move_to_root(&mut self) -> anyhow::Result<()> {
+        if !self.parent_pages.is_empty() {
+            self.idx_cell = 0;
+            self.current_page_id = self.parent_pages[0].0;
+            self.current_page = self.pager.get_page(self.current_page_id)?;
+            self.parent_pages.truncate(0);
+        }
+        Ok(())
     }
 
     fn move_to_child(&mut self, page_id: PageId) -> anyhow::Result<()> {
@@ -253,6 +314,7 @@ mod tests {
     #[test]
     fn test_btree_cursor_multiple_page() {
         let buf = vec![0; 4000];
+        let hex = buffer_to_hex(&buf);
         let mut inserts = Vec::new();
         // 1000 byte blob entry occupies 1 page. These 2000 entries introduce
         // 2 level interior pages and 1 leaf page level.
@@ -260,7 +322,7 @@ mod tests {
             inserts.push(format!(
                 "INSERT INTO example(col,buf) VALUES ({},X'{}');",
                 i,
-                buffer_to_hex(&buf)
+                hex.as_str()
             ));
         }
         for i in 0..1000 {
@@ -340,5 +402,100 @@ mod tests {
 
         let result = unsafe { payload.load(10004, &mut payload_buf) };
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_move_to_in_single_page() {
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col);",
+            "INSERT INTO example(rowid) VALUES (1);",
+            "INSERT INTO example(rowid) VALUES (3);",
+            "INSERT INTO example(rowid) VALUES (5);",
+            "INSERT INTO example(rowid) VALUES (7);",
+            "INSERT INTO example(rowid) VALUES (9);",
+            "INSERT INTO example(rowid) VALUES (11);",
+            "INSERT INTO example(rowid) VALUES (13);",
+            "INSERT INTO example(rowid) VALUES (15);",
+        ]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let usable_size = load_usable_size(file.as_file()).unwrap();
+        let page_id = find_table_page_id("example", file.path());
+
+        let mut cursor = BtreeCursor::new(page_id, &pager, usable_size).unwrap();
+
+        for i in 0..8 {
+            cursor.move_to(2 * i).unwrap();
+            let payload = cursor.next().unwrap();
+            assert!(payload.is_some());
+            assert_eq!(payload.unwrap().key(), 2 * i + 1);
+
+            cursor.move_to(2 * i + 1).unwrap();
+            let payload = cursor.next().unwrap();
+            assert!(payload.is_some());
+            assert_eq!(payload.unwrap().key(), 2 * i + 1);
+        }
+
+        cursor.move_to(16).unwrap();
+        let payload = cursor.next().unwrap();
+        assert!(payload.is_none());
+    }
+
+    #[test]
+    fn test_move_to_empty_rows() {
+        let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let usable_size = load_usable_size(file.as_file()).unwrap();
+        let page_id = find_table_page_id("example", file.path());
+
+        let mut cursor = BtreeCursor::new(page_id, &pager, usable_size).unwrap();
+
+        for i in 0..3 {
+            cursor.move_to(i).unwrap();
+            let payload = cursor.next().unwrap();
+            assert!(payload.is_none());
+        }
+    }
+
+    #[test]
+    fn test_move_to_multiple_page() {
+        let buf = vec![0; 4000];
+        let hex = buffer_to_hex(&buf);
+        let mut inserts = Vec::new();
+        // 1000 byte blob entry occupies 1 page. These 2000 entries introduce
+        // 2 level interior pages and 1 leaf page level.
+        for i in 0..1000 {
+            inserts.push(format!(
+                "INSERT INTO example(rowid, col) VALUES ({},X'{}');",
+                2 * i + 1,
+                hex.as_str()
+            ));
+        }
+        for i in 1000..2000 {
+            inserts.push(format!("INSERT INTO example(rowid) VALUES ({});", 2 * i + 1));
+        }
+        let mut queries = vec!["CREATE TABLE example(col);"];
+        queries.extend(inserts.iter().map(|s| s.as_str()));
+        let file = create_sqlite_database(&queries);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let usable_size = load_usable_size(file.as_file()).unwrap();
+        let page_id = find_table_page_id("example", file.path());
+
+        let mut cursor = BtreeCursor::new(page_id, &pager, usable_size).unwrap();
+
+        for i in 0..2000 {
+            cursor.move_to(2 * i).unwrap();
+            let payload = cursor.next().unwrap();
+            assert!(payload.is_some());
+            assert_eq!(payload.unwrap().key(), 2 * i + 1);
+
+            cursor.move_to(2 * i + 1).unwrap();
+            let payload = cursor.next().unwrap();
+            assert!(payload.is_some());
+            assert_eq!(payload.unwrap().key(), 2 * i + 1);
+        }
+
+        cursor.move_to(40002).unwrap();
+        let payload = cursor.next().unwrap();
+        assert!(payload.is_none());
     }
 }

@@ -234,6 +234,7 @@ pub struct Statement<'conn> {
     table_page_id: u32,
     columns: Vec<ColumnIndex>,
     selection: Option<Selection>,
+    rowid: Option<i64>,
 }
 
 impl<'conn> Statement<'conn> {
@@ -243,19 +244,37 @@ impl<'conn> Statement<'conn> {
         columns: Vec<ColumnIndex>,
         selection: Option<Selection>,
     ) -> Self {
+        let rowid = match &selection {
+            Some(Selection::BinaryOperator {
+                operator: BinaryOperator::Eq,
+                left,
+                right,
+            }) => match (left.as_ref(), right.as_ref()) {
+                (Selection::Column(ColumnIndex::RowId), Selection::LiteralValue(value)) => Some(*value),
+                (Selection::LiteralValue(value), Selection::Column(ColumnIndex::RowId)) => Some(*value),
+                _ => None,
+            },
+            _ => None,
+        };
         Self {
             conn,
             table_page_id,
             columns,
             selection,
+            rowid,
         }
     }
 
     pub fn execute(&'conn mut self) -> anyhow::Result<Rows<'conn>> {
         // TODO: check schema version.
+        let mut cursor = BtreeCursor::new(self.table_page_id, &self.conn.pager, self.conn.usable_size)?;
+        if let Some(rowid) = self.rowid {
+            cursor.move_to(rowid)?;
+        }
         Ok(Rows {
             stmt: self,
-            cursor: BtreeCursor::new(self.table_page_id, &self.conn.pager, self.conn.usable_size)?,
+            cursor,
+            completed: false,
         })
     }
 }
@@ -263,6 +282,7 @@ impl<'conn> Statement<'conn> {
 pub struct Rows<'conn> {
     stmt: &'conn Statement<'conn>,
     cursor: BtreeCursor<'conn>,
+    completed: bool,
 }
 
 /// TODO: Skip should be encapuslated inside [Rows::next]. However we need this due to Rust borrow checker limitation.
@@ -315,6 +335,12 @@ impl<'a, 'conn> NextRow<'a, 'conn> {
 
 impl<'conn> Rows<'conn> {
     pub fn next<'a>(&'a mut self) -> anyhow::Result<NextRow<'a, 'conn>> {
+        if self.completed {
+            return Ok(NextRow::None);
+        } else if self.stmt.rowid.is_some() {
+            // Only one row is selected.
+            self.completed = true;
+        }
         // TODO: Keep this never_loop to make it clear that [NextRow] is a workaround for borrow checker limitation.
         #[allow(clippy::never_loop)]
         while let Some(payload) = self.cursor.next()? {

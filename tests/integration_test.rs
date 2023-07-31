@@ -135,13 +135,13 @@ fn test_select_filter_with_rowid() {
         "CREATE TABLE example(col);",
         "INSERT INTO example(col) VALUES (10);",
         "INSERT INTO example(col) VALUES (20);",
+        "INSERT INTO example(col) VALUES (30);",
+        "INSERT INTO example(col) VALUES (40);",
     ]);
 
     let mut conn = Connection::open(file.path()).unwrap();
     let mut stmt = conn.prepare("SELECT col, RoWid FROM example WHERE rowid = 2;").unwrap();
     let mut rows = stmt.execute().unwrap();
-
-    assert!(matches!(rows.next().unwrap(), NextRow::Skip));
 
     let row = rows.next().unwrap().unwrap();
     let columns = row.parse().unwrap();

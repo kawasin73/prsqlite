@@ -54,8 +54,8 @@ impl<'page> BtreePageHeader<'page> {
     /// The btree page type
     ///
     /// TODO: how to convert u8 into enum with zero copy?
-    pub fn pagetype(&self) -> &u8 {
-        &self.0[0]
+    pub fn pagetype(&self) -> u8 {
+        self.0[0]
     }
 
     /// Whether the page is a leaf page
@@ -83,10 +83,42 @@ impl<'page> BtreePageHeader<'page> {
     /// This does not invoke conditional branch.
     pub fn header_size(&self) -> u8 {
         // 0(leaf) or 8(interior)
-        let is_interior = (!*self.pagetype()) & LEAF_FLAG;
+        let is_interior = (!self.pagetype()) & LEAF_FLAG;
         // 0(leaf) or 4(interior)
         let additional_size = is_interior >> 1;
         8 + additional_size
+    }
+}
+
+pub struct TableCellKeyParser<'a> {
+    page: &'a MemPage,
+    buffer: &'a PageBuffer<'a>,
+    pub is_leaf: bool,
+    header_size: u8,
+}
+
+impl<'a> TableCellKeyParser<'a> {
+    pub fn new(page: &'a MemPage, buffer: &'a PageBuffer<'a>) -> Self {
+        let header = BtreePageHeader::from_page(page, buffer);
+        Self {
+            page,
+            buffer,
+            is_leaf: header.is_leaf(),
+            header_size: header.header_size(),
+        }
+    }
+
+    pub fn get_cell_key(&self, cell_idx: u16) -> ParseResult<i64> {
+        let offset = get_cell_offset(self.page, self.buffer, cell_idx, self.header_size)?;
+        if self.is_leaf {
+            // TODO: just skip bytes >= 0x80 because payload length is u32.
+            let (_, n) = parse_varint(&self.buffer[offset..]).ok_or("parse payload length varint")?;
+            let (key, _) = parse_varint(&self.buffer[offset + n..]).ok_or("parse key varint")?;
+            Ok(key)
+        } else {
+            let (key, _) = parse_varint(&self.buffer[offset + 4..]).ok_or("parse key varint")?;
+            Ok(key)
+        }
     }
 }
 
@@ -256,7 +288,7 @@ mod tests {
             buf[0] = t;
             let header = BtreePageHeader(&buf);
 
-            assert_eq!(*header.pagetype(), t);
+            assert_eq!(header.pagetype(), t);
         }
     }
 
@@ -293,8 +325,8 @@ mod tests {
         let buffer2 = page2.buffer();
         let page2_header = BtreePageHeader::from(buffer2[..12].try_into().unwrap());
 
-        assert_eq!(*page1_header.pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
-        assert_eq!(*page2_header.pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
+        assert_eq!(page1_header.pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
+        assert_eq!(page2_header.pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
         assert_eq!(page1_header.n_cells(), 1);
         assert_eq!(page2_header.n_cells(), 0);
     }
