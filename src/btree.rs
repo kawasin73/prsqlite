@@ -128,28 +128,21 @@ fn get_cell_buffer<'page>(
     cell_idx: u16,
     header_size: u8,
 ) -> ParseResult<&'page [u8]> {
-    let cell_pointer_offset = page.header_offset + header_size as usize + (cell_idx << 1) as usize;
-    if cell_pointer_offset + 2 > buffer.len() {
-        return Err("cell pointer out of range");
-    }
-    let cell_offset =
-        u16::from_be_bytes(buffer[cell_pointer_offset..cell_pointer_offset + 2].try_into().unwrap()) as usize;
-    if cell_offset > buffer.len() {
-        return Err("cell offset out of range");
-    }
-    Ok(&buffer[cell_offset..])
+    Ok(&buffer[get_cell_offset(page, buffer, cell_idx, header_size)?..])
 }
 
 /// Returns the offset of the cell in the buffer.
 ///
 /// Returned cell offset is in the range of the buffer.
-fn get_cell_offset(page: &MemPage, buffer: &[u8], cell_idx: u16, header_size: u8) -> ParseResult<usize> {
+fn get_cell_offset(page: &MemPage, buffer: &PageBuffer, cell_idx: u16, header_size: u8) -> ParseResult<usize> {
     let cell_pointer_offset = page.header_offset + header_size as usize + (cell_idx << 1) as usize;
     if cell_pointer_offset + 2 > buffer.len() {
         return Err("cell pointer out of range");
     }
     let cell_offset =
         u16::from_be_bytes(buffer[cell_pointer_offset..cell_pointer_offset + 2].try_into().unwrap()) as usize;
+    // offset 0 is used for 65536.
+    let cell_offset = if cell_offset == 0 { 1 << 16 } else { cell_offset };
     if cell_offset > buffer.len() {
         return Err("cell offset out of range");
     }
@@ -196,7 +189,7 @@ impl OverflowPage {
 
 pub fn parse_btree_leaf_table_cell(
     page: &MemPage,
-    buffer: &[u8],
+    buffer: &PageBuffer,
     cell_idx: u16,
     usable_size: i32,
 ) -> ParseResult<(i64, i32, Range<usize>, Option<OverflowPage>)> {
@@ -333,6 +326,25 @@ mod tests {
         assert_eq!(page2_header.pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
         assert_eq!(page1_header.n_cells(), 1);
         assert_eq!(page2_header.n_cells(), 0);
+    }
+
+    #[test]
+    fn test_get_cell_offset() {
+        const MAX_PAGESIZE: usize = 1 << 16;
+        // page 1 has 0 for cell 0 offset.
+        let mut content = [0_u8; 2 * MAX_PAGESIZE];
+        let header_size = 12;
+        // page 2 has 100 for cell 0 offset.
+        content[MAX_PAGESIZE + header_size..MAX_PAGESIZE + header_size + 2].copy_from_slice(&1000_u16.to_be_bytes());
+        let pager = create_empty_pager(&content, MAX_PAGESIZE);
+        let page = pager.get_page(1).unwrap();
+        let buffer = page.buffer();
+        // offset 0 is translated to 1 << 16.
+        assert_eq!(get_cell_offset(&page, &buffer, 0, 12).unwrap(), 1 << 16);
+
+        let page = pager.get_page(2).unwrap();
+        let buffer = page.buffer();
+        assert_eq!(get_cell_offset(&page, &buffer, 0, 12).unwrap(), 1000);
     }
 
     #[test]

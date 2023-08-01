@@ -43,6 +43,12 @@ pub fn create_pager(file: File) -> anyhow::Result<Pager> {
     Pager::new(file, header.pagesize() as usize)
 }
 
+pub fn create_empty_pager(file_content: &[u8], pagesize: usize) -> Pager {
+    let file = NamedTempFile::new().unwrap();
+    file.as_file().write_all_at(file_content, 0).unwrap();
+    Pager::new(file.as_file().try_clone().unwrap(), pagesize).unwrap()
+}
+
 pub fn load_usable_size(file: &File) -> anyhow::Result<i32> {
     let mut header_buf = [0_u8; DATABASE_HEADER_SIZE];
     file.read_exact_at(&mut header_buf, 0)?;
