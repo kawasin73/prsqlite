@@ -33,7 +33,7 @@ pub struct BtreePayload<'a, 'pager> {
     pager: &'pager Pager,
     local_payload_buffer: PageBuffer<'a>,
     local_payload_range: Range<usize>,
-    size: u32,
+    size: i32,
     overflow: Option<OverflowPage>,
 }
 
@@ -44,7 +44,7 @@ impl<'a, 'pager> BtreePayload<'a, 'pager> {
     }
 
     /// The size of the payload.
-    pub fn size(&self) -> u32 {
+    pub fn size(&self) -> i32 {
         self.size
     }
 
@@ -64,8 +64,10 @@ impl<'a, 'pager> BtreePayload<'a, 'pager> {
     /// # Safety
     ///
     /// The buffer must not be any [MemPage] buffer.
-    pub unsafe fn load(&self, offset: u32, buf: &mut [u8]) -> anyhow::Result<usize> {
-        if offset >= self.size {
+    pub unsafe fn load(&self, offset: i32, buf: &mut [u8]) -> anyhow::Result<usize> {
+        if offset < 0 {
+            bail!("offset must be non-negative");
+        } else if offset >= self.size {
             bail!("offset exceeds payload size");
         }
         let mut n_loaded = 0;
@@ -73,7 +75,7 @@ impl<'a, 'pager> BtreePayload<'a, 'pager> {
         let mut buf = buf;
         let payload = &self.local_payload_buffer[self.local_payload_range.clone()];
 
-        if offset < payload.len() as u32 {
+        if offset < payload.len() as i32 {
             let local_offset = offset as usize;
             let n = std::cmp::min(payload.len() - local_offset, buf.len());
 
@@ -83,11 +85,11 @@ impl<'a, 'pager> BtreePayload<'a, 'pager> {
                 copy_nonoverlapping(payload[local_offset..].as_ptr(), buf.as_mut_ptr(), n);
             }
             n_loaded += n;
-            offset += n as u32;
+            offset += n as i32;
             buf = &mut buf[n..];
         }
 
-        let mut cur = payload.len() as u32;
+        let mut cur = payload.len() as i32;
         let mut overflow = self.overflow;
         while !buf.is_empty() && cur < self.size {
             let overflow_page = overflow.ok_or_else(|| anyhow::anyhow!("overflow page is not found"))?;
@@ -96,7 +98,7 @@ impl<'a, 'pager> BtreePayload<'a, 'pager> {
             let (payload, next_overflow) = overflow_page
                 .parse(&buffer)
                 .map_err(|e| anyhow::anyhow!("parse overflow: {:?}", e))?;
-            if offset < cur + payload.len() as u32 {
+            if offset < cur + payload.len() as i32 {
                 let local_offset = (offset - cur) as usize;
                 let n = std::cmp::min(payload.len() - local_offset, buf.len());
 
@@ -106,10 +108,10 @@ impl<'a, 'pager> BtreePayload<'a, 'pager> {
                     copy_nonoverlapping(payload[local_offset..].as_ptr(), buf.as_mut_ptr(), n);
                 }
                 n_loaded += n;
-                offset += n as u32;
+                offset += n as i32;
                 buf = &mut buf[n..];
             }
-            cur += payload.len() as u32;
+            cur += payload.len() as i32;
             overflow = next_overflow;
         }
 
@@ -119,7 +121,7 @@ impl<'a, 'pager> BtreePayload<'a, 'pager> {
 
 pub struct BtreeCursor<'pager> {
     pager: &'pager Pager,
-    usable_size: u32,
+    usable_size: i32,
     current_page_id: PageId,
     current_page: MemPage,
     idx_cell: u16,
@@ -127,7 +129,7 @@ pub struct BtreeCursor<'pager> {
 }
 
 impl<'pager> BtreeCursor<'pager> {
-    pub fn new(root_page: PageId, pager: &'pager Pager, usable_size: u32) -> anyhow::Result<Self> {
+    pub fn new(root_page: PageId, pager: &'pager Pager, usable_size: i32) -> anyhow::Result<Self> {
         Ok(Self {
             pager,
             usable_size,
@@ -280,21 +282,21 @@ mod tests {
         assert!(payload.is_some());
         let payload = payload.unwrap();
         assert_eq!(payload.buf(), &[2, 8]);
-        assert_eq!(payload.size(), payload.buf().len() as u32);
+        assert_eq!(payload.size(), payload.buf().len() as i32);
         drop(payload);
 
         let payload = cursor.next().unwrap();
         assert!(payload.is_some());
         let payload = payload.unwrap();
         assert_eq!(payload.buf(), &[2, 9]);
-        assert_eq!(payload.size(), payload.buf().len() as u32);
+        assert_eq!(payload.size(), payload.buf().len() as i32);
         drop(payload);
 
         let payload = cursor.next().unwrap();
         assert!(payload.is_some());
         let payload = payload.unwrap();
         assert_eq!(payload.buf(), &[2, 1, 2]);
-        assert_eq!(payload.size(), payload.buf().len() as u32);
+        assert_eq!(payload.size(), payload.buf().len() as i32);
         drop(payload);
 
         assert!(cursor.next().unwrap().is_none());
@@ -342,14 +344,14 @@ mod tests {
             assert!(payload.is_some());
             let payload = payload.unwrap();
             assert!(payload.size() > 4000);
-            assert_eq!(payload.size(), payload.buf().len() as u32);
+            assert_eq!(payload.size(), payload.buf().len() as i32);
         }
         for i in 0..1000 {
             let payload = cursor.next().unwrap();
             assert!(payload.is_some());
             let payload = payload.unwrap();
             assert_eq!(payload.buf(), &[3, 1, 0, ((i % 100) + 2) as u8]);
-            assert_eq!(payload.size(), payload.buf().len() as u32);
+            assert_eq!(payload.size(), payload.buf().len() as i32);
         }
 
         assert!(cursor.next().unwrap().is_none());

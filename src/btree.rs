@@ -159,7 +159,7 @@ fn get_cell_offset(page: &MemPage, buffer: &[u8], cell_idx: u16, header_size: u8
 #[derive(Debug, Clone, Copy)]
 pub struct OverflowPage {
     page_id: NonZeroU32,
-    remaining_size: u32,
+    remaining_size: i32,
 }
 
 impl OverflowPage {
@@ -178,13 +178,13 @@ impl OverflowPage {
             }
         } else {
             let payload = &buffer[4..];
-            if self.remaining_size > payload.len() as u32 {
+            if self.remaining_size > payload.len() as i32 {
                 Ok((
                     payload,
                     Some(Self {
                         // Safe because it already checks next_page_id != 0.
                         page_id: unsafe { NonZeroU32::new_unchecked(next_page_id) },
-                        remaining_size: self.remaining_size - payload.len() as u32,
+                        remaining_size: self.remaining_size - payload.len() as i32,
                     }),
                 ))
             } else {
@@ -198,12 +198,16 @@ pub fn parse_btree_leaf_table_cell(
     page: &MemPage,
     buffer: &[u8],
     cell_idx: u16,
-    usable_size: u32,
-) -> ParseResult<(i64, u32, Range<usize>, Option<OverflowPage>)> {
+    usable_size: i32,
+) -> ParseResult<(i64, i32, Range<usize>, Option<OverflowPage>)> {
     let cell_offset = get_cell_offset(page, buffer, cell_idx, BTREE_PAGE_LEAF_HEADER_SIZE as u8).unwrap();
     let (payload_length, consumed1) =
         parse_varint(&buffer[cell_offset..]).map_or(Err("parse payload length varint"), Ok)?;
-    let payload_length: u32 = payload_length.try_into().map_err(|_| "payload length too large")?;
+    // The maximum payload length is 2147483647 (= i32::MAX).
+    let payload_length: i32 = payload_length.try_into().map_err(|_| "payload length too large")?;
+    if payload_length < 0 {
+        return Err("payload length is negative");
+    }
     let (key, consumed2) = parse_varint(&buffer[cell_offset + consumed1..]).map_or(Err("parse key varint"), Ok)?;
     let header_length = consumed1 + consumed2;
 

@@ -43,7 +43,7 @@ pub fn create_pager(file: File) -> anyhow::Result<Pager> {
     Pager::new(file, header.pagesize() as usize)
 }
 
-pub fn load_usable_size(file: &File) -> anyhow::Result<u32> {
+pub fn load_usable_size(file: &File) -> anyhow::Result<i32> {
     let mut header_buf = [0_u8; DATABASE_HEADER_SIZE];
     file.read_exact_at(&mut header_buf, 0)?;
     let header = DatabaseHeader::from(&header_buf);

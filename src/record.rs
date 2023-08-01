@@ -44,17 +44,17 @@ impl<'a> Display for Value<'a> {
 pub struct SerialType(u32);
 
 impl SerialType {
-    pub fn content_size(&self) -> u32 {
+    pub fn content_size(&self) -> i32 {
         // TODO: use pre-calculated table for first 128 serial types.
         match self.0 {
-            n if n <= 4 => n,
+            n if n <= 4 => n as i32,
             5 => 6,
             6 | 7 => 8,
             8 | 9 => 0,
             10 | 11 => {
                 unimplemented!("reserved record is not implemented");
             }
-            n => (n - 12) >> 1,
+            n => ((n - 12) >> 1) as i32,
         }
     }
 
@@ -107,11 +107,11 @@ impl SerialType {
 /// Parse record header and return a list of serial types and content offsets.
 ///
 /// TODO: support partial parsing.
-pub fn parse_record_header(payload: &BtreePayload) -> anyhow::Result<Vec<(SerialType, u32)>> {
+pub fn parse_record_header(payload: &BtreePayload) -> anyhow::Result<Vec<(SerialType, i32)>> {
     let local_buf = payload.buf();
     let (header_size, consumed) = parse_varint(local_buf).context("parse record header size")?;
-    let header_size: u32 = header_size.try_into().context("header size is too large")?;
-    let mut header_offset = consumed as u32;
+    let header_size: i32 = header_size.try_into().context("header size is too large")?;
+    let mut header_offset = consumed as i32;
     let mut content_offset = header_size;
 
     let mut buf_loaded;
@@ -137,7 +137,7 @@ pub fn parse_record_header(payload: &BtreePayload) -> anyhow::Result<Vec<(Serial
         let serial_type = SerialType(serial_type.try_into().context("serial type is too large")?);
         let content_size = serial_type.content_size();
         parsed.push((serial_type, content_offset));
-        header_offset += consumed as u32;
+        header_offset += consumed as i32;
         content_offset += content_size;
     }
 

@@ -82,14 +82,14 @@ impl<'a> DatabaseHeader<'a> {
         self.0[20]
     }
 
-    pub fn usable_size(&self) -> u32 {
-        self.pagesize() - self.reserved() as u32
+    pub fn usable_size(&self) -> i32 {
+        self.pagesize() as i32 - self.reserved() as i32
     }
 }
 
 pub struct Connection {
     pager: Pager,
-    usable_size: u32,
+    usable_size: i32,
     schema: Option<Schema>,
 }
 
@@ -402,8 +402,8 @@ const STATIC_NULL_VALUE: Value = Value::Null;
 pub struct Row<'a, 'conn> {
     stmt: &'a Statement<'conn>,
     pub payload: BtreePayload<'a, 'conn>,
-    headers: Vec<(SerialType, u32)>,
-    content_offset: u32,
+    headers: Vec<(SerialType, i32)>,
+    content_offset: i32,
     use_local_buffer: bool,
     tmp_buf: Vec<u8>,
 }
