@@ -89,7 +89,7 @@ impl<'a> DatabaseHeader<'a> {
 
 pub struct Connection {
     pager: Pager,
-    usable_size: i32,
+    btree_ctx: BtreeContext,
     schema: Option<Schema>,
 }
 
@@ -109,7 +109,7 @@ impl Connection {
         let pager = Pager::new(file, header.pagesize() as usize)?;
         Ok(Self {
             pager,
-            usable_size: header.usable_size(),
+            btree_ctx: BtreeContext::new(header.usable_size()),
             schema: None,
         })
     }
@@ -267,7 +267,7 @@ impl<'conn> Statement<'conn> {
 
     pub fn execute(&'conn mut self) -> anyhow::Result<Rows<'conn>> {
         // TODO: check schema version.
-        let mut cursor = BtreeCursor::new(self.table_page_id, &self.conn.pager, self.conn.usable_size)?;
+        let mut cursor = BtreeCursor::new(self.table_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
         if let Some(rowid) = self.rowid {
             cursor.move_to(rowid)?;
         }
@@ -281,7 +281,7 @@ impl<'conn> Statement<'conn> {
 
 pub struct Rows<'conn> {
     stmt: &'conn Statement<'conn>,
-    cursor: BtreeCursor<'conn>,
+    cursor: BtreeCursor<'conn, 'conn>,
     completed: bool,
 }
 

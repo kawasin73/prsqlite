@@ -18,6 +18,7 @@ use std::path::Path;
 
 use tempfile::NamedTempFile;
 
+use crate::btree::BtreeContext;
 use crate::pager::PageId;
 use crate::pager::Pager;
 use crate::schema::Schema;
@@ -49,11 +50,11 @@ pub fn create_empty_pager(file_content: &[u8], pagesize: usize) -> Pager {
     Pager::new(file.as_file().try_clone().unwrap(), pagesize).unwrap()
 }
 
-pub fn load_usable_size(file: &File) -> anyhow::Result<i32> {
+pub fn load_btree_context(file: &File) -> anyhow::Result<BtreeContext> {
     let mut header_buf = [0_u8; DATABASE_HEADER_SIZE];
     file.read_exact_at(&mut header_buf, 0)?;
     let header = DatabaseHeader::from(&header_buf);
-    Ok(header.usable_size())
+    Ok(BtreeContext::new(header.usable_size()))
 }
 
 pub fn buffer_to_hex(buf: &[u8]) -> String {

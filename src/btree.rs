@@ -149,6 +149,46 @@ fn get_cell_offset(page: &MemPage, buffer: &PageBuffer, cell_idx: u16, header_si
     Ok(cell_offset)
 }
 
+/// Context containing constant values to parse btree page.
+pub struct BtreeContext {
+    /// Maximum local payload size. The first is for index pages, the second is for table pages.
+    max_local: [u16; 2],
+    min_local: u16,
+    usable_minus_4: u16,
+}
+
+impl BtreeContext {
+    /// Creates a new context.
+    ///
+    /// usable_size is at most 65536.
+    pub fn new(usable_size: i32) -> Self {
+        assert!(usable_size <= 65536);
+        Self {
+            max_local: [
+                (((usable_size - 12) * 64 / 255) - 23).try_into().unwrap(),
+                (usable_size - 35).try_into().unwrap(),
+            ],
+            min_local: ((usable_size - 12) * 32 / 255 - 23).try_into().unwrap(),
+            usable_minus_4: (usable_size - 4).try_into().unwrap(),
+        }
+    }
+
+    #[inline]
+    fn max_local(&self, is_table: bool) -> u16 {
+        self.max_local[is_table as usize]
+    }
+
+    #[inline]
+    fn n_local(&self, is_table: bool, payload_size: i32) -> u16 {
+        let surplus = self.min_local as i32 + ((payload_size - self.min_local as i32) % self.usable_minus_4 as i32);
+        if surplus <= self.max_local[is_table as usize] as i32 {
+            surplus as u16
+        } else {
+            self.min_local
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct OverflowPage {
     page_id: NonZeroU32,
@@ -187,59 +227,86 @@ impl OverflowPage {
     }
 }
 
+/// Payload information of a cell.
+pub struct PayloadInfo {
+    /// The total size of the payload.
+    pub payload_size: i32,
+    /// The range of the local payload in the page buffer.
+    ///
+    /// If the size of this range is equal to the payload size, the whole payload is stored in the local buffer.
+    pub local_range: Range<usize>,
+    /// The overflow page if the rest of payload is stored in the overflow pages.
+    pub overflow: Option<OverflowPage>,
+}
+
+impl PayloadInfo {
+    fn parse(
+        ctx: &BtreeContext,
+        is_table: bool,
+        buffer: &PageBuffer,
+        offset: usize,
+        payload_size: i32,
+    ) -> ParseResult<Self> {
+        if payload_size <= ctx.max_local(is_table) as i32 {
+            if buffer.len() >= offset + payload_size as usize {
+                Ok(Self {
+                    payload_size,
+                    local_range: offset..offset + payload_size as usize,
+                    overflow: None,
+                })
+            } else {
+                Err("payload length is too large in single cell")
+            }
+        } else {
+            let payload_size_in_cell = ctx.n_local(is_table, payload_size);
+            let tail_payload = offset + payload_size_in_cell as usize;
+            if tail_payload + 4 > buffer.len() {
+                return Err("next page id out of range");
+            }
+            let next_page_id = PageId::from_be_bytes(buffer[tail_payload..tail_payload + 4].try_into().unwrap());
+            if next_page_id > 0 {
+                Ok(Self {
+                    payload_size,
+                    local_range: offset..tail_payload,
+                    overflow: Some(OverflowPage {
+                        // Safe because next_page_id != 0 is asserted.
+                        page_id: unsafe { NonZeroU32::new_unchecked(next_page_id) },
+                        remaining_size: payload_size - payload_size_in_cell as i32,
+                    }),
+                })
+            } else {
+                Err("next page id is zero")
+            }
+        }
+    }
+}
+
+/// Parses a b-tree table leaf page.
 pub fn parse_btree_leaf_table_cell(
+    ctx: &BtreeContext,
     page: &MemPage,
     buffer: &PageBuffer,
     cell_idx: u16,
-    usable_size: i32,
-) -> ParseResult<(i64, i32, Range<usize>, Option<OverflowPage>)> {
+) -> ParseResult<(i64, PayloadInfo)> {
     let cell_offset = get_cell_offset(page, buffer, cell_idx, BTREE_PAGE_LEAF_HEADER_SIZE as u8).unwrap();
-    let (payload_length, consumed1) =
+    let (payload_size, consumed1) =
         parse_varint(&buffer[cell_offset..]).map_or(Err("parse payload length varint"), Ok)?;
     // The maximum payload length is 2147483647 (= i32::MAX).
-    let payload_length: i32 = payload_length.try_into().map_err(|_| "payload length too large")?;
-    if payload_length < 0 {
+    let payload_size: i32 = payload_size.try_into().map_err(|_| "payload length too large")?;
+    if payload_size < 0 {
         return Err("payload length is negative");
     }
     let (key, consumed2) = parse_varint(&buffer[cell_offset + consumed1..]).map_or(Err("parse key varint"), Ok)?;
-    let header_length = consumed1 + consumed2;
 
-    let x = usable_size - 35;
-    if payload_length <= x {
-        if buffer.len() >= cell_offset + header_length + payload_length as usize {
-            Ok((
-                key,
-                payload_length,
-                cell_offset + header_length..cell_offset + header_length + payload_length as usize,
-                None,
-            ))
-        } else {
-            Err("payload length is too large in single cell")
-        }
-    } else {
-        let m = ((usable_size - 12) * 32 / 255) - 23;
-        let k = m + ((payload_length - m) % (usable_size - 4));
-        let payload_size_in_cell = if k <= x { k } else { m };
-        let tail_payload = cell_offset + header_length + payload_size_in_cell as usize;
-        if tail_payload + 4 > buffer.len() {
-            return Err("next page id out of range");
-        }
-        let next_page_id = PageId::from_be_bytes(buffer[tail_payload..tail_payload + 4].try_into().unwrap());
-        if next_page_id > 0 {
-            Ok((
-                key,
-                payload_length,
-                cell_offset + header_length..tail_payload,
-                Some(OverflowPage {
-                    // Safe because next_page_id != 0 is asserted.
-                    page_id: unsafe { NonZeroU32::new_unchecked(next_page_id) },
-                    remaining_size: payload_length - payload_size_in_cell,
-                }),
-            ))
-        } else {
-            Err("next page id is zero")
-        }
-    }
+    let payload = PayloadInfo::parse(
+        ctx,
+        /* is_table */ true,
+        buffer,
+        cell_offset + consumed1 + consumed2,
+        payload_size,
+    )?;
+
+    Ok((key, payload))
 }
 
 pub struct BtreeInteriorTableCell<'page> {
@@ -353,14 +420,14 @@ mod tests {
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let page1 = pager.get_page(1).unwrap();
         let buffer1 = page1.buffer();
-        let usable_size = load_usable_size(file.as_file()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
         let page1_header = BtreePageHeader::from_page(&page1, &buffer1);
         assert_eq!(page1_header.n_cells(), 1);
 
-        let (key, size, payload_range, _) = parse_btree_leaf_table_cell(&page1, &buffer1, 0, usable_size).unwrap();
-        let payload = &buffer1[payload_range];
+        let (key, payload_info) = parse_btree_leaf_table_cell(&bctx, &page1, &buffer1, 0).unwrap();
+        let payload = &buffer1[payload_info.local_range.clone()];
         assert_eq!(key, 1);
-        assert_eq!(size as usize, payload.len());
+        assert_eq!(payload_info.payload_size as usize, payload.len());
         assert_eq!(
             payload,
             &[
@@ -382,14 +449,15 @@ mod tests {
         queries.push(&query);
         let file = create_sqlite_database(&queries);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = load_usable_size(file.as_file()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
         let page_id = find_table_page_id("example", file.path());
         let page = pager.get_page(page_id).unwrap();
         let buffer = page.buffer();
         assert_eq!(BtreePageHeader::from_page(&page, &buffer).n_cells(), 1);
 
-        let (_, _, payload_range, mut overflow) = parse_btree_leaf_table_cell(&page, &buffer, 0, usable_size).unwrap();
-        let mut payload = &buffer[payload_range];
+        let (_, payload_info) = parse_btree_leaf_table_cell(&bctx, &page, &buffer, 0).unwrap();
+
+        let mut payload = &buffer[payload_info.local_range.clone()];
         let (header_size, c1) = unsafe_parse_varint(payload);
         let (serial_type, c2) = unsafe_parse_varint(&payload[c1..]);
         let payload_size = (serial_type - 12) / 2;
@@ -399,6 +467,7 @@ mod tests {
         assert_ne!(payload.len(), buf.len());
         assert_eq!(payload, &buf[..payload.len()]);
         let mut cur = payload.len();
+        let mut overflow = payload_info.overflow;
         while cur < buf.len() {
             assert!(overflow.is_some());
             let page = pager.get_page(overflow.as_ref().unwrap().page_id()).unwrap();

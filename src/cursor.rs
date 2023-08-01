@@ -13,15 +13,15 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
-use std::ops::Range;
 use std::ptr::copy_nonoverlapping;
 
 use anyhow::bail;
 
 use crate::btree::parse_btree_leaf_table_cell;
+use crate::btree::BtreeContext;
 use crate::btree::BtreeInteriorTableCell;
 use crate::btree::BtreePageHeader;
-use crate::btree::OverflowPage;
+use crate::btree::PayloadInfo;
 use crate::btree::TableCellKeyParser;
 use crate::pager::MemPage;
 use crate::pager::PageBuffer;
@@ -32,9 +32,7 @@ pub struct BtreePayload<'a, 'pager> {
     key: i64,
     pager: &'pager Pager,
     local_payload_buffer: PageBuffer<'a>,
-    local_payload_range: Range<usize>,
-    size: i32,
-    overflow: Option<OverflowPage>,
+    payload_info: PayloadInfo,
 }
 
 impl<'a, 'pager> BtreePayload<'a, 'pager> {
@@ -45,14 +43,14 @@ impl<'a, 'pager> BtreePayload<'a, 'pager> {
 
     /// The size of the payload.
     pub fn size(&self) -> i32 {
-        self.size
+        self.payload_info.payload_size
     }
 
     /// The local payload.
     ///
     /// This may not be the entire payload if there is overflow page.
     pub fn buf(&self) -> &[u8] {
-        &self.local_payload_buffer[self.local_payload_range.clone()]
+        &self.local_payload_buffer[self.payload_info.local_range.clone()]
     }
 
     /// Load the payload into the buffer.
@@ -67,13 +65,13 @@ impl<'a, 'pager> BtreePayload<'a, 'pager> {
     pub unsafe fn load(&self, offset: i32, buf: &mut [u8]) -> anyhow::Result<usize> {
         if offset < 0 {
             bail!("offset must be non-negative");
-        } else if offset >= self.size {
+        } else if offset >= self.payload_info.payload_size {
             bail!("offset exceeds payload size");
         }
         let mut n_loaded = 0;
         let mut offset = offset;
         let mut buf = buf;
-        let payload = &self.local_payload_buffer[self.local_payload_range.clone()];
+        let payload = &self.local_payload_buffer[self.payload_info.local_range.clone()];
 
         if offset < payload.len() as i32 {
             let local_offset = offset as usize;
@@ -90,8 +88,8 @@ impl<'a, 'pager> BtreePayload<'a, 'pager> {
         }
 
         let mut cur = payload.len() as i32;
-        let mut overflow = self.overflow;
-        while !buf.is_empty() && cur < self.size {
+        let mut overflow = self.payload_info.overflow;
+        while !buf.is_empty() && cur < self.payload_info.payload_size {
             let overflow_page = overflow.ok_or_else(|| anyhow::anyhow!("overflow page is not found"))?;
             let page = self.pager.get_page(overflow_page.page_id())?;
             let buffer = page.buffer();
@@ -119,20 +117,20 @@ impl<'a, 'pager> BtreePayload<'a, 'pager> {
     }
 }
 
-pub struct BtreeCursor<'pager> {
+pub struct BtreeCursor<'ctx, 'pager> {
     pager: &'pager Pager,
-    usable_size: i32,
+    btree_ctx: &'ctx BtreeContext,
     current_page_id: PageId,
     current_page: MemPage,
     idx_cell: u16,
     parent_pages: Vec<(PageId, u16)>,
 }
 
-impl<'pager> BtreeCursor<'pager> {
-    pub fn new(root_page: PageId, pager: &'pager Pager, usable_size: i32) -> anyhow::Result<Self> {
+impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
+    pub fn new(root_page: PageId, pager: &'pager Pager, btree_ctx: &'ctx BtreeContext) -> anyhow::Result<Self> {
         Ok(Self {
             pager,
-            usable_size,
+            btree_ctx,
             current_page_id: root_page,
             current_page: pager.get_page(root_page)?,
             idx_cell: 0,
@@ -204,17 +202,15 @@ impl<'pager> BtreeCursor<'pager> {
                     return Ok(None);
                 }
             } else if page_header.is_leaf() {
-                let (key, size, payload_range, overflow) =
-                    parse_btree_leaf_table_cell(&self.current_page, &buffer, self.idx_cell, self.usable_size)
+                let (key, payload_info) =
+                    parse_btree_leaf_table_cell(self.btree_ctx, &self.current_page, &buffer, self.idx_cell)
                         .map_err(|e| anyhow::anyhow!("parse tree leaf table cell: {:?}", e))?;
                 self.idx_cell += 1;
                 return Ok(Some(BtreePayload {
                     key,
                     pager: self.pager,
                     local_payload_buffer: self.current_page.buffer(),
-                    local_payload_range: payload_range,
-                    size,
-                    overflow,
+                    payload_info,
                 }));
             } else {
                 let cell = BtreeInteriorTableCell::get(&self.current_page, &buffer, self.idx_cell)
@@ -273,10 +269,10 @@ mod tests {
             "INSERT INTO example(col) VALUES (2);",
         ]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = load_usable_size(file.as_file()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
         let page_id = find_table_page_id("example", file.path());
 
-        let mut cursor = BtreeCursor::new(page_id, &pager, usable_size).unwrap();
+        let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
 
         let payload = cursor.next().unwrap();
         assert!(payload.is_some());
@@ -306,10 +302,10 @@ mod tests {
     fn test_btree_cursor_empty_records() {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = load_usable_size(file.as_file()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
         let page_id = find_table_page_id("example", file.path());
 
-        let mut cursor = BtreeCursor::new(page_id, &pager, usable_size).unwrap();
+        let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
         assert!(cursor.next().unwrap().is_none());
     }
 
@@ -334,10 +330,10 @@ mod tests {
         queries.extend(inserts.iter().map(|s| s.as_str()));
         let file = create_sqlite_database(&queries);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = load_usable_size(file.as_file()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
         let page_id = find_table_page_id("example", file.path());
 
-        let mut cursor = BtreeCursor::new(page_id, &pager, usable_size).unwrap();
+        let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
 
         for _ in 0..1000 {
             let payload = cursor.next().unwrap();
@@ -368,10 +364,10 @@ mod tests {
         queries.push(&query);
         let file = create_sqlite_database(&queries);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = load_usable_size(file.as_file()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
         let page_id = find_table_page_id("example", file.path());
 
-        let mut cursor = BtreeCursor::new(page_id, &pager, usable_size).unwrap();
+        let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
 
         let payload = cursor.next().unwrap();
         assert!(payload.is_some());
@@ -420,10 +416,10 @@ mod tests {
             "INSERT INTO example(rowid) VALUES (15);",
         ]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = load_usable_size(file.as_file()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
         let page_id = find_table_page_id("example", file.path());
 
-        let mut cursor = BtreeCursor::new(page_id, &pager, usable_size).unwrap();
+        let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
 
         for i in 0..8 {
             cursor.move_to(2 * i).unwrap();
@@ -446,10 +442,10 @@ mod tests {
     fn test_move_to_empty_rows() {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = load_usable_size(file.as_file()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
         let page_id = find_table_page_id("example", file.path());
 
-        let mut cursor = BtreeCursor::new(page_id, &pager, usable_size).unwrap();
+        let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
 
         for i in 0..3 {
             cursor.move_to(i).unwrap();
@@ -479,10 +475,10 @@ mod tests {
         queries.extend(inserts.iter().map(|s| s.as_str()));
         let file = create_sqlite_database(&queries);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let usable_size = load_usable_size(file.as_file()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
         let page_id = find_table_page_id("example", file.path());
 
-        let mut cursor = BtreeCursor::new(page_id, &pager, usable_size).unwrap();
+        let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
 
         for i in 0..2000 {
             cursor.move_to(2 * i).unwrap();
