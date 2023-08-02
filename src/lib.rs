@@ -31,7 +31,8 @@ use anyhow::bail;
 use anyhow::Context;
 
 // TODO: This is to suppress the unused warning.
-pub use crate::btree::*;
+// pub use crate::btree::*;
+use crate::btree::BtreeContext;
 use crate::cursor::BtreeCursor;
 use crate::cursor::BtreePayload;
 use crate::pager::Pager;

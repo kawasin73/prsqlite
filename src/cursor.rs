@@ -17,9 +17,9 @@ use std::ptr::copy_nonoverlapping;
 
 use anyhow::bail;
 
+use crate::btree::parse_btree_interior_cell_page_id;
 use crate::btree::parse_btree_leaf_table_cell;
 use crate::btree::BtreeContext;
-use crate::btree::BtreeInteriorTableCell;
 use crate::btree::BtreePageHeader;
 use crate::btree::PayloadInfo;
 use crate::btree::TableCellKeyParser;
@@ -178,9 +178,8 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
             let next_page_id = if i_min == n_cells as usize {
                 page_header.right_page_id()
             } else {
-                let cell = BtreeInteriorTableCell::get(&self.current_page, &buffer, self.idx_cell)
-                    .map_err(|e| anyhow::anyhow!("get btree interior table cell: {:?}", e))?;
-                cell.page_id()
+                parse_btree_interior_cell_page_id(&self.current_page, &buffer, self.idx_cell)
+                    .map_err(|e| anyhow::anyhow!("get btree interior cell page id: {:?}", e))?
             };
             drop(buffer);
             self.move_to_child(next_page_id)?;
@@ -202,6 +201,8 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
                     return Ok(None);
                 }
             } else if page_header.is_leaf() {
+                assert!(page_header.is_table());
+                assert!(!page_header.is_index());
                 let (key, payload_info) =
                     parse_btree_leaf_table_cell(self.btree_ctx, &self.current_page, &buffer, self.idx_cell)
                         .map_err(|e| anyhow::anyhow!("parse tree leaf table cell: {:?}", e))?;
@@ -213,9 +214,8 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
                     payload_info,
                 }));
             } else {
-                let cell = BtreeInteriorTableCell::get(&self.current_page, &buffer, self.idx_cell)
-                    .map_err(|e| anyhow::anyhow!("get btree interior table cell: {:?}", e))?;
-                let page_id = cell.page_id();
+                let page_id = parse_btree_interior_cell_page_id(&self.current_page, &buffer, self.idx_cell)
+                    .map_err(|e| anyhow::anyhow!("get btree interior cell page id: {:?}", e))?;
                 drop(buffer);
                 self.move_to_child(page_id)?;
             }

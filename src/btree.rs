@@ -30,18 +30,10 @@ pub const BTREE_PAGE_HEADER_MAX_SIZE: usize = BTREE_PAGE_INTERIOR_HEADER_SIZE;
 const LEAF_FLAG: u8 = 0x08;
 const INDEX_FLAG: u8 = 0x02;
 const TABLE_FLAG: u8 = 0x05;
-pub const BTREE_PAGE_TYPE_INTERIOR_INDEX: u8 = INDEX_FLAG;
-pub const BTREE_PAGE_TYPE_INTERIOR_TABLE: u8 = TABLE_FLAG;
-pub const BTREE_PAGE_TYPE_LEAF_INDEX: u8 = LEAF_FLAG | INDEX_FLAG;
-pub const BTREE_PAGE_TYPE_LEAF_TABLE: u8 = LEAF_FLAG | TABLE_FLAG;
 
 pub struct BtreePageHeader<'page>(&'page [u8; BTREE_PAGE_HEADER_MAX_SIZE]);
 
 impl<'page> BtreePageHeader<'page> {
-    pub fn from(buf: &'page [u8; BTREE_PAGE_HEADER_MAX_SIZE]) -> Self {
-        Self(buf)
-    }
-
     pub fn from_page(page: &MemPage, buffer: &'page PageBuffer<'page>) -> Self {
         // SAFETY: PageBuffer is always more than 512 bytes.
         Self(
@@ -58,9 +50,19 @@ impl<'page> BtreePageHeader<'page> {
         self.0[0]
     }
 
-    /// Whether the page is a leaf page
+    /// Whether the page is a leaf page or not.
     pub fn is_leaf(&self) -> bool {
         self.0[0] & LEAF_FLAG != 0
+    }
+
+    /// Whether the page is a btree table page or not.
+    pub fn is_table(&self) -> bool {
+        self.0[0] & TABLE_FLAG != 0
+    }
+
+    /// Whether the page is a btreeindex page or not.
+    pub fn is_index(&self) -> bool {
+        self.0[0] & INDEX_FLAG != 0
     }
 
     /// The number of cells in this page
@@ -120,15 +122,6 @@ impl<'a> TableCellKeyParser<'a> {
             Ok(key)
         }
     }
-}
-
-fn get_cell_buffer<'page>(
-    page: &MemPage,
-    buffer: &'page PageBuffer<'page>,
-    cell_idx: u16,
-    header_size: u8,
-) -> ParseResult<&'page [u8]> {
-    Ok(&buffer[get_cell_offset(page, buffer, cell_idx, header_size)?..])
 }
 
 /// Returns the offset of the cell in the buffer.
@@ -309,27 +302,16 @@ pub fn parse_btree_leaf_table_cell(
     Ok((key, payload))
 }
 
-pub struct BtreeInteriorTableCell<'page> {
-    buf: &'page [u8],
-}
-
-impl<'page> BtreeInteriorTableCell<'page> {
-    pub fn get(page: &MemPage, buffer: &'page PageBuffer<'page>, cell_idx: u16) -> ParseResult<Self> {
-        let buf = get_cell_buffer(page, buffer, cell_idx, BTREE_PAGE_INTERIOR_HEADER_SIZE as u8)?;
-        if buf.len() < 5 {
-            return Err("btree interior table cell buffer is too short");
-        }
-        Ok(Self { buf })
+/// Parses the page id which a b-tree (table/index) interiror page cell points to.
+pub fn parse_btree_interior_cell_page_id(page: &MemPage, buffer: &PageBuffer, cell_idx: u16) -> ParseResult<PageId> {
+    let cell_offset = get_cell_offset(page, buffer, cell_idx, BTREE_PAGE_INTERIOR_HEADER_SIZE as u8)?;
+    // Btree interiror cell has 4 bytes page id and at least 1 byte varint (the payload length on index interior page,
+    // the key on table interior page).
+    if cell_offset + 5 > buffer.len() {
+        return Err("btree interior cell buffer is too short");
     }
-
-    pub fn page_id(&self) -> PageId {
-        PageId::from_be_bytes(self.buf[..4].try_into().unwrap())
-    }
-
-    pub fn key(&self) -> ParseResult<i64> {
-        let (key, _) = parse_varint(&self.buf[4..]).map_or(Err("parse payload length varint"), Ok)?;
-        Ok(key)
-    }
+    let page_id = PageId::from_be_bytes(buffer[cell_offset..cell_offset + 4].try_into().unwrap());
+    Ok(page_id)
 }
 
 #[cfg(test)]
@@ -338,7 +320,11 @@ mod tests {
 
     use crate::test_utils::*;
     use crate::utils::unsafe_parse_varint;
-    use crate::DATABASE_HEADER_SIZE;
+
+    const BTREE_PAGE_TYPE_INTERIOR_INDEX: u8 = INDEX_FLAG;
+    const BTREE_PAGE_TYPE_INTERIOR_TABLE: u8 = TABLE_FLAG;
+    const BTREE_PAGE_TYPE_LEAF_INDEX: u8 = LEAF_FLAG | INDEX_FLAG;
+    const BTREE_PAGE_TYPE_LEAF_TABLE: u8 = LEAF_FLAG | TABLE_FLAG;
 
     #[test]
     fn pagetype() {
@@ -380,14 +366,10 @@ mod tests {
 
         let page1 = pager.get_page(1).unwrap();
         let buffer1 = page1.buffer();
-        let page1_header = BtreePageHeader::from(
-            buffer1[DATABASE_HEADER_SIZE..DATABASE_HEADER_SIZE + 12]
-                .try_into()
-                .unwrap(),
-        );
+        let page1_header = BtreePageHeader::from_page(&page1, &buffer1);
         let page2 = pager.get_page(2).unwrap();
         let buffer2 = page2.buffer();
-        let page2_header = BtreePageHeader::from(buffer2[..12].try_into().unwrap());
+        let page2_header = BtreePageHeader::from_page(&page2, &buffer2);
 
         assert_eq!(page1_header.pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
         assert_eq!(page2_header.pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
