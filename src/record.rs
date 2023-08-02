@@ -202,8 +202,9 @@ mod tests {
         let mut buf = Vec::new();
 
         let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
+        cursor.move_to_first().unwrap();
 
-        let payload = cursor.next().unwrap().unwrap();
+        let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
         let result = parse_record(&payload, &mut buf);
         assert_eq!(result[0], Value::Null);
         assert_eq!(result[1], Value::Integer(1));
@@ -211,7 +212,8 @@ mod tests {
         assert_eq!(result[3], Value::Integer(0));
         drop(payload);
 
-        let payload = cursor.next().unwrap().unwrap();
+        cursor.next().unwrap();
+        let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
         let result = parse_record(&payload, &mut buf);
         assert_eq!(result[0], Value::Integer(i8::MAX as i64));
         assert_eq!(result[1], Value::Integer(i8::MIN as i64));
@@ -219,7 +221,8 @@ mod tests {
         assert_eq!(result[3], Value::Integer(i16::MIN as i64));
         drop(payload);
 
-        let payload = cursor.next().unwrap().unwrap();
+        cursor.next().unwrap();
+        let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
         let result = parse_record(&payload, &mut buf);
         assert_eq!(result[0], Value::Integer((ONE << 23) - 1));
         assert_eq!(result[1], Value::Integer(-(ONE << 23)));
@@ -227,7 +230,8 @@ mod tests {
         assert_eq!(result[3], Value::Integer(i32::MIN as i64));
         drop(payload);
 
-        let payload = cursor.next().unwrap().unwrap();
+        cursor.next().unwrap();
+        let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
         let result = parse_record(&payload, &mut buf);
         assert_eq!(result[0], Value::Integer((ONE << 47) - 1));
         assert_eq!(result[1], Value::Integer(-(ONE << 47)));
@@ -235,7 +239,8 @@ mod tests {
         assert_eq!(result[3], Value::Integer(i64::MIN));
         drop(payload);
 
-        let payload = cursor.next().unwrap().unwrap();
+        cursor.next().unwrap();
+        let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
         let result = parse_record(&payload, &mut buf);
         assert_eq!(result[0], Value::Integer(0));
         assert_eq!(result[1], Value::Integer(1));
@@ -246,7 +251,8 @@ mod tests {
         );
         drop(payload);
 
-        let payload = cursor.next().unwrap().unwrap();
+        cursor.next().unwrap();
+        let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
         let result = parse_record(&payload, &mut buf);
         assert_eq!(result[0], Value::Float(0.5));
     }

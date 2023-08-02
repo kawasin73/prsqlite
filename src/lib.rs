@@ -271,19 +271,16 @@ impl<'conn> Statement<'conn> {
         let mut cursor = BtreeCursor::new(self.table_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
         if let Some(rowid) = self.rowid {
             cursor.move_to(rowid)?;
+        } else {
+            cursor.move_to_first()?;
         }
         Ok(Rows {
             stmt: self,
             cursor,
+            is_first_row: true,
             completed: false,
         })
     }
-}
-
-pub struct Rows<'conn> {
-    stmt: &'conn Statement<'conn>,
-    cursor: BtreeCursor<'conn, 'conn>,
-    completed: bool,
 }
 
 /// TODO: Skip should be encapuslated inside [Rows::next]. However we need this due to Rust borrow checker limitation.
@@ -334,6 +331,13 @@ impl<'a, 'conn> NextRow<'a, 'conn> {
     }
 }
 
+pub struct Rows<'conn> {
+    stmt: &'conn Statement<'conn>,
+    cursor: BtreeCursor<'conn, 'conn>,
+    is_first_row: bool,
+    completed: bool,
+}
+
 impl<'conn> Rows<'conn> {
     pub fn next<'a>(&'a mut self) -> anyhow::Result<NextRow<'a, 'conn>> {
         if self.completed {
@@ -344,12 +348,20 @@ impl<'conn> Rows<'conn> {
         }
         // TODO: Keep this never_loop to make it clear that [NextRow] is a workaround for borrow checker limitation.
         #[allow(clippy::never_loop)]
-        while let Some(payload) = self.cursor.next()? {
+        while let Some((rowid, payload)) = {
+            if self.is_first_row {
+                self.is_first_row = false;
+            } else {
+                self.cursor.next()?;
+            }
+            self.cursor.get_table_payload()?
+        } {
             let headers = parse_record_header(&payload)?;
 
             if headers.is_empty() {
                 return Ok(NextRow::Some(Row {
                     stmt: self.stmt,
+                    rowid,
                     payload,
                     headers,
                     content_offset: 0,
@@ -376,6 +388,7 @@ impl<'conn> Rows<'conn> {
             let row = Row {
                 stmt: self.stmt,
                 headers,
+                rowid,
                 payload,
                 content_offset,
                 use_local_buffer,
@@ -402,6 +415,7 @@ const STATIC_NULL_VALUE: Value = Value::Null;
 
 pub struct Row<'a, 'conn> {
     stmt: &'a Statement<'conn>,
+    rowid: i64,
     pub payload: BtreePayload<'a, 'conn>,
     headers: Vec<(SerialType, i32)>,
     content_offset: i32,
@@ -435,7 +449,7 @@ impl<'a, 'conn> Row<'a, 'conn> {
                     Ok(STATIC_NULL_VALUE)
                 }
             }
-            ColumnIndex::RowId => Ok(Value::Integer(self.payload.key())),
+            ColumnIndex::RowId => Ok(Value::Integer(self.rowid)),
         }
     }
 }
