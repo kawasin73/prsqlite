@@ -20,6 +20,8 @@ use crate::utils::CaseInsensitiveBytes;
 pub type Error = &'static str;
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// CREATE TABLE statement.
+#[derive(Debug, PartialEq, Eq)]
 pub struct CreateTable<'a> {
     pub table_name: &'a [u8],
     pub columns: Vec<ColumnDef<'a>>,
@@ -134,17 +136,97 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
         });
 
         match token {
-            Token::Comma => {
-                input = &input[n..];
-            }
-            Token::RightParen => {
-                break;
-            }
+            Token::Comma => continue,
+            Token::RightParen => break,
             _ => return Err("no right paren"),
         }
     }
 
     Ok((len_input - input.len(), CreateTable { table_name, columns }))
+}
+
+/// CREATE INDEX statement.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CreateIndex<'a> {
+    pub index_name: &'a [u8],
+    pub table_name: &'a [u8],
+    pub columns: Vec<IndexedColumn<'a>>,
+}
+
+/// Definition of a column in a index.
+#[derive(Debug, PartialEq, Eq)]
+pub struct IndexedColumn<'a> {
+    pub name: &'a [u8],
+}
+
+/// Parse CREATE INDEX statement.
+///
+/// https://www.sqlite.org/lang_createindex.html
+pub fn parse_create_index(input: &[u8]) -> Result<(usize, CreateIndex)> {
+    let mut input = input;
+    let len_input = input.len();
+
+    if let Some((n, Token::Create)) = get_token_no_space(input) {
+        input = &input[n..];
+    } else {
+        return Err("no create");
+    }
+    if let Some((n, Token::Index)) = get_token_no_space(input) {
+        input = &input[n..];
+    } else {
+        return Err("no index");
+    }
+    let index_name = if let Some((n, Token::Identifier(index_name))) = get_token_no_space(input) {
+        input = &input[n..];
+        index_name
+    } else {
+        return Err("no index_name");
+    };
+    if let Some((n, Token::On)) = get_token_no_space(input) {
+        input = &input[n..];
+    } else {
+        return Err("no on");
+    }
+    let table_name = if let Some((n, Token::Identifier(table_name))) = get_token_no_space(input) {
+        input = &input[n..];
+        table_name
+    } else {
+        return Err("no table_name");
+    };
+    if let Some((n, Token::LeftParen)) = get_token_no_space(input) {
+        input = &input[n..];
+    } else {
+        return Err("no left paren");
+    }
+    let mut columns = Vec::new();
+    loop {
+        let name = if let Some((n, Token::Identifier(column_name))) = get_token_no_space(input) {
+            input = &input[n..];
+            column_name
+        } else {
+            return Err("no column name");
+        };
+
+        let (n, token) = get_token_no_space(input).ok_or("no right paren")?;
+        input = &input[n..];
+
+        columns.push(IndexedColumn { name });
+
+        match token {
+            Token::Comma => continue,
+            Token::RightParen => break,
+            _ => return Err("no right paren"),
+        }
+    }
+
+    Ok((
+        len_input - input.len(),
+        CreateIndex {
+            index_name,
+            table_name,
+            columns,
+        },
+    ))
 }
 
 pub struct Select<'a> {
@@ -287,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_parse_create_table() {
-        let input = b"create table foo (id integer primary key, name text, real real, blob blob, empty null, no_type)";
+        let input = b"create table foo (id integer primary key, name text, real real, blob blob, empty null,no_type)";
         let (n, create_table) = parse_create_table(input).unwrap();
         assert_eq!(n, input.len());
         assert_eq!(create_table.table_name, b"foo");
@@ -361,6 +443,42 @@ mod tests {
         assert!(parse_create_table(b"create table foo (id primary, name)").is_err());
         // key without primary.
         assert!(parse_create_table(b"create table foo (id key, name)").is_err());
+    }
+
+    #[test]
+    fn test_parse_create_index() {
+        let input = b"create index foo on bar (col1, col2,col3)";
+        let (n, create_index) = parse_create_index(input).unwrap();
+        assert_eq!(n, input.len());
+        assert_eq!(create_index.index_name, b"foo");
+        assert_eq!(create_index.table_name, b"bar");
+        assert_eq!(
+            create_index.columns,
+            vec![
+                IndexedColumn { name: b"col1" },
+                IndexedColumn { name: b"col2" },
+                IndexedColumn { name: b"col3" },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_create_index_with_extra() {
+        let input = b"create index fOo on bAR (Col1,cOL2)abc ";
+        let (n, create_index) = parse_create_index(input).unwrap();
+        assert_eq!(n, input.len() - 4);
+        assert_eq!(create_index.index_name, b"fOo");
+        assert_eq!(create_index.table_name, b"bAR");
+        assert_eq!(
+            create_index.columns,
+            vec![IndexedColumn { name: b"Col1" }, IndexedColumn { name: b"cOL2" },]
+        );
+    }
+
+    #[test]
+    fn test_parse_create_index_fail() {
+        // no right paren.
+        assert!(parse_create_index(b"create index foo on bar (id, name ").is_err());
     }
 
     #[test]

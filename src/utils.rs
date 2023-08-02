@@ -112,6 +112,12 @@ impl<'a> From<&'a [u8]> for CaseInsensitiveBytes<'a> {
     }
 }
 
+impl<'a> From<&'a Vec<u8>> for CaseInsensitiveBytes<'a> {
+    fn from(bytes: &'a Vec<u8>) -> Self {
+        CaseInsensitiveBytes(&bytes[..])
+    }
+}
+
 impl PartialEq for CaseInsensitiveBytes<'_> {
     fn eq(&self, other: &Self) -> bool {
         if self.0.len() != other.0.len() {

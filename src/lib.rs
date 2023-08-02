@@ -43,7 +43,7 @@ use crate::parser::ResultColumn;
 use crate::record::parse_record_header;
 use crate::record::SerialType;
 pub use crate::record::Value;
-use crate::schema::ColumnIndex;
+use crate::schema::ColumnNumber;
 use crate::schema::Schema;
 use crate::schema::Table;
 use crate::token::get_token_no_space;
@@ -165,7 +165,7 @@ impl Connection {
 }
 
 enum Selection {
-    Column(ColumnIndex),
+    Column(ColumnNumber),
     BinaryOperator {
         operator: BinaryOperator,
         left: Box<Selection>,
@@ -233,7 +233,7 @@ impl Selection {
 pub struct Statement<'conn> {
     conn: &'conn mut Connection,
     table_page_id: u32,
-    columns: Vec<ColumnIndex>,
+    columns: Vec<ColumnNumber>,
     selection: Option<Selection>,
     rowid: Option<i64>,
 }
@@ -242,7 +242,7 @@ impl<'conn> Statement<'conn> {
     pub(crate) fn new(
         conn: &'conn mut Connection,
         table_page_id: u32,
-        columns: Vec<ColumnIndex>,
+        columns: Vec<ColumnNumber>,
         selection: Option<Selection>,
     ) -> Self {
         let rowid = match &selection {
@@ -251,8 +251,8 @@ impl<'conn> Statement<'conn> {
                 left,
                 right,
             }) => match (left.as_ref(), right.as_ref()) {
-                (Selection::Column(ColumnIndex::RowId), Selection::LiteralValue(value)) => Some(*value),
-                (Selection::LiteralValue(value), Selection::Column(ColumnIndex::RowId)) => Some(*value),
+                (Selection::Column(ColumnNumber::RowId), Selection::LiteralValue(value)) => Some(*value),
+                (Selection::LiteralValue(value), Selection::Column(ColumnNumber::RowId)) => Some(*value),
                 _ => None,
             },
             _ => None,
@@ -433,9 +433,9 @@ impl<'a, 'conn> Row<'a, 'conn> {
         Ok(Columns(columns))
     }
 
-    fn get_column(&self, column_idx: &ColumnIndex) -> anyhow::Result<Value> {
+    fn get_column(&self, column_idx: &ColumnNumber) -> anyhow::Result<Value> {
         match column_idx {
-            ColumnIndex::Column(idx) => {
+            ColumnNumber::Column(idx) => {
                 if let Some((serial_type, offset)) = self.headers.get(*idx) {
                     let contents_buffer = if self.use_local_buffer {
                         &self.payload.buf()[self.content_offset as usize..]
@@ -449,7 +449,7 @@ impl<'a, 'conn> Row<'a, 'conn> {
                     Ok(STATIC_NULL_VALUE)
                 }
             }
-            ColumnIndex::RowId => Ok(Value::Integer(self.rowid)),
+            ColumnNumber::RowId => Ok(Value::Integer(self.rowid)),
         }
     }
 }
