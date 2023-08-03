@@ -29,6 +29,7 @@ use std::path::Path;
 
 use anyhow::bail;
 use anyhow::Context;
+use pager::PageId;
 
 // TODO: This is to suppress the unused warning.
 // pub use crate::btree::*;
@@ -41,6 +42,7 @@ use crate::parser::BinaryOperator;
 use crate::parser::Expr;
 use crate::parser::ResultColumn;
 use crate::record::parse_record_header;
+use crate::record::Record;
 use crate::record::SerialType;
 pub use crate::record::Value;
 use crate::schema::ColumnNumber;
@@ -159,8 +161,38 @@ impl Connection {
 
         let selection = select.selection.map(|expr| Selection::from(expr, table)).transpose()?;
 
+        let index = if let Some(Selection::BinaryOperator {
+            operator: BinaryOperator::Eq,
+            left,
+            right,
+        }) = &selection
+        {
+            if let Selection::Column(column_number) = left.as_ref() {
+                if let Selection::LiteralValue(key) = right.as_ref() {
+                    let mut next_index = table.indexes.as_ref();
+                    while let Some(index) = next_index {
+                        if index.columns[0] == *column_number {
+                            break;
+                        }
+                        next_index = index.next.as_ref();
+                    }
+                    next_index.map(|index| (index.root_page_id, vec![*key, i64::MIN]))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let table_page_id = table.root_page_id;
-        Ok(Statement::new(self, table_page_id, columns, selection))
+        if index.is_some() {
+            Ok(Statement::with_index(self, table_page_id, columns, selection, index))
+        } else {
+            Ok(Statement::new(self, table_page_id, columns, selection))
+        }
     }
 }
 
@@ -175,6 +207,27 @@ enum Selection {
 }
 
 impl Selection {
+    fn from(expr: Expr, table: &Table) -> anyhow::Result<Self> {
+        match expr {
+            Expr::LiteralValue(value) => match value {
+                Value::Integer(i) => Ok(Self::LiteralValue(i)),
+                _ => bail!("unsupported literal value: {:?}", value),
+            },
+            Expr::BinaryOperator { operator, left, right } => Ok(Self::BinaryOperator {
+                operator,
+                left: Box::new(Self::from(*left, table)?),
+                right: Box::new(Self::from(*right, table)?),
+            }),
+            Expr::Column(column_name) => table
+                .get_column_index(column_name)
+                .map(Self::Column)
+                .ok_or(anyhow::anyhow!(
+                    "column not found: {}",
+                    std::str::from_utf8(column_name).unwrap_or_default()
+                )),
+        }
+    }
+
     fn execute(&self, row: &Row) -> anyhow::Result<i64> {
         match self {
             Self::Column(idx) => {
@@ -206,42 +259,20 @@ impl Selection {
     }
 }
 
-impl Selection {
-    fn from(expr: Expr, table: &Table) -> anyhow::Result<Self> {
-        match expr {
-            Expr::LiteralValue(value) => match value {
-                Value::Integer(i) => Ok(Self::LiteralValue(i)),
-                _ => bail!("unsupported literal value: {:?}", value),
-            },
-            Expr::BinaryOperator { operator, left, right } => Ok(Self::BinaryOperator {
-                operator,
-                left: Box::new(Self::from(*left, table)?),
-                right: Box::new(Self::from(*right, table)?),
-            }),
-            Expr::Column(column_name) => table
-                .get_column_index(column_name)
-                .map(Self::Column)
-                .ok_or(anyhow::anyhow!(
-                    "column not found: {}",
-                    std::str::from_utf8(column_name).unwrap_or_default()
-                )),
-        }
-    }
-}
-
 // TODO: make Connection non mut and support multiple statements.
 pub struct Statement<'conn> {
     conn: &'conn mut Connection,
-    table_page_id: u32,
+    table_page_id: PageId,
     columns: Vec<ColumnNumber>,
     selection: Option<Selection>,
     rowid: Option<i64>,
+    index: Option<(PageId, Vec<i64>)>,
 }
 
 impl<'conn> Statement<'conn> {
     pub(crate) fn new(
         conn: &'conn mut Connection,
-        table_page_id: u32,
+        table_page_id: PageId,
         columns: Vec<ColumnNumber>,
         selection: Option<Selection>,
     ) -> Self {
@@ -263,20 +294,45 @@ impl<'conn> Statement<'conn> {
             columns,
             selection,
             rowid,
+            index: None,
+        }
+    }
+
+    fn with_index(
+        conn: &'conn mut Connection,
+        table_page_id: PageId,
+        columns: Vec<ColumnNumber>,
+        selection: Option<Selection>,
+        index: Option<(PageId, Vec<i64>)>,
+    ) -> Self {
+        Self {
+            conn,
+            table_page_id,
+            columns,
+            selection,
+            rowid: None,
+            index,
         }
     }
 
     pub fn execute(&'conn mut self) -> anyhow::Result<Rows<'conn>> {
         // TODO: check schema version.
         let mut cursor = BtreeCursor::new(self.table_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
-        if let Some(rowid) = self.rowid {
-            cursor.move_to(rowid)?;
+        let index = if let Some(rowid) = self.rowid {
+            cursor.table_move_to(rowid)?;
+            None
+        } else if let Some((index_page_id, keys)) = &self.index {
+            let mut index_cursor = BtreeCursor::new(*index_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
+            index_cursor.index_move_to(keys)?;
+            Some((index_cursor, &keys[..keys.len() - 1]))
         } else {
             cursor.move_to_first()?;
-        }
+            None
+        };
         Ok(Rows {
             stmt: self,
             cursor,
+            index,
             is_first_row: true,
             completed: false,
         })
@@ -334,6 +390,7 @@ impl<'a, 'conn> NextRow<'a, 'conn> {
 pub struct Rows<'conn> {
     stmt: &'conn Statement<'conn>,
     cursor: BtreeCursor<'conn, 'conn>,
+    index: Option<(BtreeCursor<'conn, 'conn>, &'conn [i64])>,
     is_first_row: bool,
     completed: bool,
 }
@@ -351,8 +408,34 @@ impl<'conn> Rows<'conn> {
         while let Some((rowid, payload)) = {
             if self.is_first_row {
                 self.is_first_row = false;
+            } else if let Some((index_cursor, _)) = &mut self.index {
+                index_cursor.next()?
             } else {
                 self.cursor.next()?;
+            }
+            if let Some((index_cursor, keys)) = &mut self.index {
+                let Some(index_payload) = index_cursor.get_index_payload()? else {
+                    self.completed = true;
+                    return Ok(NextRow::None);
+                };
+                let mut record = Record::parse(&index_payload)?;
+                if record.len() < keys.len() {
+                    bail!("index payload is too short");
+                }
+                for (i, key) in keys.iter().enumerate() {
+                    if let Value::Integer(v) = record.get(i)? {
+                        if v != *key {
+                            return Ok(NextRow::None);
+                        }
+                    } else {
+                        // TODO: support other key types.
+                        bail!("index payload is not integer");
+                    }
+                }
+                let Value::Integer(rowid) = record.get(record.len() - 1)? else {
+                    bail!("rowid in index is not integer");
+                };
+                self.cursor.table_move_to(rowid)?;
             }
             self.cursor.get_table_payload()?
         } {

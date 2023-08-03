@@ -31,6 +31,25 @@ const LEAF_FLAG: u8 = 0x08;
 const INDEX_FLAG: u8 = 0x02;
 const TABLE_FLAG: u8 = 0x05;
 
+pub struct BtreePageType(u8);
+
+impl BtreePageType {
+    #[inline]
+    pub fn is_leaf(&self) -> bool {
+        self.0 & LEAF_FLAG != 0
+    }
+
+    #[inline]
+    pub fn is_table(&self) -> bool {
+        self.0 & TABLE_FLAG != 0
+    }
+
+    #[inline]
+    pub fn is_index(&self) -> bool {
+        self.0 & INDEX_FLAG != 0
+    }
+}
+
 pub struct BtreePageHeader<'page>(&'page [u8; BTREE_PAGE_HEADER_MAX_SIZE]);
 
 impl<'page> BtreePageHeader<'page> {
@@ -44,25 +63,9 @@ impl<'page> BtreePageHeader<'page> {
     }
 
     /// The btree page type
-    ///
-    /// TODO: how to convert u8 into enum with zero copy?
-    pub fn pagetype(&self) -> u8 {
-        self.0[0]
-    }
-
-    /// Whether the page is a leaf page or not.
-    pub fn is_leaf(&self) -> bool {
-        self.0[0] & LEAF_FLAG != 0
-    }
-
-    /// Whether the page is a btree table page or not.
-    pub fn is_table(&self) -> bool {
-        self.0[0] & TABLE_FLAG != 0
-    }
-
-    /// Whether the page is a btreeindex page or not.
-    pub fn is_index(&self) -> bool {
-        self.0[0] & INDEX_FLAG != 0
+    #[inline]
+    pub fn page_type(&self) -> BtreePageType {
+        BtreePageType(self.0[0])
     }
 
     /// The number of cells in this page
@@ -85,7 +88,7 @@ impl<'page> BtreePageHeader<'page> {
     /// This does not invoke conditional branch.
     pub fn header_size(&self) -> u8 {
         // 0(leaf) or 8(interior)
-        let is_interior = (!self.pagetype()) & LEAF_FLAG;
+        let is_interior = (!self.0[0]) & LEAF_FLAG;
         // 0(leaf) or 4(interior)
         let additional_size = is_interior >> 1;
         8 + additional_size
@@ -105,22 +108,55 @@ impl<'a> TableCellKeyParser<'a> {
         Self {
             page,
             buffer,
-            is_leaf: header.is_leaf(),
+            is_leaf: header.page_type().is_leaf(),
             header_size: header.header_size(),
         }
     }
 
     pub fn get_cell_key(&self, cell_idx: u16) -> ParseResult<i64> {
         let offset = get_cell_offset(self.page, self.buffer, cell_idx, self.header_size)?;
-        if self.is_leaf {
+        let offset_in_cell = if self.is_leaf {
             // TODO: just skip bytes >= 0x80 because payload length is u32.
             let (_, n) = parse_varint(&self.buffer[offset..]).ok_or("parse payload length varint")?;
-            let (key, _) = parse_varint(&self.buffer[offset + n..]).ok_or("parse key varint")?;
-            Ok(key)
+            n
         } else {
-            let (key, _) = parse_varint(&self.buffer[offset + 4..]).ok_or("parse key varint")?;
-            Ok(key)
+            4
+        };
+        let (key, _) = parse_varint(&self.buffer[offset + offset_in_cell..]).ok_or("parse key varint")?;
+        Ok(key)
+    }
+}
+
+pub struct IndexCellKeyParser<'a> {
+    ctx: &'a BtreeContext,
+    page: &'a MemPage,
+    buffer: &'a PageBuffer<'a>,
+    offset_in_cell: u8,
+    header_size: u8,
+}
+
+impl<'a> IndexCellKeyParser<'a> {
+    pub fn new(ctx: &'a BtreeContext, page: &'a MemPage, buffer: &'a PageBuffer<'a>) -> Self {
+        let header = BtreePageHeader::from_page(page, buffer);
+        let offset_in_cell = (!header.page_type().is_leaf() as u8) << 2;
+        Self {
+            ctx,
+            page,
+            buffer,
+            offset_in_cell,
+            header_size: header.header_size(),
         }
+    }
+
+    pub fn get_cell_key(&self, cell_idx: u16) -> ParseResult<PayloadInfo> {
+        let offset = get_cell_offset(self.page, self.buffer, cell_idx, self.header_size)?;
+        let offset = offset + self.offset_in_cell as usize;
+        let (payload_size, n) = parse_varint(&self.buffer[offset..]).ok_or("parse payload length varint")?;
+        let payload_size: i32 = payload_size.try_into().map_err(|_| "payload length too large")?;
+        if payload_size < 0 {
+            return Err("payload length is negative");
+        }
+        PayloadInfo::parse(self.ctx, false, self.buffer, offset + n, payload_size)
     }
 }
 
@@ -338,7 +374,7 @@ mod tests {
             buf[0] = t;
             let header = BtreePageHeader(&buf);
 
-            assert_eq!(header.pagetype(), t);
+            assert_eq!(header.page_type().0, t);
         }
     }
 
@@ -371,8 +407,8 @@ mod tests {
         let buffer2 = page2.buffer();
         let page2_header = BtreePageHeader::from_page(&page2, &buffer2);
 
-        assert_eq!(page1_header.pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
-        assert_eq!(page2_header.pagetype(), BTREE_PAGE_TYPE_LEAF_TABLE);
+        assert_eq!(page1_header.page_type().0, BTREE_PAGE_TYPE_LEAF_TABLE);
+        assert_eq!(page2_header.page_type().0, BTREE_PAGE_TYPE_LEAF_TABLE);
         assert_eq!(page1_header.n_cells(), 1);
         assert_eq!(page2_header.n_cells(), 0);
     }
@@ -397,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn load_btree_leaf_table_cell() {
+    fn test_parse_btree_leaf_table_cell() {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let page1 = pager.get_page(1).unwrap();

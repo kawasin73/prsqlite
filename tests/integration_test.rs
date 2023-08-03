@@ -331,3 +331,73 @@ fn test_select_where() {
 
     assert!(rows.next().unwrap().is_none());
 }
+
+#[test]
+fn test_select_with_index() {
+    let file = create_sqlite_database(&[
+        "CREATE TABLE example(col1, col2, col3);",
+        "CREATE INDEX index1 ON example(col2, col3);",
+        "CREATE INDEX index2 ON example(col3);",
+        "INSERT INTO example(col1, col2, col3) VALUES (1, 2, 3);",
+        "INSERT INTO example(col1, col2, col3) VALUES (4, 5, 6);",
+        "INSERT INTO example(col1, col2, col3) VALUES (7, 8, 9);",
+        "INSERT INTO example(col1, col2, col3) VALUES (10, 5, 2);",
+        "INSERT INTO example(col1, col2, col3) VALUES (3, 3, 3);",
+    ]);
+
+    let mut conn = Connection::open(file.path()).unwrap();
+    let mut stmt = conn.prepare("SELECT * FROM example WHERE col2 == 5;").unwrap();
+    let mut rows = stmt.execute().unwrap();
+
+    let row = rows.next().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 3);
+    assert_eq!(columns.get(0), &Value::Integer(10));
+    assert_eq!(columns.get(1), &Value::Integer(5));
+    assert_eq!(columns.get(2), &Value::Integer(2));
+    drop(row);
+
+    let row = rows.next().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 3);
+    assert_eq!(columns.get(0), &Value::Integer(4));
+    assert_eq!(columns.get(1), &Value::Integer(5));
+    assert_eq!(columns.get(2), &Value::Integer(6));
+    drop(row);
+
+    assert!(rows.next().unwrap().is_none());
+
+    let mut stmt = conn.prepare("SELECT * FROM example WHERE col3 == 6;").unwrap();
+    let mut rows = stmt.execute().unwrap();
+
+    let row = rows.next().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 3);
+    assert_eq!(columns.get(0), &Value::Integer(4));
+    assert_eq!(columns.get(1), &Value::Integer(5));
+    assert_eq!(columns.get(2), &Value::Integer(6));
+    drop(row);
+
+    assert!(rows.next().unwrap().is_none());
+
+    let mut stmt = conn.prepare("SELECT * FROM example WHERE col3 == 3;").unwrap();
+    let mut rows = stmt.execute().unwrap();
+
+    let row = rows.next().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 3);
+    assert_eq!(columns.get(0), &Value::Integer(1));
+    assert_eq!(columns.get(1), &Value::Integer(2));
+    assert_eq!(columns.get(2), &Value::Integer(3));
+    drop(row);
+
+    let row = rows.next().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 3);
+    assert_eq!(columns.get(0), &Value::Integer(3));
+    assert_eq!(columns.get(1), &Value::Integer(3));
+    assert_eq!(columns.get(2), &Value::Integer(3));
+    drop(row);
+
+    assert!(rows.next().unwrap().is_none());
+}

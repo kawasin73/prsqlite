@@ -72,3 +72,15 @@ pub fn find_table_page_id(table: &str, filepath: &Path) -> PageId {
     .unwrap();
     schema.get_table(table.as_bytes()).unwrap().root_page_id
 }
+
+pub fn find_index_page_id(index: &str, filepath: &Path) -> PageId {
+    let mut conn = Connection::open(filepath).unwrap();
+    let schema_table = Schema::schema_table();
+    let columns = schema_table.all_column_index().collect::<Vec<_>>();
+    let schema = Schema::generate(
+        Statement::new(&mut conn, schema_table.root_page_id, columns, None),
+        schema_table,
+    )
+    .unwrap();
+    schema.get_index(index.as_bytes()).unwrap().root_page_id
+}

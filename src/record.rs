@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cmp::Ordering;
 use std::fmt::Display;
 
-use anyhow::{bail, Context};
+use anyhow::bail;
+use anyhow::Context;
 
 use crate::cursor::BtreePayload;
 use crate::utils::parse_varint;
@@ -39,6 +41,25 @@ impl<'a> Display for Value<'a> {
             Value::Text(t) => write!(f, "{t}"),
         }
     }
+}
+
+pub fn compare_record(keys: &[i64], payload: &BtreePayload) -> anyhow::Result<Ordering> {
+    let mut record = Record::parse(payload)?;
+    if record.len() < keys.len() {
+        bail!("keys is more than index columns");
+    }
+    for (i, key) in keys.iter().enumerate() {
+        let index_value = record.get(i)?;
+        // TODO: support non integer comparison.
+        let Value::Integer(index_value) = index_value else {
+            unimplemented!("non integer comparison is not implemented")
+        };
+        match key.cmp(&index_value) {
+            Ordering::Equal => continue,
+            o => return Ok(o),
+        }
+    }
+    Ok(Ordering::Equal)
 }
 
 pub struct SerialType(u32);
@@ -104,6 +125,47 @@ impl SerialType {
     }
 }
 
+pub struct Record<'payload> {
+    payload: &'payload BtreePayload<'payload, 'payload>,
+    header: Vec<(SerialType, i32)>,
+    tmp_buf: Vec<u8>,
+}
+
+impl<'payload> Record<'payload> {
+    pub fn parse(payload: &'payload BtreePayload<'payload, 'payload>) -> anyhow::Result<Self> {
+        let header = parse_record_header(payload)?;
+        Ok(Self {
+            payload,
+            header,
+            tmp_buf: Vec::new(),
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.header.len()
+    }
+
+    pub fn get(&mut self, i: usize) -> anyhow::Result<Value<'_>> {
+        let Some((serial_type, offset)) = &self.header.get(i) else {
+            bail!("index out of range");
+        };
+        let offset = *offset;
+        let content_size = serial_type.content_size() as usize;
+        let buf = if offset as usize + content_size > self.payload.buf().len() {
+            self.tmp_buf.resize(content_size, 0);
+            // SAFETY: tmp_buf is not from MemPage.
+            let n = unsafe { self.payload.load(offset, &mut self.tmp_buf)? };
+            if n != content_size {
+                bail!("failed to load rowid from index payload");
+            }
+            &self.tmp_buf
+        } else {
+            &self.payload.buf()[offset as usize..offset as usize + content_size]
+        };
+        serial_type.parse(buf)
+    }
+}
+
 /// Parse record header and return a list of serial types and content offsets.
 ///
 /// TODO: support partial parsing.
@@ -151,17 +213,6 @@ mod tests {
     use crate::cursor::BtreeCursor;
     use crate::test_utils::*;
 
-    fn parse_record<'a>(payload: &BtreePayload, buf: &'a mut Vec<u8>) -> Vec<Value<'a>> {
-        let headers = parse_record_header(payload).unwrap();
-        assert_eq!(headers.len(), 4);
-        *buf = vec![0; payload.size() as usize];
-        let _ = unsafe { payload.load(0, buf).unwrap() };
-        headers
-            .iter()
-            .map(|(serial_type, offset)| serial_type.parse(&buf[*offset as usize..]).unwrap())
-            .collect()
-    }
-
     #[test]
     fn test_parse_record() {
         let tables = ["CREATE TABLE example(col1, col2, col3, col4);"];
@@ -199,61 +250,60 @@ mod tests {
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let bctx = load_btree_context(file.as_file()).unwrap();
         let table_page_id = find_table_page_id("example", file.path());
-        let mut buf = Vec::new();
 
         let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
         cursor.move_to_first().unwrap();
 
         let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
-        let result = parse_record(&payload, &mut buf);
-        assert_eq!(result[0], Value::Null);
-        assert_eq!(result[1], Value::Integer(1));
-        assert_eq!(result[2], Value::Null);
-        assert_eq!(result[3], Value::Integer(0));
+        let mut record = Record::parse(&payload).unwrap();
+        assert_eq!(record.get(0).unwrap(), Value::Null);
+        assert_eq!(record.get(1).unwrap(), Value::Integer(1));
+        assert_eq!(record.get(2).unwrap(), Value::Null);
+        assert_eq!(record.get(3).unwrap(), Value::Integer(0));
         drop(payload);
 
         cursor.next().unwrap();
         let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
-        let result = parse_record(&payload, &mut buf);
-        assert_eq!(result[0], Value::Integer(i8::MAX as i64));
-        assert_eq!(result[1], Value::Integer(i8::MIN as i64));
-        assert_eq!(result[2], Value::Integer(i16::MAX as i64));
-        assert_eq!(result[3], Value::Integer(i16::MIN as i64));
+        let mut record = Record::parse(&payload).unwrap();
+        assert_eq!(record.get(0).unwrap(), Value::Integer(i8::MAX as i64));
+        assert_eq!(record.get(1).unwrap(), Value::Integer(i8::MIN as i64));
+        assert_eq!(record.get(2).unwrap(), Value::Integer(i16::MAX as i64));
+        assert_eq!(record.get(3).unwrap(), Value::Integer(i16::MIN as i64));
         drop(payload);
 
         cursor.next().unwrap();
         let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
-        let result = parse_record(&payload, &mut buf);
-        assert_eq!(result[0], Value::Integer((ONE << 23) - 1));
-        assert_eq!(result[1], Value::Integer(-(ONE << 23)));
-        assert_eq!(result[2], Value::Integer(i32::MAX as i64));
-        assert_eq!(result[3], Value::Integer(i32::MIN as i64));
+        let mut record = Record::parse(&payload).unwrap();
+        assert_eq!(record.get(0).unwrap(), Value::Integer((ONE << 23) - 1));
+        assert_eq!(record.get(1).unwrap(), Value::Integer(-(ONE << 23)));
+        assert_eq!(record.get(2).unwrap(), Value::Integer(i32::MAX as i64));
+        assert_eq!(record.get(3).unwrap(), Value::Integer(i32::MIN as i64));
         drop(payload);
 
         cursor.next().unwrap();
         let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
-        let result = parse_record(&payload, &mut buf);
-        assert_eq!(result[0], Value::Integer((ONE << 47) - 1));
-        assert_eq!(result[1], Value::Integer(-(ONE << 47)));
-        assert_eq!(result[2], Value::Integer(i64::MAX));
-        assert_eq!(result[3], Value::Integer(i64::MIN));
+        let mut record = Record::parse(&payload).unwrap();
+        assert_eq!(record.get(0).unwrap(), Value::Integer((ONE << 47) - 1));
+        assert_eq!(record.get(1).unwrap(), Value::Integer(-(ONE << 47)));
+        assert_eq!(record.get(2).unwrap(), Value::Integer(i64::MAX));
+        assert_eq!(record.get(3).unwrap(), Value::Integer(i64::MIN));
         drop(payload);
 
         cursor.next().unwrap();
         let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
-        let result = parse_record(&payload, &mut buf);
-        assert_eq!(result[0], Value::Integer(0));
-        assert_eq!(result[1], Value::Integer(1));
-        assert_eq!(result[2], Value::Text("hello"));
+        let mut record = Record::parse(&payload).unwrap();
+        assert_eq!(record.get(0).unwrap(), Value::Integer(0));
+        assert_eq!(record.get(1).unwrap(), Value::Integer(1));
+        assert_eq!(record.get(2).unwrap(), Value::Text("hello"));
         assert_eq!(
-            result[3],
+            record.get(3).unwrap(),
             Value::Blob(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef])
         );
         drop(payload);
 
         cursor.next().unwrap();
         let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
-        let result = parse_record(&payload, &mut buf);
-        assert_eq!(result[0], Value::Float(0.5));
+        let mut record = Record::parse(&payload).unwrap();
+        assert_eq!(record.get(0).unwrap(), Value::Float(0.5));
     }
 }

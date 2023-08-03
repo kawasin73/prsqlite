@@ -28,5 +28,6 @@ anyhow = "1"
 thiserror = "1"
 
 [dev-dependencies]
+rand = "*"
 rusqlite = "0.28.0"
 tempfile = "3"

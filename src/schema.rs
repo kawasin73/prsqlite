@@ -232,7 +232,7 @@ impl Schema {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Index {
     pub root_page_id: PageId,
-    pub columns: Vec<Vec<u8>>,
+    pub columns: Vec<ColumnNumber>,
     pub next: Option<Rc<Index>>,
 }
 
@@ -246,25 +246,23 @@ impl Index {
                 sql
             );
         }
+        let mut columns = Vec::with_capacity(create_index.columns.len());
         for column in &create_index.columns {
-            if !table
-                .columns
-                .iter()
-                .any(|c| CaseInsensitiveBytes::from(&c.name) == CaseInsensitiveBytes::from(column.name))
-            {
+            let Some(column_number) = table.get_column_index(column.name) else {
                 bail!(
                     "column {:?} in create index sql is not found in table {:?}",
                     column.name,
                     table
                 );
-            }
+            };
+            columns.push(column_number);
         }
         Ok((
             create_index.index_name.to_vec(),
             create_index.table_name,
             Self {
                 root_page_id,
-                columns: create_index.columns.into_iter().map(|c| c.name.to_vec()).collect(),
+                columns,
                 next: None,
             },
         ))
@@ -643,12 +641,12 @@ mod tests {
 
         let index1 = Rc::new(Index {
             root_page_id: 3,
-            columns: vec![b"col1".to_vec()],
+            columns: vec![ColumnNumber::Column(0)],
             next: None,
         });
         let index2 = Rc::new(Index {
             root_page_id: 4,
-            columns: vec![b"col1".to_vec(), b"col2".to_vec()],
+            columns: vec![ColumnNumber::Column(0), ColumnNumber::Column(1)],
             next: Some(index1.clone()),
         });
         assert_eq!(schema.get_index(b"index1").unwrap(), &index1);
@@ -668,12 +666,12 @@ mod tests {
 
         let index1 = Rc::new(Index {
             root_page_id: 3,
-            columns: vec![b"col1".to_vec()],
+            columns: vec![ColumnNumber::Column(0)],
             next: None,
         });
         let index2 = Rc::new(Index {
             root_page_id: 4,
-            columns: vec![b"col1".to_vec(), b"col2".to_vec()],
+            columns: vec![ColumnNumber::Column(0), ColumnNumber::Column(1)],
             next: Some(index1.clone()),
         });
         assert_eq!(table.indexes, Some(index2));
@@ -706,16 +704,16 @@ mod tests {
 
     #[test]
     fn parse_index() {
-        let (_, table) = Table::parse("create table example(col1, col2)", 1).unwrap();
+        let (_, table) = Table::parse("create table example(col1, id integer primary key, col2)", 1).unwrap();
         let (index_name, table_name, index) =
-            Index::parse("create index index1 on example(col1, col2)", 3, &table).unwrap();
+            Index::parse("create index index1 on example(id, col1, col2)", 3, &table).unwrap();
         assert_eq!(index_name, b"index1");
         assert_eq!(table_name, b"example");
         assert_eq!(
             index,
             Index {
                 root_page_id: 3,
-                columns: vec![b"col1".to_vec(), b"col2".to_vec()],
+                columns: vec![ColumnNumber::RowId, ColumnNumber::Column(0), ColumnNumber::Column(2)],
                 next: None,
             }
         );
