@@ -54,35 +54,32 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
     let mut input = input;
     let len_input = input.len();
 
-    if let Some((n, Token::Create)) = get_token_no_space(input) {
-        input = &input[n..];
-    } else {
+    let Some((n, Token::Create)) = get_token_no_space(input) else {
         return Err("no create");
-    }
-    if let Some((n, Token::Table)) = get_token_no_space(input) {
-        input = &input[n..];
-    } else {
+    };
+    input = &input[n..];
+
+    let Some((n, Token::Table)) = get_token_no_space(input) else {
         return Err("no table");
-    }
-    let table_name = if let Some((n, Token::Identifier(table_name))) = get_token_no_space(input) {
-        input = &input[n..];
-        table_name
-    } else {
+    };
+    input = &input[n..];
+
+    let Some((n, Token::Identifier(table_name))) = get_token_no_space(input) else {
         return Err("no table_name");
     };
-    if let Some((n, Token::LeftParen)) = get_token_no_space(input) {
-        input = &input[n..];
-    } else {
+    input = &input[n..];
+
+    let Some((n, Token::LeftParen)) = get_token_no_space(input) else {
         return Err("no left paren");
-    }
+    };
+    input = &input[n..];
+
     let mut columns = Vec::new();
     loop {
-        let name = if let Some((n, Token::Identifier(column_name))) = get_token_no_space(input) {
-            input = &input[n..];
-            column_name
-        } else {
+        let Some((n, Token::Identifier(name))) = get_token_no_space(input) else {
             return Err("no column name");
         };
+        input = &input[n..];
 
         let (mut n, mut token) = get_token_no_space(input).ok_or("no right paren")?;
         input = &input[n..];
@@ -166,46 +163,42 @@ pub fn parse_create_index(input: &[u8]) -> Result<(usize, CreateIndex)> {
     let mut input = input;
     let len_input = input.len();
 
-    if let Some((n, Token::Create)) = get_token_no_space(input) {
-        input = &input[n..];
-    } else {
+    let Some((n, Token::Create)) = get_token_no_space(input) else {
         return Err("no create");
-    }
-    if let Some((n, Token::Index)) = get_token_no_space(input) {
-        input = &input[n..];
-    } else {
+    };
+    input = &input[n..];
+
+    let Some((n, Token::Index)) = get_token_no_space(input) else {
         return Err("no index");
-    }
-    let index_name = if let Some((n, Token::Identifier(index_name))) = get_token_no_space(input) {
-        input = &input[n..];
-        index_name
-    } else {
+    };
+    input = &input[n..];
+
+    let Some((n, Token::Identifier(index_name))) = get_token_no_space(input) else {
         return Err("no index_name");
     };
-    if let Some((n, Token::On)) = get_token_no_space(input) {
-        input = &input[n..];
-    } else {
+    input = &input[n..];
+
+    let Some((n, Token::On)) = get_token_no_space(input) else {
         return Err("no on");
-    }
-    let table_name = if let Some((n, Token::Identifier(table_name))) = get_token_no_space(input) {
-        input = &input[n..];
-        table_name
-    } else {
+    };
+    input = &input[n..];
+
+    let Some((n, Token::Identifier(table_name))) = get_token_no_space(input) else {
         return Err("no table_name");
     };
-    if let Some((n, Token::LeftParen)) = get_token_no_space(input) {
-        input = &input[n..];
-    } else {
+    input = &input[n..];
+
+    let Some((n, Token::LeftParen)) = get_token_no_space(input) else {
         return Err("no left paren");
-    }
+    };
+    input = &input[n..];
+
     let mut columns = Vec::new();
     loop {
-        let name = if let Some((n, Token::Identifier(column_name))) = get_token_no_space(input) {
-            input = &input[n..];
-            column_name
-        } else {
+        let Some((n, Token::Identifier(name))) = get_token_no_space(input) else {
             return Err("no column name");
         };
+        input = &input[n..];
 
         let (n, token) = get_token_no_space(input).ok_or("no right paren")?;
         input = &input[n..];
@@ -242,11 +235,11 @@ pub fn parse_select(input: &[u8]) -> Result<(usize, Select)> {
     let mut input = input;
     let len_input = input.len();
 
-    if let Some((n, Token::Select)) = get_token_no_space(input) {
-        input = &input[n..];
-    } else {
+    let Some((n, Token::Select)) = get_token_no_space(input) else {
         return Err("no select");
-    }
+    };
+    input = &input[n..];
+
     let (n, result_column) = parse_result_column(input)?;
     input = &input[n..];
     let mut columns = vec![result_column];
@@ -265,12 +258,10 @@ pub fn parse_select(input: &[u8]) -> Result<(usize, Select)> {
             _ => return Err("no from"),
         }
     }
-    let table_name = if let Some((n, Token::Identifier(table_name))) = get_token_no_space(input) {
-        input = &input[n..];
-        table_name
-    } else {
+    let Some((n, Token::Identifier(table_name))) = get_token_no_space(input) else {
         return Err("no table_name");
     };
+    input = &input[n..];
 
     let selection = if let Some((n, Token::Where)) = get_token_no_space(input) {
         input = &input[n..];

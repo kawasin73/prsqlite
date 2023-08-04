@@ -120,13 +120,13 @@ impl Connection {
     pub fn prepare(&mut self, sql: &str) -> anyhow::Result<Statement> {
         let input = sql.as_bytes();
         let (n, select) = parse_select(input).map_err(|e| anyhow::anyhow!("parse select: {}", e))?;
-        if let Some((nn, Token::Semicolon)) = get_token_no_space(&input[n..]) {
-            if nn + n != input.len() {
-                bail!("extra characters after semicolon");
-            }
-        } else {
+        let Some((nn, Token::Semicolon)) = get_token_no_space(&input[n..]) else {
             bail!("no semicolon");
+        };
+        if nn + n != input.len() {
+            bail!("extra characters after semicolon");
         }
+
         if self.schema.is_none() {
             let schema_table = Schema::schema_table();
             let columns = schema_table.all_column_index().collect::<Vec<_>>();

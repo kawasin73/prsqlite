@@ -43,26 +43,23 @@ struct SchemaRecord<'a> {
 
 impl<'a> SchemaRecord<'a> {
     fn parse(columns: Columns<'a>) -> anyhow::Result<Self> {
-        let type_ = if let &Value::Text(type_) = columns.get(0) {
-            type_
-        } else {
+        let &Value::Text(type_) = columns.get(0) else {
             bail!("invalid type: {:?}", columns.get(0));
         };
-        let name = if let &Value::Text(name) = columns.get(1) {
-            name
-        } else {
+
+        let &Value::Text(name) = columns.get(1) else {
             bail!("invalid name: {:?}", columns.get(1));
         };
-        let table_name = if let &Value::Text(table_name) = columns.get(2) {
-            table_name
-        } else {
+
+        let &Value::Text(table_name) = columns.get(2) else {
             bail!("invalid tbl_name: {:?}", columns.get(2));
         };
-        let root_page_id = if let &Value::Integer(root_page_id) = columns.get(3) {
-            root_page_id.try_into().context("parse root_page_id")?
-        } else {
+
+        let &Value::Integer(root_page_id) = columns.get(3) else {
             bail!("invalid root_page_id: {:?}", columns.get(3));
         };
+        let root_page_id = root_page_id.try_into().context("parse root_page_id")?;
+
         let sql = match *columns.get(4) {
             Value::Null => None,
             Value::Text(sql) => Some(sql),
