@@ -117,12 +117,14 @@ impl<'a> TableCellKeyParser<'a> {
         let offset = get_cell_offset(self.page, self.buffer, cell_idx, self.header_size)?;
         let offset_in_cell = if self.is_leaf {
             // TODO: just skip bytes >= 0x80 because payload length is u32.
-            let (_, n) = parse_varint(&self.buffer[offset..]).ok_or("parse payload length varint")?;
+            let (_, n) =
+                parse_varint(&self.buffer[offset..]).ok_or("parse payload length varint")?;
             n
         } else {
             4
         };
-        let (key, _) = parse_varint(&self.buffer[offset + offset_in_cell..]).ok_or("parse key varint")?;
+        let (key, _) =
+            parse_varint(&self.buffer[offset + offset_in_cell..]).ok_or("parse key varint")?;
         Ok(key)
     }
 }
@@ -151,8 +153,11 @@ impl<'a> IndexCellKeyParser<'a> {
     pub fn get_cell_key(&self, cell_idx: u16) -> ParseResult<PayloadInfo> {
         let offset = get_cell_offset(self.page, self.buffer, cell_idx, self.header_size)?;
         let offset = offset + self.offset_in_cell as usize;
-        let (payload_size, n) = parse_varint(&self.buffer[offset..]).ok_or("parse payload length varint")?;
-        let payload_size: i32 = payload_size.try_into().map_err(|_| "payload length too large")?;
+        let (payload_size, n) =
+            parse_varint(&self.buffer[offset..]).ok_or("parse payload length varint")?;
+        let payload_size: i32 = payload_size
+            .try_into()
+            .map_err(|_| "payload length too large")?;
         if payload_size < 0 {
             return Err("payload length is negative");
         }
@@ -163,15 +168,27 @@ impl<'a> IndexCellKeyParser<'a> {
 /// Returns the offset of the cell in the buffer.
 ///
 /// Returned cell offset is in the range of the buffer.
-fn get_cell_offset(page: &MemPage, buffer: &PageBuffer, cell_idx: u16, header_size: u8) -> ParseResult<usize> {
+fn get_cell_offset(
+    page: &MemPage,
+    buffer: &PageBuffer,
+    cell_idx: u16,
+    header_size: u8,
+) -> ParseResult<usize> {
     let cell_pointer_offset = page.header_offset + header_size as usize + (cell_idx << 1) as usize;
     if cell_pointer_offset + 2 > buffer.len() {
         return Err("cell pointer out of range");
     }
-    let cell_offset =
-        u16::from_be_bytes(buffer[cell_pointer_offset..cell_pointer_offset + 2].try_into().unwrap()) as usize;
+    let cell_offset = u16::from_be_bytes(
+        buffer[cell_pointer_offset..cell_pointer_offset + 2]
+            .try_into()
+            .unwrap(),
+    ) as usize;
     // offset 0 is used for 65536.
-    let cell_offset = if cell_offset == 0 { 1 << 16 } else { cell_offset };
+    let cell_offset = if cell_offset == 0 {
+        1 << 16
+    } else {
+        cell_offset
+    };
     if cell_offset > buffer.len() {
         return Err("cell offset out of range");
     }
@@ -180,7 +197,8 @@ fn get_cell_offset(page: &MemPage, buffer: &PageBuffer, cell_idx: u16, header_si
 
 /// Context containing constant values to parse btree page.
 pub struct BtreeContext {
-    /// Maximum local payload size. The first is for index pages, the second is for table pages.
+    /// Maximum local payload size. The first is for index pages, the second is
+    /// for table pages.
     max_local: [u16; 2],
     min_local: u16,
     usable_minus_4: u16,
@@ -209,7 +227,8 @@ impl BtreeContext {
 
     #[inline]
     fn n_local(&self, is_table: bool, payload_size: i32) -> u16 {
-        let surplus = self.min_local as i32 + ((payload_size - self.min_local as i32) % self.usable_minus_4 as i32);
+        let surplus = self.min_local as i32
+            + ((payload_size - self.min_local as i32) % self.usable_minus_4 as i32);
         if surplus <= self.max_local[is_table as usize] as i32 {
             surplus as u16
         } else {
@@ -229,7 +248,10 @@ impl OverflowPage {
         self.page_id.get()
     }
 
-    pub fn parse<'a>(&self, buffer: &'a PageBuffer<'a>) -> ParseResult<(&'a [u8], Option<OverflowPage>)> {
+    pub fn parse<'a>(
+        &self,
+        buffer: &'a PageBuffer<'a>,
+    ) -> ParseResult<(&'a [u8], Option<OverflowPage>)> {
         let next_page_id = PageId::from_be_bytes(buffer[..4].try_into().unwrap());
         if next_page_id == 0 {
             let tail = 4 + self.remaining_size as usize;
@@ -262,9 +284,11 @@ pub struct PayloadInfo {
     pub payload_size: i32,
     /// The range of the local payload in the page buffer.
     ///
-    /// If the size of this range is equal to the payload size, the whole payload is stored in the local buffer.
+    /// If the size of this range is equal to the payload size, the whole
+    /// payload is stored in the local buffer.
     pub local_range: Range<usize>,
-    /// The overflow page if the rest of payload is stored in the overflow pages.
+    /// The overflow page if the rest of payload is stored in the overflow
+    /// pages.
     pub overflow: Option<OverflowPage>,
 }
 
@@ -292,7 +316,8 @@ impl PayloadInfo {
             if tail_payload + 4 > buffer.len() {
                 return Err("next page id out of range");
             }
-            let next_page_id = PageId::from_be_bytes(buffer[tail_payload..tail_payload + 4].try_into().unwrap());
+            let next_page_id =
+                PageId::from_be_bytes(buffer[tail_payload..tail_payload + 4].try_into().unwrap());
             if next_page_id > 0 {
                 Ok(Self {
                     payload_size,
@@ -317,15 +342,19 @@ pub fn parse_btree_leaf_table_cell(
     buffer: &PageBuffer,
     cell_idx: u16,
 ) -> ParseResult<(i64, PayloadInfo)> {
-    let cell_offset = get_cell_offset(page, buffer, cell_idx, BTREE_PAGE_LEAF_HEADER_SIZE as u8).unwrap();
+    let cell_offset =
+        get_cell_offset(page, buffer, cell_idx, BTREE_PAGE_LEAF_HEADER_SIZE as u8).unwrap();
     let (payload_size, consumed1) =
         parse_varint(&buffer[cell_offset..]).map_or(Err("parse payload length varint"), Ok)?;
     // The maximum payload length is 2147483647 (= i32::MAX).
-    let payload_size: i32 = payload_size.try_into().map_err(|_| "payload length too large")?;
+    let payload_size: i32 = payload_size
+        .try_into()
+        .map_err(|_| "payload length too large")?;
     if payload_size < 0 {
         return Err("payload length is negative");
     }
-    let (key, consumed2) = parse_varint(&buffer[cell_offset + consumed1..]).map_or(Err("parse key varint"), Ok)?;
+    let (key, consumed2) =
+        parse_varint(&buffer[cell_offset + consumed1..]).map_or(Err("parse key varint"), Ok)?;
 
     let payload = PayloadInfo::parse(
         ctx,
@@ -338,11 +367,21 @@ pub fn parse_btree_leaf_table_cell(
     Ok((key, payload))
 }
 
-/// Parses the page id which a b-tree (table/index) interiror page cell points to.
-pub fn parse_btree_interior_cell_page_id(page: &MemPage, buffer: &PageBuffer, cell_idx: u16) -> ParseResult<PageId> {
-    let cell_offset = get_cell_offset(page, buffer, cell_idx, BTREE_PAGE_INTERIOR_HEADER_SIZE as u8)?;
-    // Btree interiror cell has 4 bytes page id and at least 1 byte varint (the payload length on index interior page,
-    // the key on table interior page).
+/// Parses the page id which a b-tree (table/index) interiror page cell points
+/// to.
+pub fn parse_btree_interior_cell_page_id(
+    page: &MemPage,
+    buffer: &PageBuffer,
+    cell_idx: u16,
+) -> ParseResult<PageId> {
+    let cell_offset = get_cell_offset(
+        page,
+        buffer,
+        cell_idx,
+        BTREE_PAGE_INTERIOR_HEADER_SIZE as u8,
+    )?;
+    // Btree interiror cell has 4 bytes page id and at least 1 byte varint (the
+    // payload length on index interior page, the key on table interior page).
     if cell_offset + 5 > buffer.len() {
         return Err("btree interior cell buffer is too short");
     }
@@ -381,7 +420,10 @@ mod tests {
     #[test]
     fn headersize() {
         let mut buf = [0_u8; 12];
-        for t in [BTREE_PAGE_TYPE_INTERIOR_INDEX, BTREE_PAGE_TYPE_INTERIOR_TABLE] {
+        for t in [
+            BTREE_PAGE_TYPE_INTERIOR_INDEX,
+            BTREE_PAGE_TYPE_INTERIOR_TABLE,
+        ] {
             buf[0] = t;
             let header = BtreePageHeader(&buf);
 
@@ -420,7 +462,8 @@ mod tests {
         let mut content = [0_u8; 2 * MAX_PAGESIZE];
         let header_size = 12;
         // page 2 has 100 for cell 0 offset.
-        content[MAX_PAGESIZE + header_size..MAX_PAGESIZE + header_size + 2].copy_from_slice(&1000_u16.to_be_bytes());
+        content[MAX_PAGESIZE + header_size..MAX_PAGESIZE + header_size + 2]
+            .copy_from_slice(&1000_u16.to_be_bytes());
         let pager = create_empty_pager(&content, MAX_PAGESIZE);
         let page = pager.get_page(1).unwrap();
         let buffer = page.buffer();
@@ -449,9 +492,9 @@ mod tests {
         assert_eq!(
             payload,
             &[
-                6, 23, 27, 27, 1, 63, 116, 97, 98, 108, 101, 101, 120, 97, 109, 112, 108, 101, 101, 120, 97, 109, 112,
-                108, 101, 2, 67, 82, 69, 65, 84, 69, 32, 84, 65, 66, 76, 69, 32, 101, 120, 97, 109, 112, 108, 101, 40,
-                99, 111, 108, 41
+                6, 23, 27, 27, 1, 63, 116, 97, 98, 108, 101, 101, 120, 97, 109, 112, 108, 101, 101,
+                120, 97, 109, 112, 108, 101, 2, 67, 82, 69, 65, 84, 69, 32, 84, 65, 66, 76, 69, 32,
+                101, 120, 97, 109, 112, 108, 101, 40, 99, 111, 108, 41
             ]
         );
     }
@@ -463,7 +506,10 @@ mod tests {
         for i in 0..10000 {
             buf.push((i % 256) as u8);
         }
-        let query = format!("INSERT INTO example(col) VALUES (X'{}');", buffer_to_hex(&buf));
+        let query = format!(
+            "INSERT INTO example(col) VALUES (X'{}');",
+            buffer_to_hex(&buf)
+        );
         queries.push(&query);
         let file = create_sqlite_database(&queries);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
@@ -488,7 +534,9 @@ mod tests {
         let mut overflow = payload_info.overflow;
         while cur < buf.len() {
             assert!(overflow.is_some());
-            let page = pager.get_page(overflow.as_ref().unwrap().page_id()).unwrap();
+            let page = pager
+                .get_page(overflow.as_ref().unwrap().page_id())
+                .unwrap();
             let buffer = page.buffer();
             (payload, overflow) = overflow.as_ref().unwrap().parse(&buffer).unwrap();
             assert_eq!(payload, &buf[cur..cur + payload.len()]);

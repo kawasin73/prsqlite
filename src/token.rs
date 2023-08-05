@@ -19,6 +19,7 @@ const CHAR_UNDERSCORE: u8 = 0x02;
 const CHAR_DIGIT: u8 = 0x03;
 const CHAR_INVALID: u8 = 0xFF;
 
+#[rustfmt::skip]
 static CHAR_LOOKUP_TABLE: [u8; 256] = [
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, b' ', b' ', 0xFF, b' ', b' ', 0xFF, 0xFF, 0xFF, // 0x00 - 0x0F
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0x10 - 0x1F
@@ -246,10 +247,16 @@ mod tests {
         input.push(' ');
         assert_eq!(
             get_token(input.as_bytes()),
-            Some((input.len() - 1, Token::Identifier(&input.as_bytes()[..input.len() - 1])))
+            Some((
+                input.len() - 1,
+                Token::Identifier(&input.as_bytes()[..input.len() - 1])
+            ))
         );
 
-        assert_eq!(get_token(b"_hello "), Some((6, Token::Identifier(b"_hello"))));
+        assert_eq!(
+            get_token(b"_hello "),
+            Some((6, Token::Identifier(b"_hello")))
+        );
         assert_eq!(get_token(b"_ "), Some((1, Token::Identifier(b"_"))));
     }
 
@@ -285,7 +292,10 @@ mod tests {
             let input = format!("{keyword}a ");
             assert_eq!(
                 get_token(input.as_bytes()),
-                Some((input.len() - 1, Token::Identifier(&input.as_bytes()[..input.len() - 1])))
+                Some((
+                    input.len() - 1,
+                    Token::Identifier(&input.as_bytes()[..input.len() - 1])
+                ))
             );
         }
     }
@@ -303,10 +313,20 @@ mod tests {
             (">", Token::Gt),
             (">=", Token::Ge),
         ] {
-            let input = format!("{s}");
-            assert_eq!(get_token(input.as_bytes()), Some((s.len(), token)), "{}", input);
+            let input = s.to_string();
+            assert_eq!(
+                get_token(input.as_bytes()),
+                Some((s.len(), token)),
+                "{}",
+                input
+            );
             let input = format!("{s}abc");
-            assert_eq!(get_token(input.as_bytes()), Some((s.len(), token)), "{}", input);
+            assert_eq!(
+                get_token(input.as_bytes()),
+                Some((s.len(), token)),
+                "{}",
+                input
+            );
         }
     }
 

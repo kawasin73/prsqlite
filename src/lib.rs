@@ -119,7 +119,8 @@ impl Connection {
 
     pub fn prepare(&mut self, sql: &str) -> anyhow::Result<Statement> {
         let input = sql.as_bytes();
-        let (n, select) = parse_select(input).map_err(|e| anyhow::anyhow!("parse select: {}", e))?;
+        let (n, select) =
+            parse_select(input).map_err(|e| anyhow::anyhow!("parse select: {}", e))?;
         let Some((nn, Token::Semicolon)) = get_token_no_space(&input[n..]) else {
             bail!("no semicolon");
         };
@@ -159,7 +160,10 @@ impl Connection {
             }
         }
 
-        let selection = select.selection.map(|expr| Selection::from(expr, table)).transpose()?;
+        let selection = select
+            .selection
+            .map(|expr| Selection::from(expr, table))
+            .transpose()?;
 
         let index = if let Some(Selection::BinaryOperator {
             operator: BinaryOperator::Eq,
@@ -189,7 +193,13 @@ impl Connection {
 
         let table_page_id = table.root_page_id;
         if index.is_some() {
-            Ok(Statement::with_index(self, table_page_id, columns, selection, index))
+            Ok(Statement::with_index(
+                self,
+                table_page_id,
+                columns,
+                selection,
+                index,
+            ))
         } else {
             Ok(Statement::new(self, table_page_id, columns, selection))
         }
@@ -213,7 +223,11 @@ impl Selection {
                 Value::Integer(i) => Ok(Self::LiteralValue(i)),
                 _ => bail!("unsupported literal value: {:?}", value),
             },
-            Expr::BinaryOperator { operator, left, right } => Ok(Self::BinaryOperator {
+            Expr::BinaryOperator {
+                operator,
+                left,
+                right,
+            } => Ok(Self::BinaryOperator {
                 operator,
                 left: Box::new(Self::from(*left, table)?),
                 right: Box::new(Self::from(*right, table)?),
@@ -237,7 +251,11 @@ impl Selection {
                     _ => bail!("invalid value for selection: {:?}", value),
                 }
             }
-            Self::BinaryOperator { operator, left, right } => {
+            Self::BinaryOperator {
+                operator,
+                left,
+                right,
+            } => {
                 let left = left.execute(row)?;
                 let right = right.execute(row)?;
                 let result = match operator {
@@ -282,8 +300,12 @@ impl<'conn> Statement<'conn> {
                 left,
                 right,
             }) => match (left.as_ref(), right.as_ref()) {
-                (Selection::Column(ColumnNumber::RowId), Selection::LiteralValue(value)) => Some(*value),
-                (Selection::LiteralValue(value), Selection::Column(ColumnNumber::RowId)) => Some(*value),
+                (Selection::Column(ColumnNumber::RowId), Selection::LiteralValue(value)) => {
+                    Some(*value)
+                }
+                (Selection::LiteralValue(value), Selection::Column(ColumnNumber::RowId)) => {
+                    Some(*value)
+                }
                 _ => None,
             },
             _ => None,
@@ -317,12 +339,14 @@ impl<'conn> Statement<'conn> {
 
     pub fn execute(&'conn mut self) -> anyhow::Result<Rows<'conn>> {
         // TODO: check schema version.
-        let mut cursor = BtreeCursor::new(self.table_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
+        let mut cursor =
+            BtreeCursor::new(self.table_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
         let index = if let Some(rowid) = self.rowid {
             cursor.table_move_to(rowid)?;
             None
         } else if let Some((index_page_id, keys)) = &self.index {
-            let mut index_cursor = BtreeCursor::new(*index_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
+            let mut index_cursor =
+                BtreeCursor::new(*index_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
             index_cursor.index_move_to(keys)?;
             Some((index_cursor, &keys[..keys.len() - 1]))
         } else {
@@ -339,9 +363,10 @@ impl<'conn> Statement<'conn> {
     }
 }
 
-/// TODO: Skip should be encapuslated inside [Rows::next]. However we need this due to Rust borrow checker limitation.
-/// This is a workaround for the limitation. This is fixed with `RUSTFLAGS="-Zpolonius"`. polonius is a new borrow
-/// checker but not settled yet.
+/// TODO: Skip should be encapuslated inside [Rows::next]. However we need this
+/// due to Rust borrow checker limitation. This is a workaround for the
+/// limitation. This is fixed with `RUSTFLAGS="-Zpolonius"`. polonius is a new
+/// borrow checker but not settled yet.
 ///
 /// With original `continue` implementation, we get this error:
 ///
@@ -403,7 +428,8 @@ impl<'conn> Rows<'conn> {
             // Only one row is selected.
             self.completed = true;
         }
-        // TODO: Keep this never_loop to make it clear that [NextRow] is a workaround for borrow checker limitation.
+        // TODO: Keep this never_loop to make it clear that [NextRow] is a workaround
+        // for borrow checker limitation.
         #[allow(clippy::never_loop)]
         while let Some((rowid, payload)) = {
             if self.is_first_row {
@@ -480,8 +506,9 @@ impl<'conn> Rows<'conn> {
 
             if let Some(selection) = &self.stmt.selection {
                 if selection.execute(&row)? == 0 {
-                    // TODO: continue is what we want. However Rust borrow checker does not allow it by accident.
-                    // See the comment of [NextRow] for more details.
+                    // TODO: continue is what we want. However Rust borrow checker does not allow it
+                    // by accident. See the comment of [NextRow] for more
+                    // details.
 
                     // continue;
                     return Ok(NextRow::Skip);

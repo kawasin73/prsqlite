@@ -140,7 +140,9 @@ impl Schema {
                         );
                     }
                     let (mut table_name, table) = Table::parse(
-                        schema.sql.ok_or(anyhow::anyhow!("no sql for table schema"))?,
+                        schema
+                            .sql
+                            .ok_or(anyhow::anyhow!("no sql for table schema"))?,
                         schema.root_page_id,
                     )
                     .context("parse create table sql")?;
@@ -161,7 +163,8 @@ impl Schema {
                         .get_mut(schema.table_name.to_lowercase().as_bytes())
                         .context("index table not found")?;
                     if let Some(sql) = schema.sql {
-                        let (mut index_name, table_name, mut index) = Index::parse(sql, schema.root_page_id, table)?;
+                        let (mut index_name, table_name, mut index) =
+                            Index::parse(sql, schema.root_page_id, table)?;
                         if index_name != schema.name.as_bytes() {
                             bail!(
                                 "index name does not match: index_name={:?}, parsed_index_name={:?}",
@@ -234,9 +237,13 @@ pub struct Index {
 }
 
 impl Index {
-    fn parse<'a>(sql: &'a str, root_page_id: PageId, table: &Table) -> anyhow::Result<(Vec<u8>, &'a [u8], Self)> {
-        let (n, create_index) =
-            parse_create_index(sql.as_bytes()).map_err(|e| anyhow::anyhow!("parse create index sql: {:?}", e))?;
+    fn parse<'a>(
+        sql: &'a str,
+        root_page_id: PageId,
+        table: &Table,
+    ) -> anyhow::Result<(Vec<u8>, &'a [u8], Self)> {
+        let (n, create_index) = parse_create_index(sql.as_bytes())
+            .map_err(|e| anyhow::anyhow!("parse create index sql: {:?}", e))?;
         if n != sql.as_bytes().len() {
             bail!(
                 "create table sql in sqlite_schema contains useless contents at the tail: {}",
@@ -288,8 +295,8 @@ pub struct Table {
 
 impl Table {
     fn parse(sql: &str, root_page_id: PageId) -> anyhow::Result<(Vec<u8>, Self)> {
-        let (n, create_table) =
-            parse_create_table(sql.as_bytes()).map_err(|e| anyhow::anyhow!("parse create table sql: {:?}", e))?;
+        let (n, create_table) = parse_create_table(sql.as_bytes())
+            .map_err(|e| anyhow::anyhow!("parse create table sql: {:?}", e))?;
         if n != sql.as_bytes().len() {
             bail!(
                 "create table sql in sqlite_schema contains useless contents at the tail: {}",
@@ -400,7 +407,8 @@ mod tests {
                 "CREATE TABLE example{i}(col1,col2,col3,col4,col5,col6,col7,col8,col9,col10);"
             ));
         }
-        let file = create_sqlite_database(&queries.iter().map(|q| q.as_str()).collect::<Vec<&str>>());
+        let file =
+            create_sqlite_database(&queries.iter().map(|q| q.as_str()).collect::<Vec<&str>>());
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let schema = generate_schema(file.path());
 
@@ -417,7 +425,10 @@ mod tests {
         ]);
         let schema = generate_schema(file.path());
 
-        assert_eq!(schema.get_table(b"sqlite_schema").unwrap().root_page_id, ROOT_PAGE_ID);
+        assert_eq!(
+            schema.get_table(b"sqlite_schema").unwrap().root_page_id,
+            ROOT_PAGE_ID
+        );
     }
 
     #[test]
@@ -431,7 +442,10 @@ mod tests {
 
         assert_eq!(schema.get_table(b"example2").unwrap().root_page_id, 3);
         assert_eq!(schema.get_table(b"exaMple2").unwrap().root_page_id, 3);
-        assert_eq!(schema.get_table(b"sqlite_Schema").unwrap().root_page_id, ROOT_PAGE_ID);
+        assert_eq!(
+            schema.get_table(b"sqlite_Schema").unwrap().root_page_id,
+            ROOT_PAGE_ID
+        );
     }
 
     #[test]
@@ -448,7 +462,8 @@ mod tests {
 
     #[test]
     fn parse_table() {
-        let (table_name, table) = Table::parse("create table example(col, col1 integer primary key)", 1).unwrap();
+        let (table_name, table) =
+            Table::parse("create table example(col, col1 integer primary key)", 1).unwrap();
         assert_eq!(table_name, b"example");
         assert_eq!(
             table,
@@ -569,24 +584,42 @@ mod tests {
         let schema = generate_schema(file.path());
 
         let table = schema.get_table(b"example").unwrap();
-        assert_eq!(table.get_column_index(b"col"), Some(ColumnNumber::Column(0)));
+        assert_eq!(
+            table.get_column_index(b"col"),
+            Some(ColumnNumber::Column(0))
+        );
         assert_eq!(table.get_column_index(b"rowid"), Some(ColumnNumber::RowId));
         assert_eq!(table.get_column_index(b"invalid"), None);
 
         let table = schema.get_table(b"example2").unwrap();
-        assert_eq!(table.get_column_index(b"col1"), Some(ColumnNumber::Column(0)));
-        assert_eq!(table.get_column_index(b"col2"), Some(ColumnNumber::Column(1)));
-        assert_eq!(table.get_column_index(b"rowid"), Some(ColumnNumber::Column(2)));
+        assert_eq!(
+            table.get_column_index(b"col1"),
+            Some(ColumnNumber::Column(0))
+        );
+        assert_eq!(
+            table.get_column_index(b"col2"),
+            Some(ColumnNumber::Column(1))
+        );
+        assert_eq!(
+            table.get_column_index(b"rowid"),
+            Some(ColumnNumber::Column(2))
+        );
         assert_eq!(table.get_column_index(b"invalid"), None);
 
         let table = schema.get_table(b"example3").unwrap();
         assert_eq!(table.get_column_index(b"id"), Some(ColumnNumber::RowId));
-        assert_eq!(table.get_column_index(b"col"), Some(ColumnNumber::Column(1)));
+        assert_eq!(
+            table.get_column_index(b"col"),
+            Some(ColumnNumber::Column(1))
+        );
         assert_eq!(table.get_column_index(b"rowid"), Some(ColumnNumber::RowId));
 
         let table = schema.get_table(b"example4").unwrap();
         assert_eq!(table.get_column_index(b"id"), Some(ColumnNumber::Column(0)));
-        assert_eq!(table.get_column_index(b"col"), Some(ColumnNumber::Column(1)));
+        assert_eq!(
+            table.get_column_index(b"col"),
+            Some(ColumnNumber::Column(1))
+        );
         assert_eq!(table.get_column_index(b"rowid"), Some(ColumnNumber::RowId));
     }
 
@@ -701,7 +734,11 @@ mod tests {
 
     #[test]
     fn parse_index() {
-        let (_, table) = Table::parse("create table example(col1, id integer primary key, col2)", 1).unwrap();
+        let (_, table) = Table::parse(
+            "create table example(col1, id integer primary key, col2)",
+            1,
+        )
+        .unwrap();
         let (index_name, table_name, index) =
             Index::parse("create index index1 on example(id, col1, col2)", 3, &table).unwrap();
         assert_eq!(index_name, b"index1");
@@ -710,14 +747,19 @@ mod tests {
             index,
             Index {
                 root_page_id: 3,
-                columns: vec![ColumnNumber::RowId, ColumnNumber::Column(0), ColumnNumber::Column(2)],
+                columns: vec![
+                    ColumnNumber::RowId,
+                    ColumnNumber::Column(0),
+                    ColumnNumber::Column(2)
+                ],
                 next: None,
             }
         );
         // unknown column
         assert!(Index::parse("create index index1 on example(col1, invalid)", 3, &table).is_err());
         // unknown table
-        let (_, table_name, _) = Index::parse("create index index1 on invalid(col1)", 3, &table).unwrap();
+        let (_, table_name, _) =
+            Index::parse("create index index1 on invalid(col1)", 3, &table).unwrap();
         assert_eq!(table_name, b"invalid");
     }
 }

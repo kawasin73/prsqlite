@@ -176,7 +176,9 @@ fn test_select_column_name_and_all() {
     ]);
 
     let mut conn = Connection::open(file.path()).unwrap();
-    let mut stmt = conn.prepare("SELECT col3, col3, *, col1 FROM example;").unwrap();
+    let mut stmt = conn
+        .prepare("SELECT col3, col3, *, col1 FROM example;")
+        .unwrap();
     let mut rows = stmt.execute().unwrap();
 
     let row = rows.next().unwrap().unwrap();
@@ -262,7 +264,9 @@ fn test_select_filter() {
     ]);
 
     let mut conn = Connection::open(file.path()).unwrap();
-    let mut stmt = conn.prepare("SELECT * FROM example WHERE col2 == 5;").unwrap();
+    let mut stmt = conn
+        .prepare("SELECT * FROM example WHERE col2 == 5;")
+        .unwrap();
     let mut rows = stmt.execute().unwrap();
 
     assert!(matches!(rows.next().unwrap(), NextRow::Skip));
@@ -279,7 +283,9 @@ fn test_select_filter() {
 
     assert!(rows.next().unwrap().is_none());
 
-    let mut stmt = conn.prepare("SELECT col2 FROM example WHERE col2 >= 5;").unwrap();
+    let mut stmt = conn
+        .prepare("SELECT col2 FROM example WHERE col2 >= 5;")
+        .unwrap();
     let mut rows = stmt.execute().unwrap();
 
     assert!(matches!(rows.next().unwrap(), NextRow::Skip));
@@ -298,7 +304,9 @@ fn test_select_filter() {
 
     assert!(rows.next().unwrap().is_none());
 
-    let mut stmt = conn.prepare("SELECT col2 FROM example WHERE col2 != 5;").unwrap();
+    let mut stmt = conn
+        .prepare("SELECT col2 FROM example WHERE col2 != 5;")
+        .unwrap();
     let mut rows = stmt.execute().unwrap();
 
     let row = rows.next().unwrap().unwrap();
@@ -329,7 +337,9 @@ fn test_select_filter_with_rowid() {
     ]);
 
     let mut conn = Connection::open(file.path()).unwrap();
-    let mut stmt = conn.prepare("SELECT col, RoWid FROM example WHERE rowid = 2;").unwrap();
+    let mut stmt = conn
+        .prepare("SELECT col, RoWid FROM example WHERE rowid = 2;")
+        .unwrap();
     let mut rows = stmt.execute().unwrap();
 
     let row = rows.next().unwrap().unwrap();
@@ -353,7 +363,9 @@ fn test_select_filter_with_primary_key() {
     ]);
     let mut conn = Connection::open(file.path()).unwrap();
 
-    let mut stmt = conn.prepare("SELECT col, RoWid FROM example WHERE id = 3;").unwrap();
+    let mut stmt = conn
+        .prepare("SELECT col, RoWid FROM example WHERE id = 3;")
+        .unwrap();
     let mut rows = stmt.execute().unwrap();
     let row = rows.next().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -363,7 +375,9 @@ fn test_select_filter_with_primary_key() {
     drop(row);
     assert!(rows.next().unwrap().is_none());
 
-    let mut stmt = conn.prepare("SELECT col, RoWid FROM example WHERE id = 4;").unwrap();
+    let mut stmt = conn
+        .prepare("SELECT col, RoWid FROM example WHERE id = 4;")
+        .unwrap();
     let mut rows = stmt.execute().unwrap();
     assert!(matches!(rows.next().unwrap(), NextRow::Skip));
     assert!(rows.next().unwrap().is_none());
@@ -383,7 +397,9 @@ fn test_select_with_index() {
     ]);
 
     let mut conn = Connection::open(file.path()).unwrap();
-    let mut stmt = conn.prepare("SELECT * FROM example WHERE col2 == 5;").unwrap();
+    let mut stmt = conn
+        .prepare("SELECT * FROM example WHERE col2 == 5;")
+        .unwrap();
     let mut rows = stmt.execute().unwrap();
 
     let row = rows.next().unwrap().unwrap();
@@ -404,7 +420,9 @@ fn test_select_with_index() {
 
     assert!(rows.next().unwrap().is_none());
 
-    let mut stmt = conn.prepare("SELECT * FROM example WHERE col3 == 6;").unwrap();
+    let mut stmt = conn
+        .prepare("SELECT * FROM example WHERE col3 == 6;")
+        .unwrap();
     let mut rows = stmt.execute().unwrap();
 
     let row = rows.next().unwrap().unwrap();
@@ -417,7 +435,9 @@ fn test_select_with_index() {
 
     assert!(rows.next().unwrap().is_none());
 
-    let mut stmt = conn.prepare("SELECT * FROM example WHERE col3 == 3;").unwrap();
+    let mut stmt = conn
+        .prepare("SELECT * FROM example WHERE col3 == 3;")
+        .unwrap();
     let mut rows = stmt.execute().unwrap();
 
     let row = rows.next().unwrap().unwrap();

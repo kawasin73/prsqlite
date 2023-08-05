@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Write;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
@@ -58,7 +59,10 @@ pub fn load_btree_context(file: &File) -> anyhow::Result<BtreeContext> {
 }
 
 pub fn buffer_to_hex(buf: &[u8]) -> String {
-    buf.iter().map(|v| format!("{v:02X}")).collect::<String>()
+    buf.iter().fold(String::new(), |mut output, v| {
+        let _ = write!(output, "{v:02X}");
+        output
+    })
 }
 
 pub fn find_table_page_id(table: &str, filepath: &Path) -> PageId {

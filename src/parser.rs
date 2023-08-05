@@ -93,7 +93,8 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
                 (n, token) = get_token_no_space(input).ok_or("no right paren")?;
                 input = &input[n..];
 
-                // TODO: compare the performance of UpperToLowerBytes::equal_to_lower_bytes or match + [u8;7]
+                // TODO: compare the performance of UpperToLowerBytes::equal_to_lower_bytes or
+                // match + [u8;7]
                 let data_type = CaseInsensitiveBytes::from(data_type);
                 let data_type = if data_type.equal_to_lower_bytes(b"integer") {
                     DataType::Integer
@@ -139,7 +140,13 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
         }
     }
 
-    Ok((len_input - input.len(), CreateTable { table_name, columns }))
+    Ok((
+        len_input - input.len(),
+        CreateTable {
+            table_name,
+            columns,
+        },
+    ))
 }
 
 /// CREATE INDEX statement.
@@ -462,7 +469,10 @@ mod tests {
         assert_eq!(create_index.table_name, b"bAR");
         assert_eq!(
             create_index.columns,
-            vec![IndexedColumn { name: b"Col1" }, IndexedColumn { name: b"cOL2" },]
+            vec![
+                IndexedColumn { name: b"Col1" },
+                IndexedColumn { name: b"cOL2" },
+            ]
         );
     }
 

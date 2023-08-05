@@ -87,7 +87,8 @@ impl<'a, 'pager> BtreePayload<'a, 'pager> {
         let mut cur = payload.len() as i32;
         let mut overflow = self.payload_info.overflow;
         while !buf.is_empty() && cur < self.payload_info.payload_size {
-            let overflow_page = overflow.ok_or_else(|| anyhow::anyhow!("overflow page is not found"))?;
+            let overflow_page =
+                overflow.ok_or_else(|| anyhow::anyhow!("overflow page is not found"))?;
             let page = self.pager.get_page(overflow_page.page_id())?;
             let buffer = page.buffer();
             let (payload, next_overflow) = overflow_page
@@ -149,7 +150,11 @@ pub struct BtreeCursor<'ctx, 'pager> {
 }
 
 impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
-    pub fn new(root_page_id: PageId, pager: &'pager Pager, btree_ctx: &'ctx BtreeContext) -> anyhow::Result<Self> {
+    pub fn new(
+        root_page_id: PageId,
+        pager: &'pager Pager,
+        btree_ctx: &'ctx BtreeContext,
+    ) -> anyhow::Result<Self> {
         let mem = pager.get_page(root_page_id)?;
         let page = CursorPage::new(mem);
         Ok(Self {
@@ -204,8 +209,12 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
                 let page_header = BtreePageHeader::from_page(&self.current_page.mem, &buffer);
                 page_header.right_page_id()
             } else {
-                parse_btree_interior_cell_page_id(&self.current_page.mem, &buffer, self.current_page.idx_cell)
-                    .map_err(|e| anyhow::anyhow!("get btree interior cell page id: {:?}", e))?
+                parse_btree_interior_cell_page_id(
+                    &self.current_page.mem,
+                    &buffer,
+                    self.current_page.idx_cell,
+                )
+                .map_err(|e| anyhow::anyhow!("get btree interior cell page id: {:?}", e))?
             };
             drop(buffer);
             self.move_to_child(next_page_id)?;
@@ -225,7 +234,8 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
             let mut i_min = 0;
             let mut i_max = self.current_page.n_cells as usize;
             let buffer = self.current_page.mem.buffer();
-            let cell_key_parser = IndexCellKeyParser::new(self.btree_ctx, &self.current_page.mem, &buffer);
+            let cell_key_parser =
+                IndexCellKeyParser::new(self.btree_ctx, &self.current_page.mem, &buffer);
 
             while i_min < i_max {
                 let i_mid = (i_min + i_max) / 2;
@@ -254,8 +264,8 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
             self.current_page.idx_cell = i_min as u16;
             if self.current_page.is_leaf {
                 drop(buffer);
-                // If the key is between the last key of the index leaf page and the parent key, we
-                // need to adjust the cursor to parent cell.
+                // If the key is between the last key of the index leaf page and the parent key,
+                // we need to adjust the cursor to parent cell.
                 if self.current_page.idx_cell == self.current_page.n_cells {
                     loop {
                         if self.back_to_parent()? {
@@ -277,8 +287,12 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
                 let page_header = BtreePageHeader::from_page(&self.current_page.mem, &buffer);
                 page_header.right_page_id()
             } else {
-                parse_btree_interior_cell_page_id(&self.current_page.mem, &buffer, self.current_page.idx_cell)
-                    .map_err(|e| anyhow::anyhow!("get btree interior cell page id: {:?}", e))?
+                parse_btree_interior_cell_page_id(
+                    &self.current_page.mem,
+                    &buffer,
+                    self.current_page.idx_cell,
+                )
+                .map_err(|e| anyhow::anyhow!("get btree interior cell page id: {:?}", e))?
             };
             drop(buffer);
             self.move_to_child(next_page_id)?;
@@ -299,7 +313,8 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
         if !self.initialized {
             bail!("cursor is not initialized");
         } else if self.parent_pages.is_empty()
-            && (self.current_page.idx_cell == self.current_page.n_cells + 1 || self.current_page.n_cells == 0)
+            && (self.current_page.idx_cell == self.current_page.n_cells + 1
+                || self.current_page.n_cells == 0)
         {
             // The cursor is completed.
             return Ok(());
@@ -326,10 +341,14 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
                 }
             }
         } else if self.current_page.page_type.is_index() {
-            if !self.current_page.is_leaf && self.current_page.idx_cell <= self.current_page.n_cells {
+            if !self.current_page.is_leaf && self.current_page.idx_cell <= self.current_page.n_cells
+            {
                 assert!(self.move_to_left_most()?);
             } else {
-                assert!(self.current_page.is_leaf && self.current_page.idx_cell == self.current_page.n_cells);
+                assert!(
+                    self.current_page.is_leaf
+                        && self.current_page.idx_cell == self.current_page.n_cells
+                );
                 loop {
                     if self.back_to_parent()? {
                         if self.current_page.idx_cell == self.current_page.n_cells {
@@ -348,7 +367,9 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
         Ok(())
     }
 
-    pub fn get_table_payload<'a>(&'a self) -> anyhow::Result<Option<(i64, BtreePayload<'a, 'pager>)>> {
+    pub fn get_table_payload<'a>(
+        &'a self,
+    ) -> anyhow::Result<Option<(i64, BtreePayload<'a, 'pager>)>> {
         if !self.initialized {
             bail!("cursor is not initialized");
         }
@@ -388,7 +409,8 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
             return Ok(None);
         }
         let buffer = self.current_page.mem.buffer();
-        let cell_key_parser = IndexCellKeyParser::new(self.btree_ctx, &self.current_page.mem, &buffer);
+        let cell_key_parser =
+            IndexCellKeyParser::new(self.btree_ctx, &self.current_page.mem, &buffer);
         let payload_info = cell_key_parser
             .get_cell_key(self.current_page.idx_cell)
             .map_err(|e| anyhow::anyhow!("parse btree leaf index cell: {:?}", e))?;
@@ -407,10 +429,12 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
         assert!(!self.current_page.is_leaf);
         let buffer = self.current_page.mem.buffer();
         let page_id = match self.current_page.idx_cell.cmp(&self.current_page.n_cells) {
-            Ordering::Less => {
-                parse_btree_interior_cell_page_id(&self.current_page.mem, &buffer, self.current_page.idx_cell)
-                    .map_err(|e| anyhow::anyhow!("get btree interior cell page id: {:?}", e))?
-            }
+            Ordering::Less => parse_btree_interior_cell_page_id(
+                &self.current_page.mem,
+                &buffer,
+                self.current_page.idx_cell,
+            )
+            .map_err(|e| anyhow::anyhow!("get btree interior cell page id: {:?}", e))?,
             Ordering::Equal => {
                 let page_header = BtreePageHeader::from_page(&self.current_page.mem, &buffer);
                 page_header.right_page_id()
@@ -606,7 +630,10 @@ mod tests {
 
     #[test]
     fn test_btree_cursor_empty_index() {
-        let file = create_sqlite_database(&["CREATE TABLE example(col);", "CREATE INDEX index1 ON example(col);"]);
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col);",
+            "CREATE INDEX index1 ON example(col);",
+        ]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let bctx = load_btree_context(file.as_file()).unwrap();
         let page_id = find_index_page_id("index1", file.path());
@@ -622,14 +649,14 @@ mod tests {
 
     #[test]
     fn test_btree_cursor_multiple_level_pages() {
-        // index record has 1 (header length) + 2 (bytes) + 1 (integer) bytes header + at most 2
-        // (integer) rowid.
+        // index record has 1 (header length) + 2 (bytes) + 1 (integer) bytes header +
+        // at most 2 (integer) rowid.
         const BUFFER_SIZE: usize = 994;
         let buf = vec![0; BUFFER_SIZE];
         let hex = buffer_to_hex(&buf);
         let mut inserts = Vec::new();
-        // 4 entries with 1000 byte blob occupies 1 page. These 4000 entries introduce 2 level
-        // interior pages and 1 leaf page level.
+        // 4 entries with 1000 byte blob occupies 1 page. These 4000 entries introduce 2
+        // level interior pages and 1 leaf page level.
         for i in 0..4000 {
             inserts.push(format!(
                 "INSERT INTO example(col,buf) VALUES ({},X'{}');",
@@ -638,7 +665,10 @@ mod tests {
             ));
         }
         for i in 4000..5000 {
-            inserts.push(format!("INSERT INTO example(col,buf) VALUES ({},X'FF');", i));
+            inserts.push(format!(
+                "INSERT INTO example(col,buf) VALUES ({},X'FF');",
+                i
+            ));
         }
         let mut queries = vec![
             "CREATE TABLE example(col,buf);",
@@ -760,12 +790,18 @@ mod tests {
 
     #[test]
     fn test_overflow_payload() {
-        let mut queries = vec!["CREATE TABLE example(col);", "CREATE INDEX index1 ON example(col);"];
+        let mut queries = vec![
+            "CREATE TABLE example(col);",
+            "CREATE INDEX index1 ON example(col);",
+        ];
         let mut buf = Vec::with_capacity(10000);
         for _ in 0..10000 {
             buf.push(rand::random::<u8>());
         }
-        let query = format!("INSERT INTO example(col) VALUES (X'{}');", buffer_to_hex(&buf));
+        let query = format!(
+            "INSERT INTO example(col) VALUES (X'{}');",
+            buffer_to_hex(&buf)
+        );
         queries.push(&query);
         let file = create_sqlite_database(&queries);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
@@ -908,7 +944,10 @@ mod tests {
             ));
         }
         for i in 1000..2000 {
-            inserts.push(format!("INSERT INTO example(rowid) VALUES ({});", 2 * i + 1));
+            inserts.push(format!(
+                "INSERT INTO example(rowid) VALUES ({});",
+                2 * i + 1
+            ));
         }
         let mut queries = vec!["CREATE TABLE example(col);"];
         queries.extend(inserts.iter().map(|s| s.as_str()));
@@ -980,8 +1019,8 @@ mod tests {
         assert!(payload.is_some());
         let mut record = Record::parse(payload.as_ref().unwrap()).unwrap();
         assert_eq!(record.get(0).unwrap(), Value::Integer(10));
-        // If there are multiple entries with the same key, one of the entries is returned (not
-        // necessarily the first or last one).
+        // If there are multiple entries with the same key, one of the entries is
+        // returned (not necessarily the first or last one).
         assert_eq!(record.get(1).unwrap(), Value::Integer(11));
         drop(payload);
 
@@ -1009,7 +1048,10 @@ mod tests {
 
     #[test]
     fn test_index_move_to_empty_rows() {
-        let file = create_sqlite_database(&["CREATE TABLE example(col);", "CREATE INDEX index1 ON example(col);"]);
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col);",
+            "CREATE INDEX index1 ON example(col);",
+        ]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let bctx = load_btree_context(file.as_file()).unwrap();
         let page_id = find_index_page_id("index1", file.path());
@@ -1025,8 +1067,8 @@ mod tests {
 
     #[test]
     fn test_index_move_to_multiple_page() {
-        // index record has 1 (header length) + 2 (bytes) + 1 (integer) bytes header + at most 2
-        // (integer) rowid.
+        // index record has 1 (header length) + 2 (bytes) + 1 (integer) bytes header +
+        // at most 2 (integer) rowid.
         const BUFFER_SIZE: usize = 994;
         let buf = vec![0; BUFFER_SIZE];
         let hex = buffer_to_hex(&buf);
