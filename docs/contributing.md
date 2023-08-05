@@ -1,6 +1,11 @@
 # How to Contribute
 
-We would love to accept your patches and contributions to this project.
+This project is now WIP and not accepting any PR until this hits the first
+milestone. Sorry. If you want to develop sqlite with Rust, feel free to fork
+this repository!
+
+After this hits the first milestone, we would love to accept your patches and
+contributions to this project.
 
 ## Before you begin
 
