@@ -51,7 +51,7 @@ fn main() {
                         if i > 0 {
                             print!("|");
                         }
-                        print!("{}", columns.get(i));
+                        columns.get(i).display(&mut stdout).expect("display column");
                     }
                     println!();
                 }

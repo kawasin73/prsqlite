@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
-use std::fmt::Display;
+use std::io::Write;
 
 use anyhow::bail;
 use anyhow::Context;
@@ -31,14 +31,14 @@ pub enum Value<'a> {
     Text(&'a str),
 }
 
-impl<'a> Display for Value<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<'a> Value<'a> {
+    pub fn display<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
         match self {
             Value::Null => Ok(()),
-            Value::Integer(i) => write!(f, "{i}"),
-            Value::Float(d) => write!(f, "{d}"),
-            Value::Blob(b) => write!(f, "{b:?}"),
-            Value::Text(t) => write!(f, "{t}"),
+            Value::Integer(i) => write!(w, "{i}"),
+            Value::Float(d) => write!(w, "{d}"),
+            Value::Blob(b) => w.write_all(b),
+            Value::Text(t) => write!(w, "{t}"),
         }
     }
 }
