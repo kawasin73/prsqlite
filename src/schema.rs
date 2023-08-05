@@ -30,7 +30,6 @@ use crate::record::Value;
 use crate::utils::upper_to_lower;
 use crate::utils::CaseInsensitiveBytes;
 use crate::Columns;
-use crate::NextRow;
 use crate::Statement;
 
 struct SchemaRecord<'a> {
@@ -122,12 +121,7 @@ impl Schema {
         let mut rows = stmt.execute()?;
         let mut tables = HashMap::new();
         let mut indexes = HashMap::new();
-        loop {
-            let row = match rows.next()? {
-                NextRow::Some(row) => row,
-                NextRow::Skip => continue,
-                NextRow::None => break,
-            };
+        while let Some(row) = rows.next_row()? {
             let columns = row.parse()?;
             let schema = SchemaRecord::parse(columns)?;
             match schema.type_ {

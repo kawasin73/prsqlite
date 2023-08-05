@@ -37,10 +37,9 @@ fn main() {
                 };
                 let mut rows = stmt.execute().expect("execute statement");
                 loop {
-                    let row = match rows.next() {
-                        Ok(prsqlite::NextRow::Some(row)) => row,
-                        Ok(prsqlite::NextRow::Skip) => continue,
-                        Ok(prsqlite::NextRow::None) => break,
+                    let row = match rows.next_row() {
+                        Ok(Some(row)) => row,
+                        Ok(None) => break,
                         Err(e) => {
                             eprintln!("{e}");
                             break;

@@ -42,16 +42,10 @@ let mut conn = Connection::open(Path::new("path/to/sqlite.db")).unwrap();
 let mut stmt = conn.prepare("SELECT * FROM example WHERE col = 1;").unwrap();
 let mut rows = stmt.execute().unwrap();
 
-let row = rows.next().unwrap().unwrap();
+let row = rows.next_row().unwrap().unwrap();
 let columns = row.parse().unwrap();
 assert_eq!(columns.get(0), &Value::Integer(1));
 drop(row);
-
-// `Rows::next()` may return `NextRow::Skip` due to the limitation of Rust
-// borrow checker (See the doc comment of `NextRow`). Just call `Rows::next()`
-// again in that case. Hopefully this will be resolved when prsqlite use virtual
-// database engine to execute queries.
-assert!(matches!(rows.next().unwrap(), NextRow::Skip));
 
 assert!(rows.next().unwrap().is_none());
 ```

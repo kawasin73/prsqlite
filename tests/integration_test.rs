@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use prsqlite::Connection;
-use prsqlite::NextRow;
 use prsqlite::Value;
 use tempfile::NamedTempFile;
 
@@ -47,7 +46,7 @@ fn test_select_all_from_table() {
     let mut stmt = conn.prepare("SELECT * FROM example3;").unwrap();
     let mut rows = stmt.execute().unwrap();
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 3);
     assert_eq!(columns.get(0), &Value::Null);
@@ -56,7 +55,7 @@ fn test_select_all_from_table() {
     assert_eq!(columns.get(3), &Value::Null);
     drop(row);
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 3);
     assert_eq!(columns.get(0), &Value::Integer(10000));
@@ -65,7 +64,7 @@ fn test_select_all_from_table() {
     assert_eq!(columns.get(3), &Value::Null);
     drop(row);
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 3);
     assert_eq!(columns.get(0), &Value::Blob(&[0xFF; 10000]));
@@ -74,7 +73,7 @@ fn test_select_all_from_table() {
     assert_eq!(columns.get(3), &Value::Null);
     drop(row);
 
-    assert!(rows.next().unwrap().is_none());
+    assert!(rows.next_row().unwrap().is_none());
 }
 
 #[test]
@@ -90,28 +89,28 @@ fn test_select_partial() {
     let mut stmt = conn.prepare("SELECT col3, col1 FROM example;").unwrap();
     let mut rows = stmt.execute().unwrap();
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(3));
     assert_eq!(columns.get(1), &Value::Integer(1));
     drop(row);
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(6));
     assert_eq!(columns.get(1), &Value::Integer(4));
     drop(row);
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(9));
     assert_eq!(columns.get(1), &Value::Integer(7));
     drop(row);
 
-    assert!(rows.next().unwrap().is_none());
+    assert!(rows.next_row().unwrap().is_none());
 }
 
 #[test]
@@ -129,41 +128,41 @@ fn test_select_rowid() {
     let mut stmt = conn.prepare("SELECT col, RoWid FROM example;").unwrap();
     let mut rows = stmt.execute().unwrap();
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(10));
     assert_eq!(columns.get(1), &Value::Integer(1));
     drop(row);
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(20));
     assert_eq!(columns.get(1), &Value::Integer(2));
     drop(row);
 
-    assert!(rows.next().unwrap().is_none());
+    assert!(rows.next_row().unwrap().is_none());
 
     let mut conn = Connection::open(file.path()).unwrap();
     let mut stmt = conn.prepare("SELECT col, Rowid FROM example2;").unwrap();
     let mut rows = stmt.execute().unwrap();
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(10));
     assert_eq!(columns.get(1), &Value::Null);
     drop(row);
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(20));
     assert_eq!(columns.get(1), &Value::Integer(100));
     drop(row);
 
-    assert!(rows.next().unwrap().is_none());
+    assert!(rows.next_row().unwrap().is_none());
 }
 
 #[test]
@@ -181,7 +180,7 @@ fn test_select_column_name_and_all() {
         .unwrap();
     let mut rows = stmt.execute().unwrap();
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 6);
     assert_eq!(columns.get(0), &Value::Integer(3));
@@ -192,7 +191,7 @@ fn test_select_column_name_and_all() {
     assert_eq!(columns.get(5), &Value::Integer(1));
     drop(row);
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 6);
     assert_eq!(columns.get(0), &Value::Integer(6));
@@ -203,7 +202,7 @@ fn test_select_column_name_and_all() {
     assert_eq!(columns.get(5), &Value::Integer(4));
     drop(row);
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 6);
     assert_eq!(columns.get(0), &Value::Integer(9));
@@ -214,7 +213,7 @@ fn test_select_column_name_and_all() {
     assert_eq!(columns.get(5), &Value::Integer(7));
     drop(row);
 
-    assert!(rows.next().unwrap().is_none());
+    assert!(rows.next_row().unwrap().is_none());
 }
 
 #[test]
@@ -230,28 +229,28 @@ fn test_select_primary_key() {
     let mut stmt = conn.prepare("SELECT * FROM example;").unwrap();
     let mut rows = stmt.execute().unwrap();
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(1));
     assert_eq!(columns.get(1), &Value::Text("10"));
     drop(row);
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(3));
     assert_eq!(columns.get(1), &Value::Text("30"));
     drop(row);
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(5));
     assert_eq!(columns.get(1), &Value::Text("20"));
     drop(row);
 
-    assert!(rows.next().unwrap().is_none());
+    assert!(rows.next_row().unwrap().is_none());
 }
 
 #[test]
@@ -269,9 +268,7 @@ fn test_select_filter() {
         .unwrap();
     let mut rows = stmt.execute().unwrap();
 
-    assert!(matches!(rows.next().unwrap(), NextRow::Skip));
-
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 3);
     assert_eq!(columns.get(0), &Value::Integer(4));
@@ -279,51 +276,45 @@ fn test_select_filter() {
     assert_eq!(columns.get(2), &Value::Integer(6));
     drop(row);
 
-    assert!(matches!(rows.next().unwrap(), NextRow::Skip));
-
-    assert!(rows.next().unwrap().is_none());
+    assert!(rows.next_row().unwrap().is_none());
 
     let mut stmt = conn
         .prepare("SELECT col2 FROM example WHERE col2 >= 5;")
         .unwrap();
     let mut rows = stmt.execute().unwrap();
 
-    assert!(matches!(rows.next().unwrap(), NextRow::Skip));
-
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 1);
     assert_eq!(columns.get(0), &Value::Integer(5));
     drop(row);
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 1);
     assert_eq!(columns.get(0), &Value::Integer(8));
     drop(row);
 
-    assert!(rows.next().unwrap().is_none());
+    assert!(rows.next_row().unwrap().is_none());
 
     let mut stmt = conn
         .prepare("SELECT col2 FROM example WHERE col2 != 5;")
         .unwrap();
     let mut rows = stmt.execute().unwrap();
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 1);
     assert_eq!(columns.get(0), &Value::Integer(2));
     drop(row);
 
-    assert!(matches!(rows.next().unwrap(), NextRow::Skip));
-
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 1);
     assert_eq!(columns.get(0), &Value::Integer(8));
     drop(row);
 
-    assert!(rows.next().unwrap().is_none());
+    assert!(rows.next_row().unwrap().is_none());
 }
 
 #[test]
@@ -342,14 +333,14 @@ fn test_select_filter_with_rowid() {
         .unwrap();
     let mut rows = stmt.execute().unwrap();
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(20));
     assert_eq!(columns.get(1), &Value::Integer(2));
     drop(row);
 
-    assert!(rows.next().unwrap().is_none());
+    assert!(rows.next_row().unwrap().is_none());
 }
 
 #[test]
@@ -367,20 +358,19 @@ fn test_select_filter_with_primary_key() {
         .prepare("SELECT col, RoWid FROM example WHERE id = 3;")
         .unwrap();
     let mut rows = stmt.execute().unwrap();
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Text("20"));
     assert_eq!(columns.get(1), &Value::Integer(3));
     drop(row);
-    assert!(rows.next().unwrap().is_none());
+    assert!(rows.next_row().unwrap().is_none());
 
     let mut stmt = conn
         .prepare("SELECT col, RoWid FROM example WHERE id = 4;")
         .unwrap();
     let mut rows = stmt.execute().unwrap();
-    assert!(matches!(rows.next().unwrap(), NextRow::Skip));
-    assert!(rows.next().unwrap().is_none());
+    assert!(rows.next_row().unwrap().is_none());
 }
 
 #[test]
@@ -402,7 +392,7 @@ fn test_select_with_index() {
         .unwrap();
     let mut rows = stmt.execute().unwrap();
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 3);
     assert_eq!(columns.get(0), &Value::Integer(10));
@@ -410,7 +400,7 @@ fn test_select_with_index() {
     assert_eq!(columns.get(2), &Value::Integer(2));
     drop(row);
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 3);
     assert_eq!(columns.get(0), &Value::Integer(4));
@@ -418,14 +408,14 @@ fn test_select_with_index() {
     assert_eq!(columns.get(2), &Value::Integer(6));
     drop(row);
 
-    assert!(rows.next().unwrap().is_none());
+    assert!(rows.next_row().unwrap().is_none());
 
     let mut stmt = conn
         .prepare("SELECT * FROM example WHERE col3 == 6;")
         .unwrap();
     let mut rows = stmt.execute().unwrap();
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 3);
     assert_eq!(columns.get(0), &Value::Integer(4));
@@ -433,14 +423,14 @@ fn test_select_with_index() {
     assert_eq!(columns.get(2), &Value::Integer(6));
     drop(row);
 
-    assert!(rows.next().unwrap().is_none());
+    assert!(rows.next_row().unwrap().is_none());
 
     let mut stmt = conn
         .prepare("SELECT * FROM example WHERE col3 == 3;")
         .unwrap();
     let mut rows = stmt.execute().unwrap();
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 3);
     assert_eq!(columns.get(0), &Value::Integer(1));
@@ -448,7 +438,7 @@ fn test_select_with_index() {
     assert_eq!(columns.get(2), &Value::Integer(3));
     drop(row);
 
-    let row = rows.next().unwrap().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 3);
     assert_eq!(columns.get(0), &Value::Integer(3));
@@ -456,5 +446,5 @@ fn test_select_with_index() {
     assert_eq!(columns.get(2), &Value::Integer(3));
     drop(row);
 
-    assert!(rows.next().unwrap().is_none());
+    assert!(rows.next_row().unwrap().is_none());
 }
