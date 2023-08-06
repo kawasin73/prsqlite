@@ -137,9 +137,10 @@ impl Connection {
             )?);
         }
         let schema = self.schema.as_ref().unwrap();
-        let table = schema.get_table(select.table_name).ok_or(anyhow::anyhow!(
+        let table_name = select.table_name.dequote();
+        let table = schema.get_table(&table_name).ok_or(anyhow::anyhow!(
             "table not found: {:?}",
-            std::str::from_utf8(select.table_name).unwrap_or_default()
+            std::str::from_utf8(&table_name).unwrap_or_default()
         ))?;
 
         let mut columns = Vec::new();
@@ -151,10 +152,12 @@ impl Connection {
                     }
                 }
                 ResultColumn::ColumnName(column_name) => {
-                    let column_idx = table.get_column_index(column_name).ok_or(anyhow::anyhow!(
-                        "column not found: {}",
-                        std::str::from_utf8(column_name).unwrap_or_default()
-                    ))?;
+                    let column_name = column_name.dequote();
+                    let column_idx =
+                        table.get_column_index(&column_name).ok_or(anyhow::anyhow!(
+                            "column not found: {}",
+                            std::str::from_utf8(&column_name).unwrap_or_default()
+                        ))?;
                     columns.push(column_idx);
                 }
             }
@@ -232,13 +235,16 @@ impl Selection {
                 left: Box::new(Self::from(*left, table)?),
                 right: Box::new(Self::from(*right, table)?),
             }),
-            Expr::Column(column_name) => table
-                .get_column_index(column_name)
-                .map(Self::Column)
-                .ok_or(anyhow::anyhow!(
-                    "column not found: {}",
-                    std::str::from_utf8(column_name).unwrap_or_default()
-                )),
+            Expr::Column(column_name) => {
+                let column_name = column_name.dequote();
+                table
+                    .get_column_index(&column_name)
+                    .map(Self::Column)
+                    .ok_or(anyhow::anyhow!(
+                        "column not found: {}",
+                        std::str::from_utf8(&column_name).unwrap_or_default()
+                    ))
+            }
         }
     }
 

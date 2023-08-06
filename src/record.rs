@@ -28,6 +28,7 @@ pub enum Value<'a> {
     Integer(i64),
     Real(f64),
     Blob(&'a [u8]),
+    // TODO: any text is not guaranteed to be valid UTF-8.
     Text(&'a str),
 }
 

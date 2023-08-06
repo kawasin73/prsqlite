@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::iter::Iterator;
 use std::rc::Rc;
 
@@ -29,6 +28,8 @@ pub use crate::parser::DataType;
 use crate::record::Value;
 use crate::utils::upper_to_lower;
 use crate::utils::CaseInsensitiveBytes;
+use crate::utils::MaybeQuotedBytes;
+use crate::utils::UPPER_TO_LOWER;
 use crate::Columns;
 use crate::Statement;
 
@@ -72,6 +73,20 @@ impl<'a> SchemaRecord<'a> {
             sql,
         })
     }
+}
+
+fn eq_case_insensitive(a: &[u8], b: MaybeQuotedBytes) -> bool {
+    let mut iter = b.dequote_iter().map(|v| UPPER_TO_LOWER[*v as usize]);
+    for v1 in a.iter() {
+        if let Some(v2) = iter.next() {
+            if UPPER_TO_LOWER[*v1 as usize] != v2 {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 pub struct Schema {
@@ -165,12 +180,10 @@ impl Schema {
                                 schema.name,
                                 index_name
                             );
-                        } else if CaseInsensitiveBytes::from(table_name)
-                            != CaseInsensitiveBytes::from(schema.table_name.as_bytes())
-                        {
+                        } else if !eq_case_insensitive(schema.table_name.as_bytes(), table_name) {
                             bail!(
                                 "index table name does not match: table_name={:?}, parsed_table_name={:?}",
-                                schema.table_name,
+                                schema.table_name.as_bytes(),
                                 table_name
                             );
                         }
@@ -235,7 +248,7 @@ impl Index {
         sql: &'a str,
         root_page_id: PageId,
         table: &Table,
-    ) -> anyhow::Result<(Vec<u8>, &'a [u8], Self)> {
+    ) -> anyhow::Result<(Vec<u8>, MaybeQuotedBytes<'a>, Self)> {
         let (n, create_index) = parse_create_index(sql.as_bytes())
             .map_err(|e| anyhow::anyhow!("parse create index sql: {:?}", e))?;
         if n != sql.as_bytes().len() {
@@ -246,7 +259,9 @@ impl Index {
         }
         let mut columns = Vec::with_capacity(create_index.columns.len());
         for column in &create_index.columns {
-            let Some(column_number) = table.get_column_index(column.name) else {
+            // TODO: use the reference of given column name.
+            let column_name = column.name.dequote();
+            let Some(column_number) = table.get_column_index(&column_name) else {
                 bail!(
                     "column {:?} in create index sql is not found in table {:?}",
                     column.name,
@@ -256,7 +271,7 @@ impl Index {
             columns.push(column_number);
         }
         Ok((
-            create_index.index_name.to_vec(),
+            create_index.index_name.dequote(),
             create_index.table_name,
             Self {
                 root_page_id,
@@ -297,10 +312,9 @@ impl Table {
                 sql
             );
         }
-        let name = create_table.table_name.to_vec();
-        let mut columns = Vec::with_capacity(create_table.columns.len());
+        let table_name = create_table.table_name.dequote();
+        let mut columns: Vec<Column> = Vec::with_capacity(create_table.columns.len());
         let mut has_primary_key = false;
-        let mut column_name_set = HashSet::new();
         for column_def in create_table.columns {
             if column_def.primary_key {
                 if has_primary_key {
@@ -308,20 +322,24 @@ impl Table {
                 }
                 has_primary_key = true;
             }
-            let column_name = CaseInsensitiveBytes::from(column_def.name);
-            if column_name_set.contains(&column_name) {
-                bail!("duplicate column name: {:?}", column_def.name);
+            let column_name = column_def.name.dequote();
+            let case_insensitive_name = CaseInsensitiveBytes::from(&column_name);
+
+            // TODO: Optimize validation (e.g. hashset)
+            for column in &columns {
+                if CaseInsensitiveBytes::from(&column.name) == case_insensitive_name {
+                    bail!("duplicate column name: {:?}", column_def.name);
+                }
             }
-            column_name_set.insert(column_name);
 
             columns.push(Column {
-                name: column_def.name.to_vec(),
+                name: column_name,
                 data_type: column_def.data_type,
                 primary_key: column_def.primary_key,
             });
         }
         Ok((
-            name,
+            table_name,
             Table {
                 root_page_id,
                 columns,
@@ -456,8 +474,11 @@ mod tests {
 
     #[test]
     fn parse_table() {
-        let (table_name, table) =
-            Table::parse("create table example(col, col1 integer primary key)", 1).unwrap();
+        let (table_name, table) = Table::parse(
+            "create table example(col, col1 integer primary key, \"col2\", `co``l3`, [col4])",
+            1,
+        )
+        .unwrap();
         assert_eq!(table_name, b"example");
         assert_eq!(
             table,
@@ -474,6 +495,21 @@ mod tests {
                         data_type: Some(DataType::Integer),
                         primary_key: true,
                     },
+                    Column {
+                        name: b"col2".to_vec(),
+                        data_type: None,
+                        primary_key: false,
+                    },
+                    Column {
+                        name: b"co`l3".to_vec(),
+                        data_type: None,
+                        primary_key: false,
+                    },
+                    Column {
+                        name: b"col4".to_vec(),
+                        data_type: None,
+                        primary_key: false,
+                    },
                 ],
                 indexes: None,
             }
@@ -485,16 +521,16 @@ mod tests {
         )
         .is_err());
         // duplicated column name
-        assert!(Table::parse("create table example(col, col integer)", 2).is_err());
+        assert!(Table::parse("create table example(col, cOl integer)", 2).is_err());
     }
 
     #[test]
     fn get_table() {
         let file = create_sqlite_database(&[
             "CREATE TABLE example(col);",
-            "CREATE TABLE example2(col1 null, col2 integer);",
-            "CREATE TABLE example3(COL1 real, Col2 text primary key, cOL3 blob, _);",
-            "CREATE TABLE example4(id integer primary key, col);",
+            "CREATE TABLE \"example2\"(col1 null, col2 integer);",
+            "CREATE TABLE `exam``ple3`(COL1 real, Col2 text primary key, cOL3 blob, _);",
+            "CREATE TABLE [example4](id integer primary key, col);",
         ]);
         let schema = generate_schema(file.path());
 
@@ -526,7 +562,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            schema.get_table(b"example3").unwrap().columns,
+            schema.get_table(b"exam`ple3").unwrap().columns,
             vec![
                 Column {
                     name: b"COL1".to_vec(),
@@ -678,6 +714,29 @@ mod tests {
     }
 
     #[test]
+    fn get_index_success_quoted_table_name() {
+        let file = create_sqlite_database(&[
+            "CREATE TABLE `exam``ple`(col1, col2);",
+            "CREATE INDEX index1 ON \"exam`ple\"(col1);",
+            "CREATE INDEX index2 ON `exam``ple`(col1, col2);",
+        ]);
+        let schema = generate_schema(file.path());
+
+        let index1 = Rc::new(Index {
+            root_page_id: 3,
+            columns: vec![ColumnNumber::Column(0)],
+            next: None,
+        });
+        let index2 = Rc::new(Index {
+            root_page_id: 4,
+            columns: vec![ColumnNumber::Column(0), ColumnNumber::Column(1)],
+            next: Some(index1.clone()),
+        });
+        assert_eq!(schema.get_index(b"index1").unwrap(), &index1);
+        assert_eq!(schema.get_index(b"index2").unwrap(), &index2);
+    }
+
+    #[test]
     fn get_table_with_index() {
         let file = create_sqlite_database(&[
             "CREATE TABLE example(col1, col2);",
@@ -736,7 +795,7 @@ mod tests {
         let (index_name, table_name, index) =
             Index::parse("create index index1 on example(id, col1, col2)", 3, &table).unwrap();
         assert_eq!(index_name, b"index1");
-        assert_eq!(table_name, b"example");
+        assert_eq!(table_name, b"example".as_slice().into());
         assert_eq!(
             index,
             Index {
@@ -754,6 +813,6 @@ mod tests {
         // unknown table
         let (_, table_name, _) =
             Index::parse("create index index1 on invalid(col1)", 3, &table).unwrap();
-        assert_eq!(table_name, b"invalid");
+        assert_eq!(table_name, b"invalid".as_slice().into());
     }
 }

@@ -18,6 +18,7 @@ use crate::token::Token;
 use crate::utils::parse_float_literal;
 use crate::utils::parse_integer_literal;
 use crate::utils::CaseInsensitiveBytes;
+use crate::utils::MaybeQuotedBytes;
 
 pub type Error = &'static str;
 pub type Result<T> = std::result::Result<T, Error>;
@@ -25,14 +26,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// CREATE TABLE statement.
 #[derive(Debug, PartialEq, Eq)]
 pub struct CreateTable<'a> {
-    pub table_name: &'a [u8],
+    pub table_name: MaybeQuotedBytes<'a>,
     pub columns: Vec<ColumnDef<'a>>,
 }
 
 /// Definition of a column in a table.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ColumnDef<'a> {
-    pub name: &'a [u8],
+    pub name: MaybeQuotedBytes<'a>,
     pub data_type: Option<DataType>,
     pub primary_key: bool,
 }
@@ -95,9 +96,10 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
                 (n, token) = get_token_no_space(input).ok_or("no right paren")?;
                 input = &input[n..];
 
+                // TODO: support affinity parse
                 // TODO: compare the performance of UpperToLowerBytes::equal_to_lower_bytes or
                 // match + [u8;7]
-                let data_type = CaseInsensitiveBytes::from(data_type);
+                let data_type = CaseInsensitiveBytes::from(data_type.raw());
                 let data_type = if data_type.equal_to_lower_bytes(b"integer") {
                     DataType::Integer
                 } else if data_type.equal_to_lower_bytes(b"real") {
@@ -154,15 +156,15 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
 /// CREATE INDEX statement.
 #[derive(Debug, PartialEq, Eq)]
 pub struct CreateIndex<'a> {
-    pub index_name: &'a [u8],
-    pub table_name: &'a [u8],
+    pub index_name: MaybeQuotedBytes<'a>,
+    pub table_name: MaybeQuotedBytes<'a>,
     pub columns: Vec<IndexedColumn<'a>>,
 }
 
 /// Definition of a column in a index.
 #[derive(Debug, PartialEq, Eq)]
 pub struct IndexedColumn<'a> {
-    pub name: &'a [u8],
+    pub name: MaybeQuotedBytes<'a>,
 }
 
 /// Parse CREATE INDEX statement.
@@ -232,7 +234,7 @@ pub fn parse_create_index(input: &[u8]) -> Result<(usize, CreateIndex)> {
 }
 
 pub struct Select<'a> {
-    pub table_name: &'a [u8],
+    pub table_name: MaybeQuotedBytes<'a>,
     pub columns: Vec<ResultColumn<'a>>,
     pub selection: Option<Expr<'a>>,
 }
@@ -294,7 +296,7 @@ pub fn parse_select(input: &[u8]) -> Result<(usize, Select)> {
 #[derive(Debug, PartialEq, Eq)]
 pub enum ResultColumn<'a> {
     All,
-    ColumnName(&'a [u8]),
+    ColumnName(MaybeQuotedBytes<'a>),
 }
 
 fn parse_result_column(input: &[u8]) -> Result<(usize, ResultColumn)> {
@@ -323,7 +325,7 @@ pub enum BinaryOperator {
 
 #[derive(Debug, PartialEq)]
 pub enum Expr<'a> {
-    Column(&'a [u8]),
+    Column(MaybeQuotedBytes<'a>),
     BinaryOperator {
         operator: BinaryOperator,
         left: Box<Expr<'a>>,
@@ -336,7 +338,7 @@ fn parse_expr(input: &[u8]) -> Result<(usize, Expr)> {
     let input_len = input.len();
     let (n, left) = match get_token_no_space(input) {
         Some((n, Token::Identifier(id))) => (n, Expr::Column(id)),
-        Some((n, Token::IntegerLiteral(buf))) => {
+        Some((n, Token::Integer(buf))) => {
             let v = parse_integer_literal(buf);
             if v < 0 {
                 (n, Expr::LiteralValue(Value::Real(parse_float_literal(buf))))
@@ -344,7 +346,7 @@ fn parse_expr(input: &[u8]) -> Result<(usize, Expr)> {
                 (n, Expr::LiteralValue(Value::Integer(v)))
             }
         }
-        Some((n, Token::FloatLiteral(buf))) => {
+        Some((n, Token::Float(buf))) => {
             (n, Expr::LiteralValue(Value::Real(parse_float_literal(buf))))
         }
         _ => return Err("no expr"),
@@ -379,40 +381,40 @@ mod tests {
 
     #[test]
     fn test_parse_create_table() {
-        let input = b"create table foo (id integer primary key, name text, real real, blob blob, empty null,no_type)";
+        let input = b"create table foo (id integer primary key, name text, real real, \"blob\" blob, `empty` null,[no_type])";
         let (n, create_table) = parse_create_table(input).unwrap();
         assert_eq!(n, input.len());
-        assert_eq!(create_table.table_name, b"foo");
+        assert_eq!(create_table.table_name, b"foo".as_slice().into());
         assert_eq!(
             create_table.columns,
             vec![
                 ColumnDef {
-                    name: b"id",
+                    name: b"id".as_slice().into(),
                     data_type: Some(DataType::Integer),
                     primary_key: true,
                 },
                 ColumnDef {
-                    name: b"name",
+                    name: b"name".as_slice().into(),
                     data_type: Some(DataType::Text),
                     primary_key: false,
                 },
                 ColumnDef {
-                    name: b"real",
+                    name: b"real".as_slice().into(),
                     data_type: Some(DataType::Real),
                     primary_key: false,
                 },
                 ColumnDef {
-                    name: b"blob",
+                    name: b"\"blob\"".as_slice().into(),
                     data_type: Some(DataType::Blob),
                     primary_key: false,
                 },
                 ColumnDef {
-                    name: b"empty",
+                    name: b"`empty`".as_slice().into(),
                     data_type: Some(DataType::Null),
                     primary_key: false,
                 },
                 ColumnDef {
-                    name: b"no_type",
+                    name: b"no_type".as_slice().into(),
                     data_type: None,
                     primary_key: false,
                 },
@@ -425,17 +427,17 @@ mod tests {
         let input = b"create table Foo (Id, Name)abc ";
         let (n, create_table) = parse_create_table(input).unwrap();
         assert_eq!(n, input.len() - 4);
-        assert_eq!(create_table.table_name, b"Foo");
+        assert_eq!(create_table.table_name, b"Foo".as_slice().into());
         assert_eq!(
             create_table.columns,
             vec![
                 ColumnDef {
-                    name: b"Id",
+                    name: b"Id".as_slice().into(),
                     data_type: None,
                     primary_key: false,
                 },
                 ColumnDef {
-                    name: b"Name",
+                    name: b"Name".as_slice().into(),
                     data_type: None,
                     primary_key: false,
                 }
@@ -460,14 +462,20 @@ mod tests {
         let input = b"create index foo on bar (col1, col2,col3)";
         let (n, create_index) = parse_create_index(input).unwrap();
         assert_eq!(n, input.len());
-        assert_eq!(create_index.index_name, b"foo");
-        assert_eq!(create_index.table_name, b"bar");
+        assert_eq!(create_index.index_name, b"foo".as_slice().into());
+        assert_eq!(create_index.table_name, b"bar".as_slice().into());
         assert_eq!(
             create_index.columns,
             vec![
-                IndexedColumn { name: b"col1" },
-                IndexedColumn { name: b"col2" },
-                IndexedColumn { name: b"col3" },
+                IndexedColumn {
+                    name: b"col1".as_slice().into()
+                },
+                IndexedColumn {
+                    name: b"col2".as_slice().into()
+                },
+                IndexedColumn {
+                    name: b"col3".as_slice().into()
+                },
             ]
         );
     }
@@ -477,13 +485,17 @@ mod tests {
         let input = b"create index fOo on bAR (Col1,cOL2)abc ";
         let (n, create_index) = parse_create_index(input).unwrap();
         assert_eq!(n, input.len() - 4);
-        assert_eq!(create_index.index_name, b"fOo");
-        assert_eq!(create_index.table_name, b"bAR");
+        assert_eq!(create_index.index_name, b"fOo".as_slice().into());
+        assert_eq!(create_index.table_name, b"bAR".as_slice().into());
         assert_eq!(
             create_index.columns,
             vec![
-                IndexedColumn { name: b"Col1" },
-                IndexedColumn { name: b"cOL2" },
+                IndexedColumn {
+                    name: b"Col1".as_slice().into()
+                },
+                IndexedColumn {
+                    name: b"cOL2".as_slice().into()
+                },
             ]
         );
     }
@@ -499,7 +511,7 @@ mod tests {
         let input = b"select * from foo";
         let (n, select) = parse_select(input).unwrap();
         assert_eq!(n, input.len());
-        assert_eq!(select.table_name, b"foo");
+        assert_eq!(select.table_name, b"foo".as_slice().into());
         assert_eq!(select.columns, vec![ResultColumn::All]);
     }
 
@@ -508,14 +520,14 @@ mod tests {
         let input = b"select id,name,*,col from foo";
         let (n, select) = parse_select(input).unwrap();
         assert_eq!(n, input.len());
-        assert_eq!(select.table_name, b"foo");
+        assert_eq!(select.table_name, b"foo".as_slice().into());
         assert_eq!(
             select.columns,
             vec![
-                ResultColumn::ColumnName(b"id"),
-                ResultColumn::ColumnName(b"name"),
+                ResultColumn::ColumnName(b"id".as_slice().into()),
+                ResultColumn::ColumnName(b"name".as_slice().into()),
                 ResultColumn::All,
-                ResultColumn::ColumnName(b"col")
+                ResultColumn::ColumnName(b"col".as_slice().into())
             ]
         );
     }
@@ -525,14 +537,14 @@ mod tests {
         let input = b"select * from foo where id = 5";
         let (n, select) = parse_select(input).unwrap();
         assert_eq!(n, input.len());
-        assert_eq!(select.table_name, b"foo");
+        assert_eq!(select.table_name, b"foo".as_slice().into());
         assert_eq!(select.columns, vec![ResultColumn::All,]);
         assert!(select.selection.is_some());
         assert_eq!(
             select.selection.unwrap(),
             Expr::BinaryOperator {
                 operator: BinaryOperator::Eq,
-                left: Box::new(Expr::Column(b"id")),
+                left: Box::new(Expr::Column(b"id".as_slice().into())),
                 right: Box::new(Expr::LiteralValue(Value::Integer(5))),
             }
         );

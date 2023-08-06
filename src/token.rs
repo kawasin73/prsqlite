@@ -12,22 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::utils::UPPER_TO_LOWER;
+use crate::utils::{MaybeQuotedBytes, UPPER_TO_LOWER};
 
 const CHAR_ALPHABET: u8 = 0x01;
 const CHAR_UNDERSCORE: u8 = 0x02;
 const CHAR_DIGIT: u8 = 0x03;
+const CHAR_QUOTE: u8 = 0x04; // ", ', `
+const CHAR_QUOTE2: u8 = 0x05; // [
 const CHAR_INVALID: u8 = 0xFF;
 
 #[rustfmt::skip]
 static CHAR_LOOKUP_TABLE: [u8; 256] = [
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, b' ', b' ', 0xFF, b' ', b' ', 0xFF, 0xFF, 0xFF, // 0x00 - 0x0F
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0x10 - 0x1F
-    b' ', b'!', 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, b'(', b')', b'*', 0xFF, b',', 0xFF, b'.', 0xFF, // 0x20 - 0x2F
+    b' ', b'!', 0x04, 0xFF, 0xFF, 0xFF, 0xFF, 0x04, b'(', b')', b'*', 0xFF, b',', 0xFF, b'.', 0xFF, // 0x20 - 0x2F
     0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0xFF, b';', b'<', b'=', b'>', 0xFF, // 0x30 - 0x3F
     0xFF, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, // 0x40 - 0x4F
-    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0x02, // 0x50 - 0x5F
-    0xFF, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, // 0x60 - 0x6F
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x05, 0xFF, 0xFF, 0xFF, 0x02, // 0x50 - 0x5F
+    0x04, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, // 0x60 - 0x6F
     0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0x70 - 0x7F
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0x80 - 0x8F
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0x90 - 0x9F
@@ -70,10 +72,11 @@ pub enum Token<'a> {
     Lt,
     /// Less than or equal to
     Le,
-    Identifier(&'a [u8]),
+    Identifier(MaybeQuotedBytes<'a>),
+    String(MaybeQuotedBytes<'a>),
     // Only contains 0-9 chars.
-    IntegerLiteral(&'a [u8]),
-    FloatLiteral(&'a [u8]),
+    Integer(&'a [u8]),
+    Float(&'a [u8]),
     Illegal,
 }
 
@@ -115,7 +118,7 @@ pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
             if input.len() >= 2 && input[1].is_ascii_digit() {
                 let (len, valid) = len_float(input);
                 if valid {
-                    Some((len, Token::FloatLiteral(&input[..len])))
+                    Some((len, Token::Float(&input[..len])))
                 } else {
                     Some((len, Token::Illegal))
                 }
@@ -169,10 +172,10 @@ pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
                     b"key\0\0\0\0" => Some((len, Token::Key)),
                     b"on\0\0\0\0\0" => Some((len, Token::On)),
                     b"null\0\0\0" => Some((len, Token::Null)),
-                    _ => Some((len, Token::Identifier(id))),
+                    _ => Some((len, Token::Identifier(id.into()))),
                 }
             } else {
-                Some((len, Token::Identifier(id)))
+                Some((len, Token::Identifier(id.into())))
             }
         }
         CHAR_DIGIT => {
@@ -190,10 +193,39 @@ pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
             if !valid {
                 Some((len + l, Token::Illegal))
             } else if l == 0 {
-                Some((len, Token::IntegerLiteral(&input[..len])))
+                Some((len, Token::Integer(&input[..len])))
             } else {
-                Some((len + l, Token::FloatLiteral(&input[..len + l])))
+                Some((len + l, Token::Float(&input[..len + l])))
             }
+        }
+        CHAR_QUOTE => {
+            let delimiter = input[0];
+            let mut iter = input.iter().enumerate().skip(1);
+            while let Some((i, &byte)) = iter.next() {
+                if byte == delimiter {
+                    if let Some((_, &byte)) = iter.next() {
+                        if byte == delimiter {
+                            continue;
+                        }
+                    }
+                    let quoted_buf = &input[..i + 1];
+                    if delimiter == b'\'' {
+                        return Some((i + 1, Token::String(quoted_buf.into())));
+                    } else {
+                        return Some((i + 1, Token::Identifier(quoted_buf.into())));
+                    }
+                }
+            }
+            Some((input.len(), Token::Illegal))
+        }
+        CHAR_QUOTE2 => {
+            for (i, &byte) in input.iter().enumerate().skip(1) {
+                if byte == b']' {
+                    let unquoted_buf = &input[1..i];
+                    return Some((i + 1, Token::Identifier(unquoted_buf.into())));
+                }
+            }
+            Some((input.len(), Token::Illegal))
         }
         CHAR_INVALID => Some((1, Token::Illegal)),
         c => {
@@ -303,14 +335,14 @@ mod tests {
         for literal in test_cases {
             assert_eq!(
                 get_token(literal.as_bytes()),
-                Some((literal.len(), Token::IntegerLiteral(literal.as_bytes()))),
+                Some((literal.len(), Token::Integer(literal.as_bytes()))),
                 "literal: {}",
                 literal
             );
             let input = format!("{literal}abc ");
             assert_eq!(
                 get_token(input.as_bytes()),
-                Some((literal.len(), Token::IntegerLiteral(literal.as_bytes()))),
+                Some((literal.len(), Token::Integer(literal.as_bytes()))),
                 "input: {}",
                 input
             );
@@ -343,19 +375,19 @@ mod tests {
         ] {
             assert_eq!(
                 get_token(literal.as_bytes()),
-                Some((literal.len(), Token::FloatLiteral(literal.as_bytes()))),
+                Some((literal.len(), Token::Float(literal.as_bytes()))),
                 "literal: {}",
                 literal
             );
             let input = format!("{literal}abc ");
             assert_eq!(
                 get_token(input.as_bytes()),
-                Some((literal.len(), Token::FloatLiteral(literal.as_bytes()))),
+                Some((literal.len(), Token::Float(literal.as_bytes()))),
                 "input: {}",
                 input
             );
         }
-        assert_eq!(get_token(b"0.1.2"), Some((3, Token::FloatLiteral(b"0.1"))));
+        assert_eq!(get_token(b"0.1.2"), Some((3, Token::Float(b"0.1"))));
     }
 
     #[test]
@@ -367,7 +399,10 @@ mod tests {
         assert_eq!(get_token(b"0.1e-"), Some((5, Token::Illegal)));
         assert_eq!(get_token(b"0.1e-e"), Some((5, Token::Illegal)));
         assert_eq!(get_token(b".e1"), Some((1, Token::Dot)));
-        assert_eq!(get_token(b"e1"), Some((2, Token::Identifier(b"e1"))));
+        assert_eq!(
+            get_token(b"e1"),
+            Some((2, Token::Identifier(b"e1".as_slice().into())))
+        );
     }
 
     #[test]
@@ -376,12 +411,18 @@ mod tests {
             let input = format!("{c}");
             assert_eq!(
                 get_token(input.as_bytes()),
-                Some((1, Token::Identifier(input.as_bytes())))
+                Some((
+                    1,
+                    Token::Identifier(MaybeQuotedBytes::from(input.as_bytes()))
+                ))
             );
             let input = format!("{c}abc ");
             assert_eq!(
                 get_token(input.as_bytes()),
-                Some((4, Token::Identifier(&input.as_bytes()[..4])))
+                Some((
+                    4,
+                    Token::Identifier(MaybeQuotedBytes::from(&input.as_bytes()[..4]))
+                ))
             );
         }
         let mut input = String::new();
@@ -400,15 +441,148 @@ mod tests {
             get_token(input.as_bytes()),
             Some((
                 input.len() - 1,
-                Token::Identifier(&input.as_bytes()[..input.len() - 1])
+                Token::Identifier(MaybeQuotedBytes::from(&input.as_bytes()[..input.len() - 1]))
             ))
         );
 
         assert_eq!(
             get_token(b"_hello "),
-            Some((6, Token::Identifier(b"_hello")))
+            Some((6, Token::Identifier(b"_hello".as_slice().into())))
         );
-        assert_eq!(get_token(b"_ "), Some((1, Token::Identifier(b"_"))));
+        assert_eq!(
+            get_token(b"_ "),
+            Some((1, Token::Identifier(b"_".as_slice().into())))
+        );
+    }
+
+    #[test]
+    fn test_quoted_identifier() {
+        assert_eq!(
+            get_token(b"`hello` "),
+            Some((7, Token::Identifier(b"`hello`".as_slice().into())))
+        );
+        // Non-ASCII
+        assert_eq!(
+            get_token(b"`\xE3\x81\x82` "),
+            Some((5, Token::Identifier(b"`\xE3\x81\x82`".as_slice().into())))
+        );
+        assert_eq!(
+            get_token(b"``hello`` "),
+            Some((2, Token::Identifier(b"``".as_slice().into())))
+        );
+        assert_eq!(
+            get_token(b"`\"hello\"` "),
+            Some((9, Token::Identifier(b"`\"hello\"`".as_slice().into())))
+        );
+        assert_eq!(
+            get_token(b"`hello`aaa` "),
+            Some((7, Token::Identifier(b"`hello`".as_slice().into())))
+        );
+        assert_eq!(
+            get_token(b"`hello``aaa ` "),
+            Some((13, Token::Identifier(b"`hello``aaa `".as_slice().into())))
+        );
+        assert_eq!(
+            get_token(b"`hello```aaa  "),
+            Some((9, Token::Identifier(b"`hello```".as_slice().into())))
+        );
+
+        // Non-ASCII
+        assert_eq!(
+            get_token(b"\"\xE3\x81\x82\" "),
+            Some((5, Token::Identifier(b"\"\xE3\x81\x82\"".as_slice().into())))
+        );
+        assert_eq!(
+            get_token(b"\"hello\" "),
+            Some((7, Token::Identifier(b"\"hello\"".as_slice().into())))
+        );
+        assert_eq!(
+            get_token(b"\"\"hello "),
+            Some((2, Token::Identifier(b"\"\"".as_slice().into())))
+        );
+        assert_eq!(
+            get_token(b"\"`hello`\" "),
+            Some((9, Token::Identifier(b"\"`hello`\"".as_slice().into())))
+        );
+        assert_eq!(
+            get_token(b"\"hello\"aaa\" "),
+            Some((7, Token::Identifier(b"\"hello\"".as_slice().into())))
+        );
+        assert_eq!(
+            get_token(b"\"hello\"\"aaa \" "),
+            Some((
+                13,
+                Token::Identifier(b"\"hello\"\"aaa \"".as_slice().into())
+            ))
+        );
+        assert_eq!(
+            get_token(b"\"hello\"\"\"aaa  "),
+            Some((9, Token::Identifier(b"\"hello\"\"\"".as_slice().into())))
+        );
+
+        assert_eq!(
+            get_token(b"[hello]] "),
+            Some((7, Token::Identifier(b"hello".as_slice().into())))
+        );
+        // Non-ASCII
+        assert_eq!(
+            get_token(b"[\xE3\x81\x82] "),
+            Some((5, Token::Identifier(b"\xE3\x81\x82".as_slice().into())))
+        );
+        assert_eq!(
+            get_token(b"[[he[llo[]]] "),
+            Some((10, Token::Identifier(b"[he[llo[".as_slice().into())))
+        );
+
+        assert_eq!(get_token(b"`hello\" "), Some((8, Token::Illegal)));
+        assert_eq!(get_token(b"`hello`` "), Some((9, Token::Illegal)));
+        assert_eq!(get_token(b"`hello````aaa  "), Some((15, Token::Illegal)));
+
+        assert_eq!(get_token(b"\"hello` "), Some((8, Token::Illegal)));
+        assert_eq!(get_token(b"\"hello\"\" "), Some((9, Token::Illegal)));
+        assert_eq!(
+            get_token(b"\"hello\"\"\"\"aaa  "),
+            Some((15, Token::Illegal))
+        );
+
+        assert_eq!(get_token(b"[hello "), Some((7, Token::Illegal)));
+    }
+
+    #[test]
+    fn test_string() {
+        assert_eq!(
+            get_token(b"'hello' "),
+            Some((7, Token::String(b"'hello'".as_slice().into())))
+        );
+        // Non-ASCII
+        assert_eq!(
+            get_token(b"'\xE3\x81\x82' "),
+            Some((5, Token::String(b"'\xE3\x81\x82'".as_slice().into())))
+        );
+        assert_eq!(
+            get_token(b"''hello'' "),
+            Some((2, Token::String(b"''".as_slice().into())))
+        );
+        assert_eq!(
+            get_token(b"'\"hello\"' "),
+            Some((9, Token::String(b"'\"hello\"'".as_slice().into())))
+        );
+        assert_eq!(
+            get_token(b"'hello'aaa' "),
+            Some((7, Token::String(b"'hello'".as_slice().into())))
+        );
+        assert_eq!(
+            get_token(b"'hello''aaa ' "),
+            Some((13, Token::String(b"'hello''aaa '".as_slice().into())))
+        );
+        assert_eq!(
+            get_token(b"'hello'''aaa  "),
+            Some((9, Token::String(b"'hello'''".as_slice().into())))
+        );
+
+        assert_eq!(get_token(b"'hello\" "), Some((8, Token::Illegal)));
+        assert_eq!(get_token(b"'hello'' "), Some((9, Token::Illegal)));
+        assert_eq!(get_token(b"'hello''''aaa  "), Some((15, Token::Illegal)));
     }
 
     #[test]
@@ -445,7 +619,7 @@ mod tests {
                 get_token(input.as_bytes()),
                 Some((
                     input.len() - 1,
-                    Token::Identifier(&input.as_bytes()[..input.len() - 1])
+                    Token::Identifier(MaybeQuotedBytes::from(&input.as_bytes()[..input.len() - 1]))
                 ))
             );
         }
@@ -498,7 +672,7 @@ mod tests {
                     Token::Space,
                     Token::From,
                     Token::Space,
-                    Token::Identifier(b"table1"),
+                    Token::Identifier(b"table1".as_slice().into()),
                     Token::Semicolon,
                 ],
             ),
@@ -509,7 +683,7 @@ mod tests {
                     Token::Asterisk,
                     Token::From,
                     Token::Space,
-                    Token::Identifier(b"table1"),
+                    Token::Identifier(b"table1".as_slice().into()),
                     Token::Semicolon,
                 ],
             ),
@@ -522,7 +696,7 @@ mod tests {
                     Token::Space,
                     Token::From,
                     Token::Space,
-                    Token::Identifier(b"table_1"),
+                    Token::Identifier(b"table_1".as_slice().into()),
                     Token::Space,
                     Token::Semicolon,
                     Token::Space,
@@ -533,13 +707,13 @@ mod tests {
                 vec![
                     Token::Select,
                     Token::LeftParen,
-                    Token::Identifier(b"col1"),
+                    Token::Identifier(b"col1".as_slice().into()),
                     Token::Comma,
-                    Token::Identifier(b"col2"),
+                    Token::Identifier(b"col2".as_slice().into()),
                     Token::RightParen,
                     Token::From,
                     Token::Space,
-                    Token::Identifier(b"table1"),
+                    Token::Identifier(b"table1".as_slice().into()),
                     Token::Semicolon,
                 ],
             ),
@@ -548,19 +722,40 @@ mod tests {
                 vec![
                     Token::Select,
                     Token::LeftParen,
-                    Token::Identifier(b"col1"),
+                    Token::Identifier(b"col1".as_slice().into()),
                     Token::Comma,
-                    Token::Identifier(b"col2"),
+                    Token::Identifier(b"col2".as_slice().into()),
                     Token::RightParen,
                     Token::From,
                     Token::Space,
-                    Token::Identifier(b"table1"),
+                    Token::Identifier(b"table1".as_slice().into()),
                     Token::Space,
                     Token::Where,
                     Token::Space,
-                    Token::Identifier(b"col1"),
+                    Token::Identifier(b"col1".as_slice().into()),
                     Token::Eq,
-                    Token::IntegerLiteral("10".as_bytes()),
+                    Token::Integer("10".as_bytes()),
+                    Token::Semicolon,
+                ],
+            ),
+            (
+                "select(\"col1\",`col2`)from table1 where [col1]='hello world';",
+                vec![
+                    Token::Select,
+                    Token::LeftParen,
+                    Token::Identifier(b"\"col1\"".as_slice().into()),
+                    Token::Comma,
+                    Token::Identifier(b"`col2`".as_slice().into()),
+                    Token::RightParen,
+                    Token::From,
+                    Token::Space,
+                    Token::Identifier(b"table1".as_slice().into()),
+                    Token::Space,
+                    Token::Where,
+                    Token::Space,
+                    Token::Identifier(b"col1".as_slice().into()),
+                    Token::Eq,
+                    Token::String(b"'hello world'".as_slice().into()),
                     Token::Semicolon,
                 ],
             ),
@@ -571,17 +766,17 @@ mod tests {
                     Token::Space,
                     Token::Table,
                     Token::Space,
-                    Token::Identifier(b"table1"),
+                    Token::Identifier(b"table1".as_slice().into()),
                     Token::LeftParen,
-                    Token::Identifier(b"col1"),
+                    Token::Identifier(b"col1".as_slice().into()),
                     Token::Comma,
                     Token::Space,
-                    Token::Identifier(b"col2"),
+                    Token::Identifier(b"col2".as_slice().into()),
                     Token::Comma,
                     Token::Space,
-                    Token::Identifier(b"col3"),
+                    Token::Identifier(b"col3".as_slice().into()),
                     Token::Space,
-                    Token::Identifier(b"integer"),
+                    Token::Identifier(b"integer".as_slice().into()),
                     Token::Space,
                     Token::Primary,
                     Token::Space,
@@ -597,19 +792,19 @@ mod tests {
                     Token::Space,
                     Token::Index,
                     Token::Space,
-                    Token::Identifier(b"index1"),
+                    Token::Identifier(b"index1".as_slice().into()),
                     Token::Space,
                     Token::On,
                     Token::Space,
-                    Token::Identifier(b"table1"),
+                    Token::Identifier(b"table1".as_slice().into()),
                     Token::LeftParen,
-                    Token::Identifier(b"col1"),
+                    Token::Identifier(b"col1".as_slice().into()),
                     Token::Comma,
                     Token::Space,
-                    Token::Identifier(b"col2"),
+                    Token::Identifier(b"col2".as_slice().into()),
                     Token::Comma,
                     Token::Space,
-                    Token::Identifier(b"col3"),
+                    Token::Identifier(b"col3".as_slice().into()),
                     Token::RightParen,
                     Token::Semicolon,
                 ],
