@@ -59,6 +59,167 @@ pub fn unsafe_parse_varint(buf: &[u8]) -> (i64, usize) {
     }
 }
 
+/// Parse integer literal.
+///
+/// Returns -1 if it is 9223372036854775808. If it exceeds i64 range, it returns
+/// i64::MIN.
+///
+/// All bytes must be ascii digit.
+pub fn parse_integer_literal(input: &[u8]) -> i64 {
+    assert!(!input.is_empty());
+
+    // Skip leading zeros
+    let mut n_zeros = input.len();
+    for (i, byte) in input.iter().enumerate() {
+        if *byte != b'0' {
+            n_zeros = i;
+            break;
+        }
+    }
+    // i64::MAX is 19 digits. Parsing more than 19 digits cause u64 overflow.
+    if input.len() - n_zeros > 19 {
+        return i64::MIN;
+    }
+
+    let mut v = 0_u64;
+    for &byte in input[n_zeros..].iter() {
+        assert!(byte.is_ascii_digit());
+        v = v * 10 + (byte - b'0') as u64;
+    }
+
+    if v <= i64::MAX as u64 {
+        v as i64
+    } else if v == i64::MAX as u64 + 1 {
+        -1
+    } else {
+        i64::MIN
+    }
+}
+
+/// Parse float literal.
+///
+/// The input must satisfy either of these conditions otherwise that must be
+/// parsed as an integer literal:
+///
+/// * Contains '.'
+/// * Contains 'e' or 'E'
+/// * Overflows i64 range
+///
+/// input must not be empty.
+///
+/// input must not contains `0` value.
+///
+/// This is compatible with `sqlite3AtoF()` in SQLite except this only support
+/// utf8.
+pub fn parse_float_literal(input: &[u8]) -> f64 {
+    assert!(!input.is_empty());
+    let mut iter = input.iter();
+    let mut byte = *iter.next().unwrap();
+
+    // Skip leading zeros
+    while byte == b'0' {
+        // 0 only literal is not a float literal.
+        byte = *iter.next().unwrap();
+    }
+    let mut significand = 0;
+    let mut dicimal_point: i64 = 0;
+
+    // Parse integer part
+    while byte.is_ascii_digit() {
+        significand = significand * 10 + (byte - b'0') as i64;
+        // input must have more characters since this is not an integer literal.
+        byte = *iter.next().unwrap();
+        if significand >= (i64::MAX - 9) / 10 {
+            while byte.is_ascii_digit() {
+                dicimal_point += 1;
+                let Some(&b) = iter.next() else {
+                    byte = 0;
+                    break;
+                };
+                byte = b;
+            }
+        }
+    }
+
+    // Parse fractional part
+    if byte == b'.' {
+        while {
+            if let Some(&b) = iter.next() {
+                byte = b;
+            } else {
+                byte = 0;
+            };
+            byte.is_ascii_digit()
+        } {
+            if significand < (i64::MAX - 9) / 10 {
+                significand = significand * 10 + (byte - b'0') as i64;
+                dicimal_point -= 1;
+            }
+        }
+    }
+
+    // Parse exponent part
+    if byte != 0 {
+        assert!(byte == b'e' || byte == b'E');
+        byte = *iter.next().unwrap();
+        let exponent_sign = match byte {
+            b'+' => {
+                byte = *iter.next().unwrap();
+                1
+            }
+            b'-' => {
+                byte = *iter.next().unwrap();
+                -1
+            }
+            _ => 1,
+        };
+        assert!(byte.is_ascii_digit());
+        let mut exponent = (byte - b'0') as i32;
+        for b in iter {
+            assert!(b.is_ascii_digit());
+            exponent = if exponent < 10000 {
+                exponent * 10 + (b - b'0') as i32
+            } else {
+                10000
+            };
+        }
+        dicimal_point += (exponent * exponent_sign) as i64;
+        byte = 0;
+    } else {
+        assert!(iter.next().is_none());
+    }
+
+    assert_eq!(byte, 0, "float value {:?} was not fully consumed", input);
+
+    // Attempt to reduce exponent.
+    loop {
+        // TODO: Further optimization based on the truth that the sign of dicimal_point
+        // is never changed.
+        if dicimal_point > 0 && significand < i64::MAX / 10 {
+            significand *= 10;
+            dicimal_point -= 1;
+        } else if dicimal_point < 0 && significand % 10 == 0 {
+            significand /= 10;
+            dicimal_point += 1;
+        } else {
+            break;
+        }
+    }
+
+    // TODO: Further optimization. I'm not sure why 307, 342 from sqlite src/util.c
+    // source code gives better performance...
+    match dicimal_point.try_into() {
+        Ok(dicimal_point) => significand as f64 * 10.0f64.powi(dicimal_point),
+        Err(_) => {
+            if dicimal_point > 0 {
+                f64::INFINITY
+            } else {
+                0.0
+            }
+        }
+    }
+}
+
 /// Converts a single byte to its uppercase equivalent.
 ///
 /// This only support ascii characters conversion (i.e. 0 ~ 127).
@@ -230,6 +391,78 @@ mod tests {
         {
             assert!(parse_varint(buf).is_none());
         }
+    }
+
+    #[test]
+    fn test_parse_integer_literal() {
+        let mut test_cases = Vec::new();
+        for i in 0..=1000 {
+            test_cases.push((i.to_string(), i));
+        }
+        for (l, v) in [
+            ("0", 0),
+            ("00", 0),
+            ("00000000000000000000", 0),
+            ("000000000000000000001", 1),
+            ("9223372036854775807", 9223372036854775807),
+            ("9223372036854775808", -1),
+            ("9223372036854775809", i64::MIN),
+            ("9999999999999999999", i64::MIN),
+        ] {
+            test_cases.push((l.to_string(), v));
+        }
+        for (literal, value) in test_cases {
+            assert_eq!(
+                parse_integer_literal(literal.as_bytes()),
+                value,
+                "literal: {}",
+                literal
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_float_literal() {
+        for (literal, value) in [
+            ("0.1", 0.1),
+            ("0.01", 0.01),
+            ("00.1", 00.1),
+            ("0.1234567890", 0.12345678900000001),
+            ("1.", 1.),
+            ("0.", 0.0),
+            (".0", 0.0),
+            (".0123456789", 0.0123456789),
+            ("10e1", 10e1),
+            ("12e+2", 12e+2),
+            ("1234e-3", 1234e-3),
+            ("00e1", 00e1),
+            ("01e+2", 01e+2),
+            ("0.1e-3", 0.1e-3),
+            ("1.e12", 1.0e12),
+            ("0.20e10", 0.20e10),
+            (".1e5", 0.1e5),
+            (".2e+6", 0.2e+6),
+            (".34567e7", 0.34567e7),
+            ("1.e5", 1.0e5),
+            ("2e0123456789", f64::INFINITY),
+            ("1e10000", f64::INFINITY),
+            ("1e-10000", 0.0),
+            ("9223372036854775807", 9223372036854775808.0),
+            ("9223372036854775808", 9223372036854775808.0),
+            ("9223372036854775808", i64::MAX as f64),
+            ("9999999999999999999", 9999999999999999999.0),
+            ("922337203685477580.0", 922337203685477580.0),
+            // "SELECT 922337203685477580.0e-10" show 92233720.3685478 in sqlite.
+            ("922337203685477580.0e-10", 92233720.36854777),
+        ] {
+            assert_eq!(
+                parse_float_literal(literal.as_bytes()),
+                value,
+                "literal: {}",
+                literal
+            );
+        }
+        assert_eq!(parse_float_literal("1.23".as_bytes()), 1.23);
     }
 
     #[test]

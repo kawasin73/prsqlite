@@ -26,7 +26,7 @@ use crate::utils::parse_varint;
 pub enum Value<'a> {
     Null,
     Integer(i64),
-    Float(f64),
+    Real(f64),
     Blob(&'a [u8]),
     Text(&'a str),
 }
@@ -36,7 +36,7 @@ impl<'a> Value<'a> {
         match self {
             Value::Null => Ok(()),
             Value::Integer(i) => write!(w, "{i}"),
-            Value::Float(d) => write!(w, "{d}"),
+            Value::Real(d) => write!(w, "{d}"),
             Value::Blob(b) => w.write_all(b),
             Value::Text(t) => write!(w, "{t}"),
         }
@@ -107,7 +107,7 @@ impl SerialType {
                     >> 16,
             ),
             6 => Value::Integer(i64::from_be_bytes(buf[..8].try_into().unwrap())),
-            7 => Value::Float(f64::from_be_bytes(buf[..8].try_into().unwrap())),
+            7 => Value::Real(f64::from_be_bytes(buf[..8].try_into().unwrap())),
             8 => Value::Integer(0),
             9 => Value::Integer(1),
             10 | 11 => {
@@ -307,6 +307,6 @@ mod tests {
         cursor.next().unwrap();
         let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
         let mut record = Record::parse(&payload).unwrap();
-        assert_eq!(record.get(0).unwrap(), Value::Float(0.5));
+        assert_eq!(record.get(0).unwrap(), Value::Real(0.5));
     }
 }

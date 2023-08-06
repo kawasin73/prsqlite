@@ -23,7 +23,7 @@ const CHAR_INVALID: u8 = 0xFF;
 static CHAR_LOOKUP_TABLE: [u8; 256] = [
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, b' ', b' ', 0xFF, b' ', b' ', 0xFF, 0xFF, 0xFF, // 0x00 - 0x0F
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0x10 - 0x1F
-    b' ', b'!', 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, b'(', b')', b'*', 0xFF, b',', 0xFF, 0xFF, 0xFF, // 0x20 - 0x2F
+    b' ', b'!', 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, b'(', b')', b'*', 0xFF, b',', 0xFF, b'.', 0xFF, // 0x20 - 0x2F
     0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0xFF, b';', b'<', b'=', b'>', 0xFF, // 0x30 - 0x3F
     0xFF, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, // 0x40 - 0x4F
     0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0x02, // 0x50 - 0x5F
@@ -56,6 +56,7 @@ pub enum Token<'a> {
     RightParen,
     Asterisk,
     Comma,
+    Dot,
     Semicolon,
     /// Equal to
     Eq,
@@ -70,7 +71,9 @@ pub enum Token<'a> {
     /// Less than or equal to
     Le,
     Identifier(&'a [u8]),
-    Integer(i64),
+    // Only contains 0-9 chars.
+    IntegerLiteral(&'a [u8]),
+    FloatLiteral(&'a [u8]),
     Illegal,
 }
 
@@ -108,6 +111,18 @@ pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
         b')' => Some((1, Token::RightParen)),
         b'*' => Some((1, Token::Asterisk)),
         b',' => Some((1, Token::Comma)),
+        b'.' => {
+            if input.len() >= 2 && input[1].is_ascii_digit() {
+                let (len, valid) = len_float(input);
+                if valid {
+                    Some((len, Token::FloatLiteral(&input[..len])))
+                } else {
+                    Some((len, Token::Illegal))
+                }
+            } else {
+                Some((1, Token::Dot))
+            }
+        }
         b';' => Some((1, Token::Semicolon)),
         b'<' => {
             if input.len() >= 2 {
@@ -161,18 +176,24 @@ pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
             }
         }
         CHAR_DIGIT => {
-            let mut value = (input[0] - b'0') as i64;
+            // TODO: support hexadecimal.
             let mut len = 1;
-            for &byte in input.iter().skip(1) {
-                match CHAR_LOOKUP_TABLE[byte as usize] {
-                    CHAR_DIGIT => {
-                        value = value * 10 + (byte - b'0') as i64;
-                        len += 1;
-                    }
-                    _ => break,
+            for &byte in input.iter().skip(len) {
+                // NOTE: u8::is_ascii_digit() is faster than CHAR_LOOKUP_TABLE.
+                if byte.is_ascii_digit() {
+                    len += 1;
+                } else {
+                    break;
                 }
             }
-            Some((len, Token::Integer(value)))
+            let (l, valid) = len_float(&input[len..]);
+            if !valid {
+                Some((len + l, Token::Illegal))
+            } else if l == 0 {
+                Some((len, Token::IntegerLiteral(&input[..len])))
+            } else {
+                Some((len + l, Token::FloatLiteral(&input[..len + l])))
+            }
         }
         CHAR_INVALID => Some((1, Token::Illegal)),
         c => {
@@ -191,6 +212,49 @@ fn len_identifier(input_bytes: &[u8]) -> usize {
     input_bytes.len()
 }
 
+fn len_float(input: &[u8]) -> (usize, bool) {
+    let mut len = 0;
+    if !input.is_empty() && input[0] == b'.' {
+        len += 1;
+        for &byte in input.iter().skip(len) {
+            if byte.is_ascii_digit() {
+                len += 1;
+            } else {
+                break;
+            }
+        }
+    }
+    if input.len() > len && (input[len] == b'e' || input[len] == b'E') {
+        len += 1;
+        let mut iter = input.iter().skip(len);
+        let Some(&byte) = iter.next() else {
+            return (len, false);
+        };
+        let mut byte = byte;
+        if byte == b'+' || byte == b'-' {
+            len += 1;
+            if let Some(&b) = iter.next() {
+                byte = b;
+            } else {
+                byte = 0;
+            };
+        }
+        if byte.is_ascii_digit() {
+            len += 1;
+        } else {
+            return (len, false);
+        }
+        for &byte in iter {
+            if byte.is_ascii_digit() {
+                len += 1;
+            } else {
+                break;
+            }
+        }
+    }
+    (len, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +266,7 @@ mod tests {
             (')', Token::RightParen),
             ('*', Token::Asterisk),
             (',', Token::Comma),
+            ('.', Token::Dot),
             (';', Token::Semicolon),
         ] {
             let input = format!("{c}");
@@ -217,6 +282,92 @@ mod tests {
         assert_eq!(get_token(b" "), Some((1, Token::Space)));
         assert_eq!(get_token(b"     a"), Some((5, Token::Space)));
         assert_eq!(get_token(b"     "), Some((5, Token::Space)));
+    }
+
+    #[test]
+    fn test_integer() {
+        let mut test_cases = Vec::new();
+        for i in 0..=1000 {
+            test_cases.push(i.to_string());
+        }
+        for s in [
+            "1234567890",
+            "00",
+            "001",
+            "9223372036854775807",
+            "9223372036854775808",
+            "99999999999999999999",
+        ] {
+            test_cases.push(s.to_string());
+        }
+        for literal in test_cases {
+            assert_eq!(
+                get_token(literal.as_bytes()),
+                Some((literal.len(), Token::IntegerLiteral(literal.as_bytes()))),
+                "literal: {}",
+                literal
+            );
+            let input = format!("{literal}abc ");
+            assert_eq!(
+                get_token(input.as_bytes()),
+                Some((literal.len(), Token::IntegerLiteral(literal.as_bytes()))),
+                "input: {}",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_float() {
+        for literal in [
+            "0.1",
+            "0.01",
+            "00.1",
+            "0.1234567890",
+            "1.",
+            "0.",
+            ".0",
+            ".0123456789",
+            "10e1",
+            "10e+2",
+            "10e-3",
+            "00e1",
+            "01e+2",
+            "0.1e-3",
+            "0.20e4",
+            ".1e5",
+            ".2e+6",
+            ".34567e7",
+            "1.e5",
+            "2e0123456789",
+        ] {
+            assert_eq!(
+                get_token(literal.as_bytes()),
+                Some((literal.len(), Token::FloatLiteral(literal.as_bytes()))),
+                "literal: {}",
+                literal
+            );
+            let input = format!("{literal}abc ");
+            assert_eq!(
+                get_token(input.as_bytes()),
+                Some((literal.len(), Token::FloatLiteral(literal.as_bytes()))),
+                "input: {}",
+                input
+            );
+        }
+        assert_eq!(get_token(b"0.1.2"), Some((3, Token::FloatLiteral(b"0.1"))));
+    }
+
+    #[test]
+    fn test_numeric_failure() {
+        assert_eq!(get_token(b"0.1e"), Some((4, Token::Illegal)));
+        assert_eq!(get_token(b"0.1ee"), Some((4, Token::Illegal)));
+        assert_eq!(get_token(b"0.1e+"), Some((5, Token::Illegal)));
+        assert_eq!(get_token(b"0.1e+e"), Some((5, Token::Illegal)));
+        assert_eq!(get_token(b"0.1e-"), Some((5, Token::Illegal)));
+        assert_eq!(get_token(b"0.1e-e"), Some((5, Token::Illegal)));
+        assert_eq!(get_token(b".e1"), Some((1, Token::Dot)));
+        assert_eq!(get_token(b"e1"), Some((2, Token::Identifier(b"e1"))));
     }
 
     #[test]
@@ -409,7 +560,7 @@ mod tests {
                     Token::Space,
                     Token::Identifier(b"col1"),
                     Token::Eq,
-                    Token::Integer(10),
+                    Token::IntegerLiteral("10".as_bytes()),
                     Token::Semicolon,
                 ],
             ),
