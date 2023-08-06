@@ -286,13 +286,13 @@ impl CaseInsensitiveBytes<'_> {
 
 impl<'a> From<&'a [u8]> for CaseInsensitiveBytes<'a> {
     fn from(bytes: &'a [u8]) -> Self {
-        CaseInsensitiveBytes(bytes)
+        Self(bytes)
     }
 }
 
 impl<'a> From<&'a Vec<u8>> for CaseInsensitiveBytes<'a> {
     fn from(bytes: &'a Vec<u8>) -> Self {
-        CaseInsensitiveBytes(&bytes[..])
+        Self(&bytes[..])
     }
 }
 
@@ -314,6 +314,92 @@ impl Hash for CaseInsensitiveBytes<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         for b in self.0.iter() {
             state.write_u8(UPPER_TO_LOWER[*b as usize]);
+        }
+    }
+}
+
+/// A wrapper for bytes which may be quoted string.
+///
+/// The quoted
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+pub struct MaybeQuotedBytes<'a>(&'a [u8]);
+
+impl MaybeQuotedBytes<'_> {
+    /// Copy the dequoted text to newly allocated Vec<u8>.
+    ///
+    /// The double delimiter in the quoted text will be converted to single.
+    ///
+    /// If the text is not quoted, the returned Vec<u8> is the same as the
+    /// original one.
+    pub fn dequote(&self) -> Vec<u8> {
+        match self.0.first() {
+            Some(&b'\'') | Some(&b'"') | Some(&b'`') => {
+                let delimiter = self.0[0];
+                assert!(self.0.len() >= 2);
+                assert_eq!(self.0[self.0.len() - 1], delimiter);
+                let mut result = Vec::with_capacity(self.0.len() - 2);
+                let mut iter = self.0[1..self.0.len() - 1].iter();
+                while let Some(&b) = iter.next() {
+                    if b == delimiter {
+                        let next = iter.next();
+                        assert_eq!(*next.unwrap(), delimiter);
+                    }
+                    result.push(b);
+                }
+                result
+            }
+            _ => self.0.to_vec(),
+        }
+    }
+
+    pub fn dequote_iter(&self) -> DequotedIter<'_> {
+        let delimiter = self
+            .0
+            .first()
+            .map(|v| match v {
+                b'\'' | b'"' | b'`' => *v,
+                _ => 0,
+            })
+            .unwrap_or(0);
+        let buf = if delimiter != 0 {
+            &self.0[1..self.0.len() - 1]
+        } else {
+            self.0
+        };
+        DequotedIter {
+            iter: buf.iter(),
+            delimiter,
+        }
+    }
+
+    pub fn raw(&self) -> &[u8] {
+        self.0
+    }
+}
+
+impl<'a> From<&'a [u8]> for MaybeQuotedBytes<'a> {
+    fn from(bytes: &'a [u8]) -> Self {
+        Self(bytes)
+    }
+}
+
+pub struct DequotedIter<'a> {
+    iter: std::slice::Iter<'a, u8>,
+    delimiter: u8,
+}
+
+impl<'a> Iterator for DequotedIter<'a> {
+    type Item = &'a u8;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(b) = self.iter.next() {
+            if *b == self.delimiter {
+                self.iter.next()
+            } else {
+                Some(b)
+            }
+        } else {
+            None
         }
     }
 }
@@ -514,6 +600,142 @@ mod tests {
         // If the other part is not lower case, it always returns false.
         assert!(
             !CaseInsensitiveBytes::from("abc".as_bytes()).equal_to_lower_bytes("Abc".as_bytes())
+        );
+    }
+
+    #[test]
+    fn test_dequote() {
+        for delimiter in ['\'', '"', '`'] {
+            let input = format!("{}abc{}", delimiter, delimiter);
+            assert_eq!(
+                &MaybeQuotedBytes::from(input.as_bytes()).dequote(),
+                b"abc",
+                "input: {}",
+                input
+            );
+
+            let input = format!("{}{}", delimiter, delimiter);
+            assert_eq!(
+                &MaybeQuotedBytes::from(input.as_bytes()).dequote(),
+                b"",
+                "input: {}",
+                input
+            );
+
+            let input = format!("{}abc{}{}def{}", delimiter, delimiter, delimiter, delimiter);
+            let output = format!("abc{}def", delimiter);
+            assert_eq!(
+                &MaybeQuotedBytes::from(input.as_bytes()).dequote(),
+                output.as_bytes(),
+                "input: {}",
+                input
+            );
+
+            let input = format!("{}{}{}{}", delimiter, delimiter, delimiter, delimiter);
+            let output = format!("{}", delimiter);
+            assert_eq!(
+                &MaybeQuotedBytes::from(input.as_bytes()).dequote(),
+                output.as_bytes(),
+                "input: {}",
+                input
+            );
+
+            let input = format!(
+                "{}{}{}{}{}{}",
+                delimiter, delimiter, delimiter, delimiter, delimiter, delimiter
+            );
+            let output = format!("{}{}", delimiter, delimiter);
+            assert_eq!(
+                &MaybeQuotedBytes::from(input.as_bytes()).dequote(),
+                output.as_bytes(),
+                "input: {}",
+                input
+            );
+        }
+
+        assert_eq!(&MaybeQuotedBytes::from(b"abc".as_slice()).dequote(), b"abc");
+        assert_eq!(&MaybeQuotedBytes::from(b"".as_slice()).dequote(), b"");
+    }
+
+    #[test]
+    fn test_dequote_iter() {
+        for delimiter in ['\'', '"', '`'] {
+            let input = format!("{}abc{}", delimiter, delimiter);
+            assert_eq!(
+                MaybeQuotedBytes::from(input.as_bytes())
+                    .dequote_iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                vec![b'a', b'b', b'c'],
+                "input: {}",
+                input
+            );
+
+            let input = format!("{}{}", delimiter, delimiter);
+            assert_eq!(
+                MaybeQuotedBytes::from(input.as_bytes())
+                    .dequote_iter()
+                    .collect::<Vec<_>>()
+                    .len(),
+                0,
+                "input: {}",
+                input
+            );
+
+            let input = format!("{}abc{}{}def{}", delimiter, delimiter, delimiter, delimiter);
+            let output = format!("abc{}def", delimiter);
+            assert_eq!(
+                MaybeQuotedBytes::from(input.as_bytes())
+                    .dequote_iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                output.as_bytes(),
+                "input: {}",
+                input
+            );
+
+            let input = format!("{}{}{}{}", delimiter, delimiter, delimiter, delimiter);
+            let output = format!("{}", delimiter);
+            assert_eq!(
+                MaybeQuotedBytes::from(input.as_bytes())
+                    .dequote_iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                output.as_bytes(),
+                "input: {}",
+                input
+            );
+
+            let input = format!(
+                "{}{}{}{}{}{}",
+                delimiter, delimiter, delimiter, delimiter, delimiter, delimiter
+            );
+            let output = format!("{}{}", delimiter, delimiter);
+            assert_eq!(
+                MaybeQuotedBytes::from(input.as_bytes())
+                    .dequote_iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                output.as_bytes(),
+                "input: {}",
+                input
+            );
+        }
+
+        assert_eq!(
+            MaybeQuotedBytes::from(b"abc".as_slice())
+                .dequote_iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![b'a', b'b', b'c']
+        );
+        assert_eq!(
+            MaybeQuotedBytes::from(b"".as_slice())
+                .dequote_iter()
+                .copied()
+                .collect::<Vec<_>>()
+                .len(),
+            0
         );
     }
 }
