@@ -318,6 +318,135 @@ fn test_select_filter() {
 }
 
 #[test]
+fn test_select_filter_eq() {
+    let file = create_sqlite_database(&[
+        "CREATE TABLE example(col1, col2, col3);",
+        "INSERT INTO example(col1, col2, col3) VALUES ('hello', 2.0, 3);",
+        // TODO: col2 = 2 integer?
+        "INSERT INTO example(col1, col2, col3) VALUES ('world', 2.0, 9);",
+        "INSERT INTO example(col1, col2, col3) VALUES ('hello', 5.0, 9);",
+    ]);
+
+    let mut conn = Connection::open(file.path()).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT rowid, col1 FROM example WHERE col1 == 'hello';")
+        .unwrap();
+    let mut rows = stmt.execute().unwrap();
+
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns.get(0), &Value::Integer(1));
+    assert_eq!(columns.get(1), &Value::Text(b"hello"));
+    drop(row);
+
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns.get(0), &Value::Integer(3));
+    assert_eq!(columns.get(1), &Value::Text(b"hello"));
+    drop(row);
+
+    assert!(rows.next_row().unwrap().is_none());
+
+    let mut stmt = conn
+        .prepare("SELECT rowid, col2 FROM example WHERE col2 = 2.0;")
+        .unwrap();
+    let mut rows = stmt.execute().unwrap();
+
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns.get(0), &Value::Integer(1));
+    assert_eq!(columns.get(1), &Value::Real(2.0));
+    drop(row);
+
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns.get(0), &Value::Integer(2));
+    assert_eq!(columns.get(1), &Value::Real(2.0));
+    drop(row);
+
+    assert!(rows.next_row().unwrap().is_none());
+
+    let mut stmt = conn
+        .prepare("SELECT rowid, col3 FROM example WHERE col3 == 9;")
+        .unwrap();
+    let mut rows = stmt.execute().unwrap();
+
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns.get(0), &Value::Integer(2));
+    assert_eq!(columns.get(1), &Value::Integer(9));
+    drop(row);
+
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns.get(0), &Value::Integer(3));
+    assert_eq!(columns.get(1), &Value::Integer(9));
+    drop(row);
+
+    assert!(rows.next_row().unwrap().is_none());
+}
+
+#[test]
+fn test_select_filter_ne() {
+    let file = create_sqlite_database(&[
+        "CREATE TABLE example(col1, col2, col3);",
+        "INSERT INTO example(col1, col2, col3) VALUES ('hello', 2.0, 3);",
+        // TODO: col2 = 2 integer?
+        "INSERT INTO example(col1, col2, col3) VALUES ('world', 2.0, 9);",
+        "INSERT INTO example(col1, col2, col3) VALUES ('hello', 5.0, 9);",
+    ]);
+
+    let mut conn = Connection::open(file.path()).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT rowid, col1 FROM example WHERE col1 != 'hello';")
+        .unwrap();
+    let mut rows = stmt.execute().unwrap();
+
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns.get(0), &Value::Integer(2));
+    assert_eq!(columns.get(1), &Value::Text(b"world"));
+    drop(row);
+
+    assert!(rows.next_row().unwrap().is_none());
+
+    let mut stmt = conn
+        .prepare("SELECT rowid, col2 FROM example WHERE col2 != 2.0;")
+        .unwrap();
+    let mut rows = stmt.execute().unwrap();
+
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns.get(0), &Value::Integer(3));
+    assert_eq!(columns.get(1), &Value::Real(5.0));
+    drop(row);
+
+    assert!(rows.next_row().unwrap().is_none());
+
+    let mut stmt = conn
+        .prepare("SELECT rowid, col3 FROM example WHERE col3 != 9;")
+        .unwrap();
+    let mut rows = stmt.execute().unwrap();
+
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns.get(0), &Value::Integer(1));
+    assert_eq!(columns.get(1), &Value::Integer(3));
+    drop(row);
+
+    assert!(rows.next_row().unwrap().is_none());
+}
+
+#[test]
 fn test_select_filter_with_rowid() {
     let file = create_sqlite_database(&[
         "CREATE TABLE example(col);",
