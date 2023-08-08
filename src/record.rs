@@ -88,11 +88,18 @@ impl SerialType {
                 )
             }
             6 => Value::Integer(i64::from_be_bytes(buf[..8].try_into()?)),
-            7 => Value::Real(f64::from_be_bytes(buf[..8].try_into()?)),
+            7 => {
+                let f = f64::from_be_bytes(buf[..8].try_into()?);
+                if f.is_nan() {
+                    Value::Null
+                } else {
+                    Value::Real(f)
+                }
+            }
             8 => Value::Integer(0),
             9 => Value::Integer(1),
             10 | 11 => {
-                unimplemented!("reserved record is not implemented");
+                bail!("reserved record is not implemented");
             }
             n => {
                 let size = ((n - 12) >> 1) as usize;
@@ -199,6 +206,7 @@ pub fn parse_record_header(payload: &BtreePayload) -> anyhow::Result<Vec<(Serial
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     use crate::cursor::BtreeCursor;
@@ -296,5 +304,26 @@ mod tests {
         let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
         let mut record = Record::parse(&payload).unwrap();
         assert_eq!(record.get(0).unwrap(), Value::Real(0.5));
+    }
+
+    #[test]
+    fn test_parse_real() {
+        assert_eq!(
+            SerialType(7).parse(0_f64.to_be_bytes().as_slice()).unwrap(),
+            Value::Real(0.0)
+        );
+        assert_eq!(
+            SerialType(7)
+                .parse(1.1_f64.to_be_bytes().as_slice())
+                .unwrap(),
+            Value::Real(1.1)
+        );
+        // NaN
+        assert_eq!(
+            SerialType(7)
+                .parse(f64::NAN.to_be_bytes().as_slice())
+                .unwrap(),
+            Value::Null
+        );
     }
 }
