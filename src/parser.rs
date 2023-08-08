@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::record::Value;
 use crate::token::get_token_no_space;
 use crate::token::Token;
 use crate::utils::parse_float_literal;
 use crate::utils::parse_integer_literal;
 use crate::utils::CaseInsensitiveBytes;
 use crate::utils::MaybeQuotedBytes;
+use crate::value::Value;
 
 pub type Error = &'static str;
 pub type Result<T> = std::result::Result<T, Error>;

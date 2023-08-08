@@ -22,6 +22,7 @@ mod schema;
 pub mod test_utils;
 mod token;
 mod utils;
+mod value;
 
 use std::fs::File;
 use std::os::unix::fs::FileExt;
@@ -44,12 +45,12 @@ use crate::parser::ResultColumn;
 use crate::record::parse_record_header;
 use crate::record::Record;
 use crate::record::SerialType;
-pub use crate::record::Value;
 use crate::schema::ColumnNumber;
 use crate::schema::Schema;
 use crate::schema::Table;
 use crate::token::get_token_no_space;
 use crate::token::Token;
+pub use crate::value::Value;
 
 const SQLITE_MAX_PAGE_SIZE: u32 = 65536;
 pub const DATABASE_HEADER_SIZE: usize = 100;
