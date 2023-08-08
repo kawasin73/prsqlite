@@ -18,7 +18,6 @@ use crate::utils::parse_float_literal;
 use crate::utils::parse_integer_literal;
 use crate::utils::CaseInsensitiveBytes;
 use crate::utils::MaybeQuotedBytes;
-use crate::value::Value;
 
 pub type Error = &'static str;
 pub type Result<T> = std::result::Result<T, Error>;
@@ -331,7 +330,9 @@ pub enum Expr<'a> {
         left: Box<Expr<'a>>,
         right: Box<Expr<'a>>,
     },
-    LiteralValue(Value<'a>),
+    Integer(i64),
+    Real(f64),
+    Text(MaybeQuotedBytes<'a>),
 }
 
 fn parse_expr(input: &[u8]) -> Result<(usize, Expr)> {
@@ -341,14 +342,13 @@ fn parse_expr(input: &[u8]) -> Result<(usize, Expr)> {
         Some((n, Token::Integer(buf))) => {
             let v = parse_integer_literal(buf);
             if v < 0 {
-                (n, Expr::LiteralValue(Value::Real(parse_float_literal(buf))))
+                (n, Expr::Real(parse_float_literal(buf)))
             } else {
-                (n, Expr::LiteralValue(Value::Integer(v)))
+                (n, Expr::Integer(v))
             }
         }
-        Some((n, Token::Float(buf))) => {
-            (n, Expr::LiteralValue(Value::Real(parse_float_literal(buf))))
-        }
+        Some((n, Token::Float(buf))) => (n, Expr::Real(parse_float_literal(buf))),
+        Some((n, Token::String(text))) => (n, Expr::Text(text)),
         _ => return Err("no expr"),
     };
     let input = &input[n..];
@@ -545,7 +545,7 @@ mod tests {
             Expr::BinaryOperator {
                 operator: BinaryOperator::Eq,
                 left: Box::new(Expr::Column(b"id".as_slice().into())),
-                right: Box::new(Expr::LiteralValue(Value::Integer(5))),
+                right: Box::new(Expr::Integer(5)),
             }
         );
     }
@@ -562,58 +562,43 @@ mod tests {
         // Parse integer
         assert_eq!(
             parse_expr(b"123456789a").unwrap(),
-            (9, Expr::LiteralValue(Value::Integer(123456789)))
+            (9, Expr::Integer(123456789))
         );
         assert_eq!(
             parse_expr(b"00123456789a").unwrap(),
-            (11, Expr::LiteralValue(Value::Integer(123456789)))
+            (11, Expr::Integer(123456789))
         );
         assert_eq!(
             parse_expr(b"00000000000000000001a").unwrap(),
-            (20, Expr::LiteralValue(Value::Integer(1)))
+            (20, Expr::Integer(1))
         );
         assert_eq!(
             parse_expr(b"9223372036854775807").unwrap(),
-            (19, Expr::LiteralValue(Value::Integer(9223372036854775807)))
+            (19, Expr::Integer(9223372036854775807))
         );
         assert_eq!(
             parse_expr(b"000000000000000000009223372036854775807").unwrap(),
-            (39, Expr::LiteralValue(Value::Integer(9223372036854775807)))
+            (39, Expr::Integer(9223372036854775807))
         );
         // integer -> float fallback
         assert_eq!(
             parse_expr(b"9223372036854775808").unwrap(),
-            (19, Expr::LiteralValue(Value::Real(9223372036854775808.0)))
+            (19, Expr::Real(9223372036854775808.0))
         );
         assert_eq!(
             parse_expr(b"9999999999999999999").unwrap(),
-            (19, Expr::LiteralValue(Value::Real(9999999999999999999.0)))
+            (19, Expr::Real(9999999999999999999.0))
         );
         assert_eq!(
             parse_expr(b"99999999999999999999a").unwrap(),
-            (20, Expr::LiteralValue(Value::Real(99999999999999999999.0)))
+            (20, Expr::Real(99999999999999999999.0))
         );
 
         // Parse float
-        assert_eq!(
-            parse_expr(b".1").unwrap(),
-            (2, Expr::LiteralValue(Value::Real(0.1)))
-        );
-        assert_eq!(
-            parse_expr(b"1.").unwrap(),
-            (2, Expr::LiteralValue(Value::Real(1.0)))
-        );
-        assert_eq!(
-            parse_expr(b"1.01").unwrap(),
-            (4, Expr::LiteralValue(Value::Real(1.01)))
-        );
-        assert_eq!(
-            parse_expr(b"1e1").unwrap(),
-            (3, Expr::LiteralValue(Value::Real(10.0)))
-        );
-        assert_eq!(
-            parse_expr(b"1e-1").unwrap(),
-            (4, Expr::LiteralValue(Value::Real(0.1)))
-        );
+        assert_eq!(parse_expr(b".1").unwrap(), (2, Expr::Real(0.1)));
+        assert_eq!(parse_expr(b"1.").unwrap(), (2, Expr::Real(1.0)));
+        assert_eq!(parse_expr(b"1.01").unwrap(), (4, Expr::Real(1.01)));
+        assert_eq!(parse_expr(b"1e1").unwrap(), (3, Expr::Real(10.0)));
+        assert_eq!(parse_expr(b"1e-1").unwrap(), (4, Expr::Real(0.1)));
     }
 }

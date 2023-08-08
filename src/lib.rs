@@ -176,7 +176,7 @@ impl Connection {
         }) = &selection
         {
             if let Selection::Column(column_number) = left.as_ref() {
-                if let Selection::LiteralValue(key) = right.as_ref() {
+                if let Selection::Integer(key) = right.as_ref() {
                     let mut next_index = table.indexes.as_ref();
                     while let Some(index) = next_index {
                         if index.columns[0] == *column_number {
@@ -217,16 +217,17 @@ enum Selection {
         left: Box<Selection>,
         right: Box<Selection>,
     },
-    LiteralValue(i64),
+    Integer(i64),
+    Real(f64),
+    Text(Vec<u8>),
 }
 
 impl Selection {
     fn from(expr: Expr, table: &Table) -> anyhow::Result<Self> {
         match expr {
-            Expr::LiteralValue(value) => match value {
-                Value::Integer(i) => Ok(Self::LiteralValue(i)),
-                _ => bail!("unsupported literal value: {:?}", value),
-            },
+            Expr::Integer(i) => Ok(Self::Integer(i)),
+            Expr::Real(f) => Ok(Self::Real(f)),
+            Expr::Text(text) => Ok(Self::Text(text.dequote())),
             Expr::BinaryOperator {
                 operator,
                 left,
@@ -249,15 +250,9 @@ impl Selection {
         }
     }
 
-    fn execute(&self, row: &RowRef) -> anyhow::Result<i64> {
+    fn execute<'a>(&'a self, row: &'a RowRef) -> anyhow::Result<Value<'a>> {
         match self {
-            Self::Column(idx) => {
-                let value = row.get(idx)?;
-                match value {
-                    Value::Integer(i) => Ok(i),
-                    _ => bail!("invalid value for selection: {:?}", value),
-                }
-            }
+            Self::Column(idx) => row.get(idx),
             Self::BinaryOperator {
                 operator,
                 left,
@@ -265,21 +260,35 @@ impl Selection {
             } => {
                 let left = left.execute(row)?;
                 let right = right.execute(row)?;
-                let result = match operator {
-                    BinaryOperator::Eq => left == right,
-                    BinaryOperator::Ne => left != right,
-                    BinaryOperator::Lt => left < right,
-                    BinaryOperator::Le => left <= right,
-                    BinaryOperator::Gt => left > right,
-                    BinaryOperator::Ge => left >= right,
+                let result = if operator == &BinaryOperator::Eq {
+                    left == right
+                } else if operator == &BinaryOperator::Ne {
+                    left != right
+                } else {
+                    let Value::Integer(left) = left else {
+                        bail!("invalid value for selection: {:?}", left);
+                    };
+                    let Value::Integer(right) = right else {
+                        bail!("invalid value for selection: {:?}", left);
+                    };
+                    match operator {
+                        BinaryOperator::Eq => left == right,
+                        BinaryOperator::Ne => left != right,
+                        BinaryOperator::Lt => left < right,
+                        BinaryOperator::Le => left <= right,
+                        BinaryOperator::Gt => left > right,
+                        BinaryOperator::Ge => left >= right,
+                    }
                 };
                 if result {
-                    Ok(1)
+                    Ok(Value::Integer(1))
                 } else {
-                    Ok(0)
+                    Ok(Value::Integer(0))
                 }
             }
-            Self::LiteralValue(value) => Ok(*value),
+            Self::Integer(value) => Ok(Value::Integer(*value)),
+            Self::Real(value) => Ok(Value::Real(*value)),
+            Self::Text(value) => Ok(Value::Text(value)),
         }
     }
 }
@@ -307,12 +316,8 @@ impl<'conn> Statement<'conn> {
                 left,
                 right,
             }) => match (left.as_ref(), right.as_ref()) {
-                (Selection::Column(ColumnNumber::RowId), Selection::LiteralValue(value)) => {
-                    Some(*value)
-                }
-                (Selection::LiteralValue(value), Selection::Column(ColumnNumber::RowId)) => {
-                    Some(*value)
-                }
+                (Selection::Column(ColumnNumber::RowId), Selection::Integer(value)) => Some(*value),
+                (Selection::Integer(value), Selection::Column(ColumnNumber::RowId)) => Some(*value),
                 _ => None,
             },
             _ => None,
@@ -432,7 +437,7 @@ impl<'conn> Rows<'conn> {
                     use_local_buffer,
                     content_offset,
                 };
-                if selection.execute(&column_value_loader)? == 0 {
+                if selection.execute(&column_value_loader)? == Value::Integer(0) {
                     continue;
                 }
             }
