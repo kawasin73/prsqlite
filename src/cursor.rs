@@ -490,8 +490,8 @@ mod tests {
     use super::*;
 
     use crate::record::Record;
-    use crate::record::Value;
     use crate::test_utils::*;
+    use crate::value::Value;
 
     #[test]
     fn test_btree_cursor_single_table_page() {

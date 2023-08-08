@@ -13,36 +13,13 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
-use std::io::Write;
 
 use anyhow::bail;
 use anyhow::Context;
 
 use crate::cursor::BtreePayload;
 use crate::utils::parse_varint;
-
-// TODO: Own the buffer of Text and Blob.
-#[derive(Debug, PartialEq)]
-pub enum Value<'a> {
-    Null,
-    Integer(i64),
-    Real(f64),
-    Blob(&'a [u8]),
-    // TODO: any text is not guaranteed to be valid UTF-8.
-    Text(&'a str),
-}
-
-impl<'a> Value<'a> {
-    pub fn display<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
-        match self {
-            Value::Null => Ok(()),
-            Value::Integer(i) => write!(w, "{i}"),
-            Value::Real(d) => write!(w, "{d}"),
-            Value::Blob(b) => w.write_all(b),
-            Value::Text(t) => write!(w, "{t}"),
-        }
-    }
-}
+use crate::value::Value;
 
 pub fn compare_record(keys: &[i64], payload: &BtreePayload) -> anyhow::Result<Ordering> {
     let mut record = Record::parse(payload)?;
@@ -81,34 +58,37 @@ impl SerialType {
     }
 
     pub fn parse<'a>(&self, buf: &'a [u8]) -> anyhow::Result<Value<'a>> {
-        if buf.len() < self.content_size() as usize {
-            bail!(
-                "buffer size {} is smaller than content size {}",
-                buf.len(),
-                self.content_size()
-            );
-        }
         let v = match self.0 {
             0 => Value::Null,
-            1 => Value::Integer(i8::from_be_bytes(buf[..1].try_into().unwrap()) as i64),
-            2 => Value::Integer(i16::from_be_bytes(buf[..2].try_into().unwrap()) as i64),
+            1 => Value::Integer(i8::from_be_bytes(buf[..1].try_into()?) as i64),
+            2 => Value::Integer(i16::from_be_bytes(buf[..2].try_into()?) as i64),
             // TODO: use std::mem::transmute.
-            3 => Value::Integer(
-                ((buf[0] as i64) << 56 | (buf[1] as i64) << 48 | (buf[2] as i64) << 40) >> 40,
-            ),
-            4 => Value::Integer(i32::from_be_bytes(buf[..4].try_into().unwrap()) as i64),
+            3 => {
+                if buf.len() < 3 {
+                    bail!("buffer size {} does not match integer 3", buf.len());
+                }
+                Value::Integer(
+                    ((buf[0] as i64) << 56 | (buf[1] as i64) << 48 | (buf[2] as i64) << 40) >> 40,
+                )
+            }
+            4 => Value::Integer(i32::from_be_bytes(buf[..4].try_into()?) as i64),
             // TODO: use std::mem::transmute.
-            5 => Value::Integer(
-                ((buf[0] as i64) << 56
-                    | (buf[1] as i64) << 48
-                    | (buf[2] as i64) << 40
-                    | (buf[3] as i64) << 32
-                    | (buf[4] as i64) << 24
-                    | (buf[5] as i64) << 16)
-                    >> 16,
-            ),
-            6 => Value::Integer(i64::from_be_bytes(buf[..8].try_into().unwrap())),
-            7 => Value::Real(f64::from_be_bytes(buf[..8].try_into().unwrap())),
+            5 => {
+                if buf.len() < 6 {
+                    bail!("buffer size {} does not match integer 6", buf.len());
+                }
+                Value::Integer(
+                    ((buf[0] as i64) << 56
+                        | (buf[1] as i64) << 48
+                        | (buf[2] as i64) << 40
+                        | (buf[3] as i64) << 32
+                        | (buf[4] as i64) << 24
+                        | (buf[5] as i64) << 16)
+                        >> 16,
+                )
+            }
+            6 => Value::Integer(i64::from_be_bytes(buf[..8].try_into()?)),
+            7 => Value::Real(f64::from_be_bytes(buf[..8].try_into()?)),
             8 => Value::Integer(0),
             9 => Value::Integer(1),
             10 | 11 => {
@@ -116,11 +96,18 @@ impl SerialType {
             }
             n => {
                 let size = ((n - 12) >> 1) as usize;
+                if buf.len() < size {
+                    bail!(
+                        "buffer size {} is smaller than content size {}",
+                        buf.len(),
+                        size
+                    );
+                }
                 let buf = &buf[..size];
                 if n & 1 == 0 {
                     Value::Blob(buf)
                 } else {
-                    Value::Text(std::str::from_utf8(buf).context("parse text")?)
+                    Value::Text(buf)
                 }
             }
         };
@@ -298,7 +285,7 @@ mod tests {
         let mut record = Record::parse(&payload).unwrap();
         assert_eq!(record.get(0).unwrap(), Value::Integer(0));
         assert_eq!(record.get(1).unwrap(), Value::Integer(1));
-        assert_eq!(record.get(2).unwrap(), Value::Text("hello"));
+        assert_eq!(record.get(2).unwrap(), Value::Text(b"hello"));
         assert_eq!(
             record.get(3).unwrap(),
             Value::Blob(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef])

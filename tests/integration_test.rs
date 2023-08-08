@@ -60,7 +60,7 @@ fn test_select_all_from_table() {
     assert_eq!(columns.len(), 3);
     assert_eq!(columns.get(0), &Value::Integer(10000));
     assert_eq!(columns.get(1), &Value::Null);
-    assert_eq!(columns.get(2), &Value::Text("hello"));
+    assert_eq!(columns.get(2), &Value::Text(b"hello"));
     assert_eq!(columns.get(3), &Value::Null);
     drop(row);
 
@@ -233,21 +233,21 @@ fn test_select_primary_key() {
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(1));
-    assert_eq!(columns.get(1), &Value::Text("10"));
+    assert_eq!(columns.get(1), &Value::Text(b"10"));
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(3));
-    assert_eq!(columns.get(1), &Value::Text("30"));
+    assert_eq!(columns.get(1), &Value::Text(b"30"));
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(5));
-    assert_eq!(columns.get(1), &Value::Text("20"));
+    assert_eq!(columns.get(1), &Value::Text(b"20"));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -361,7 +361,7 @@ fn test_select_filter_with_primary_key() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Text("20"));
+    assert_eq!(columns.get(0), &Value::Text(b"20"));
     assert_eq!(columns.get(1), &Value::Integer(3));
     drop(row);
     assert!(rows.next_row().unwrap().is_none());
