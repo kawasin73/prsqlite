@@ -30,7 +30,7 @@ static CHAR_LOOKUP_TABLE: [u8; 256] = [
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0x10 - 0x17
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0x18 - 0x1F
     b' ', b'!', 0x04, 0xFF, 0xFF, 0xFF, 0xFF, 0x04, // 0x20 - 0x27
-    b'(', b')', b'*', 0xFF, b',', 0xFF, b'.', 0xFF, // 0x28 - 0x2F
+    b'(', b')', b'*', b'+', b',', b'-', b'.', 0xFF, // 0x28 - 0x2F
     0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, // 0x30 - 0x37
     0x03, 0x03, 0xFF, b';', b'<', b'=', b'>', 0xFF, // 0x38 - 0x3F
     0xFF, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, // 0x40 - 0x47
@@ -75,7 +75,9 @@ pub enum Token<'a> {
     LeftParen,
     RightParen,
     Asterisk,
+    Plus,
     Comma,
+    Minus,
     Dot,
     Semicolon,
     /// Equal to
@@ -132,7 +134,9 @@ pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
         b'(' => Some((1, Token::LeftParen)),
         b')' => Some((1, Token::RightParen)),
         b'*' => Some((1, Token::Asterisk)),
+        b'+' => Some((1, Token::Plus)),
         b',' => Some((1, Token::Comma)),
+        b'-' => Some((1, Token::Minus)),
         b'.' => {
             if input.len() >= 2 && input[1].is_ascii_digit() {
                 let (len, valid) = len_float(input);
@@ -347,7 +351,9 @@ mod tests {
             ('(', Token::LeftParen),
             (')', Token::RightParen),
             ('*', Token::Asterisk),
+            ('+', Token::Plus),
             (',', Token::Comma),
+            ('-', Token::Minus),
             ('.', Token::Dot),
             (';', Token::Semicolon),
         ] {

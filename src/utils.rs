@@ -282,6 +282,34 @@ impl CaseInsensitiveBytes<'_> {
         }
         true
     }
+
+    /// Return whether this contains the `other` case insensitively.
+    ///
+    /// The other must be lower case.
+    pub fn contains_lower_bytes(&self, other: &[u8]) -> bool {
+        if other.is_empty() {
+            return true;
+        } else if self.0.len() < other.len() {
+            return false;
+        }
+
+        'main_loop: for (i, b) in self
+            .0
+            .iter()
+            .take(self.0.len() - other.len() + 1)
+            .enumerate()
+        {
+            if UPPER_TO_LOWER[*b as usize] == other[0] {
+                for (j, other_b) in other.iter().skip(1).enumerate() {
+                    if UPPER_TO_LOWER[self.0[i + 1 + j] as usize] != *other_b {
+                        continue 'main_loop;
+                    }
+                }
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl<'a> From<&'a [u8]> for CaseInsensitiveBytes<'a> {
@@ -636,6 +664,47 @@ mod tests {
         // If the other part is not lower case, it always returns false.
         assert!(
             !CaseInsensitiveBytes::from("abc".as_bytes()).equal_to_lower_bytes("Abc".as_bytes())
+        );
+    }
+
+    #[test]
+    fn test_contains_lower_bytes() {
+        assert!(CaseInsensitiveBytes::from("".as_bytes()).contains_lower_bytes("".as_bytes()));
+        assert!(CaseInsensitiveBytes::from("abc".as_bytes()).contains_lower_bytes("".as_bytes()));
+        assert!(CaseInsensitiveBytes::from("abc".as_bytes()).contains_lower_bytes("a".as_bytes()));
+        assert!(CaseInsensitiveBytes::from("cba".as_bytes()).contains_lower_bytes("a".as_bytes()));
+        assert!(CaseInsensitiveBytes::from("abc".as_bytes()).contains_lower_bytes("abc".as_bytes()));
+        assert!(CaseInsensitiveBytes::from("ABC".as_bytes()).contains_lower_bytes("abc".as_bytes()));
+        assert!(
+            CaseInsensitiveBytes::from("aabc".as_bytes()).contains_lower_bytes("abc".as_bytes())
+        );
+        assert!(
+            CaseInsensitiveBytes::from("aABC".as_bytes()).contains_lower_bytes("abc".as_bytes())
+        );
+        assert!(
+            CaseInsensitiveBytes::from("aaBc".as_bytes()).contains_lower_bytes("abc".as_bytes())
+        );
+        assert!(
+            CaseInsensitiveBytes::from("aabcd".as_bytes()).contains_lower_bytes("abc".as_bytes())
+        );
+        assert!(
+            CaseInsensitiveBytes::from("aABCD".as_bytes()).contains_lower_bytes("abc".as_bytes())
+        );
+
+        assert!(!CaseInsensitiveBytes::from("".as_bytes()).contains_lower_bytes("abc".as_bytes()));
+        assert!(!CaseInsensitiveBytes::from("a".as_bytes()).contains_lower_bytes("abc".as_bytes()));
+        assert!(!CaseInsensitiveBytes::from("ab".as_bytes()).contains_lower_bytes("abc".as_bytes()));
+        assert!(
+            !CaseInsensitiveBytes::from("abd".as_bytes()).contains_lower_bytes("abc".as_bytes())
+        );
+        assert!(
+            !CaseInsensitiveBytes::from("aab".as_bytes()).contains_lower_bytes("abc".as_bytes())
+        );
+        assert!(
+            !CaseInsensitiveBytes::from("aaab".as_bytes()).contains_lower_bytes("abc".as_bytes())
+        );
+        assert!(
+            !CaseInsensitiveBytes::from("aaaa".as_bytes()).contains_lower_bytes("abc".as_bytes())
         );
     }
 

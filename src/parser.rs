@@ -16,12 +16,13 @@ use crate::token::get_token_no_space;
 use crate::token::Token;
 use crate::utils::parse_float_literal;
 use crate::utils::parse_integer_literal;
-use crate::utils::CaseInsensitiveBytes;
 use crate::utils::HexedBytes;
 use crate::utils::MaybeQuotedBytes;
 
 pub type Error = &'static str;
 pub type Result<T> = std::result::Result<T, Error>;
+
+static NULL_BYTES: &[u8] = b"null";
 
 /// CREATE TABLE statement.
 #[derive(Debug, PartialEq, Eq)]
@@ -34,20 +35,8 @@ pub struct CreateTable<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub struct ColumnDef<'a> {
     pub name: MaybeQuotedBytes<'a>,
-    pub data_type: Option<DataType>,
+    pub type_name: Vec<MaybeQuotedBytes<'a>>,
     pub primary_key: bool,
-}
-
-/// Data Type.
-///
-/// https://www.sqlite.org/datatype3.html
-#[derive(Debug, PartialEq, Eq)]
-pub enum DataType {
-    Null,
-    Integer,
-    Real,
-    Text,
-    Blob,
 }
 
 /// Parse CREATE TABLE statement.
@@ -79,6 +68,7 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
 
     let mut columns = Vec::new();
     loop {
+        // Parse ColumnDef.
         let Some((n, Token::Identifier(name))) = get_token_no_space(input) else {
             return Err("no column name");
         };
@@ -86,35 +76,58 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
 
         let (mut n, mut token) = get_token_no_space(input).ok_or("no right paren")?;
         input = &input[n..];
-        let data_type = match token {
-            Token::Null => {
-                (n, token) = get_token_no_space(input).ok_or("no right paren")?;
-                input = &input[n..];
-                Some(DataType::Null)
-            }
-            Token::Identifier(data_type) => {
-                (n, token) = get_token_no_space(input).ok_or("no right paren")?;
-                input = &input[n..];
 
-                // TODO: support affinity parse
-                // TODO: compare the performance of UpperToLowerBytes::equal_to_lower_bytes or
-                // match + [u8;7]
-                let data_type = CaseInsensitiveBytes::from(data_type.raw());
-                let data_type = if data_type.equal_to_lower_bytes(b"integer") {
-                    DataType::Integer
-                } else if data_type.equal_to_lower_bytes(b"real") {
-                    DataType::Real
-                } else if data_type.equal_to_lower_bytes(b"text") {
-                    DataType::Text
-                } else if data_type.equal_to_lower_bytes(b"blob") {
-                    DataType::Blob
-                } else {
-                    return Err("unknown data type");
+        let mut type_name = Vec::new();
+
+        if matches!(token, Token::Null | Token::Identifier(_)) {
+            loop {
+                match token {
+                    Token::Null => {
+                        (n, token) = get_token_no_space(input).ok_or("no right paren")?;
+                        input = &input[n..];
+                        type_name.push(NULL_BYTES.into());
+                    }
+                    Token::Identifier(id) => {
+                        (n, token) = get_token_no_space(input).ok_or("no right paren")?;
+                        input = &input[n..];
+                        type_name.push(id);
+                    }
+                    Token::LeftParen => {
+                        // Just check whether signed numbers are valid and move cursor without
+                        // parsing the number. Signed numbers in a type name has no meanings to type
+                        // affinity.
+                        loop {
+                            (n, token) =
+                                get_token_no_space(input).ok_or("no signed number: first token")?;
+                            input = &input[n..];
+                            if matches!(token, Token::Plus | Token::Minus) {
+                                (n, token) =
+                                    get_token_no_space(input).ok_or("no signed number: number")?;
+                                input = &input[n..];
+                            }
+                            if !matches!(token, Token::Integer(_) | Token::Float(_)) {
+                                return Err("no signed number is not numeric");
+                            }
+                            (n, token) =
+                                get_token_no_space(input).ok_or("no signed number last token")?;
+                            input = &input[n..];
+                            match token {
+                                Token::Comma => continue,
+                                Token::RightParen => {
+                                    (n, token) = get_token_no_space(input)
+                                        .ok_or("no signed number right paren")?;
+                                    input = &input[n..];
+                                    break;
+                                }
+                                _ => return Err("type name not completed"),
+                            }
+                        }
+                        break;
+                    }
+                    _ => break,
                 };
-                Some(data_type)
             }
-            _ => None,
-        };
+        }
 
         let primary_key = if let Token::Primary = token {
             match get_token_no_space(input) {
@@ -133,7 +146,7 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
 
         columns.push(ColumnDef {
             name,
-            data_type,
+            type_name,
             primary_key,
         });
 
@@ -393,35 +406,67 @@ mod tests {
             vec![
                 ColumnDef {
                     name: b"id".as_slice().into(),
-                    data_type: Some(DataType::Integer),
+                    type_name: vec![b"integer".as_slice().into()],
                     primary_key: true,
                 },
                 ColumnDef {
                     name: b"name".as_slice().into(),
-                    data_type: Some(DataType::Text),
+                    type_name: vec![b"text".as_slice().into()],
                     primary_key: false,
                 },
                 ColumnDef {
                     name: b"real".as_slice().into(),
-                    data_type: Some(DataType::Real),
+                    type_name: vec![b"real".as_slice().into()],
                     primary_key: false,
                 },
                 ColumnDef {
                     name: b"\"blob\"".as_slice().into(),
-                    data_type: Some(DataType::Blob),
+                    type_name: vec![b"blob".as_slice().into()],
                     primary_key: false,
                 },
                 ColumnDef {
                     name: b"`empty`".as_slice().into(),
-                    data_type: Some(DataType::Null),
+                    type_name: vec![b"null".as_slice().into()],
                     primary_key: false,
                 },
                 ColumnDef {
                     name: b"no_type".as_slice().into(),
-                    data_type: None,
+                    type_name: vec![],
                     primary_key: false,
                 },
             ]
+        );
+    }
+    #[test]
+    fn test_parse_create_table_type_name() {
+        let input = b"create table foo (col1 type type primary key, col2 Varint(10), col3 [Float](+10), col4 \"test\"(-10.0), col5 null(0), col6 `blob```(1,2))";
+        let (n, create_table) = parse_create_table(input).unwrap();
+        assert_eq!(n, input.len());
+        assert_eq!(create_table.table_name, b"foo".as_slice().into());
+        assert_eq!(create_table.columns.len(), 6);
+        assert_eq!(
+            create_table.columns[0].type_name,
+            vec![b"type".as_slice().into(), b"type".as_slice().into()]
+        );
+        assert_eq!(
+            create_table.columns[1].type_name,
+            vec![b"Varint".as_slice().into()]
+        );
+        assert_eq!(
+            create_table.columns[2].type_name,
+            vec![b"Float".as_slice().into()]
+        );
+        assert_eq!(
+            create_table.columns[3].type_name,
+            vec![b"\"test\"".as_slice().into()]
+        );
+        assert_eq!(
+            create_table.columns[4].type_name,
+            vec![b"null".as_slice().into()]
+        );
+        assert_eq!(
+            create_table.columns[5].type_name,
+            vec![b"`blob```".as_slice().into()]
         );
     }
 
@@ -436,12 +481,12 @@ mod tests {
             vec![
                 ColumnDef {
                     name: b"Id".as_slice().into(),
-                    data_type: None,
+                    type_name: Vec::new(),
                     primary_key: false,
                 },
                 ColumnDef {
                     name: b"Name".as_slice().into(),
-                    data_type: None,
+                    type_name: Vec::new(),
                     primary_key: false,
                 }
             ]
@@ -452,8 +497,6 @@ mod tests {
     fn test_parse_create_table_fail() {
         // no right paren.
         assert!(parse_create_table(b"create table foo (id, name ").is_err());
-        // invalid data_type.
-        assert!(parse_create_table(b"create table foo (id, name invalid)").is_err());
         // primary without key.
         assert!(parse_create_table(b"create table foo (id primary, name)").is_err());
         // key without primary.

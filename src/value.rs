@@ -36,3 +36,15 @@ impl<'a> Value<'a> {
         }
     }
 }
+
+/// Data type affinity.
+///
+/// https://www.sqlite.org/datatype3.html#type_affinity
+#[derive(Debug, PartialEq, Eq)]
+pub enum TypeAffinity {
+    Integer,
+    Text,
+    Blob,
+    Real,
+    Numeric,
+}

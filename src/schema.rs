@@ -24,11 +24,11 @@ use crate::pager::PageId;
 use crate::pager::ROOT_PAGE_ID;
 use crate::parser::parse_create_index;
 use crate::parser::parse_create_table;
-pub use crate::parser::DataType;
 use crate::utils::upper_to_lower;
 use crate::utils::CaseInsensitiveBytes;
 use crate::utils::MaybeQuotedBytes;
 use crate::utils::UPPER_TO_LOWER;
+use crate::value::TypeAffinity;
 use crate::value::Value;
 use crate::Columns;
 use crate::Statement;
@@ -89,27 +89,27 @@ impl Schema {
             columns: vec![
                 Column {
                     name: b"type".to_vec(),
-                    data_type: Some(DataType::Text),
+                    type_affinity: TypeAffinity::Text,
                     primary_key: false,
                 },
                 Column {
                     name: b"name".to_vec(),
-                    data_type: Some(DataType::Text),
+                    type_affinity: TypeAffinity::Text,
                     primary_key: false,
                 },
                 Column {
                     name: b"tbl_name".to_vec(),
-                    data_type: Some(DataType::Text),
+                    type_affinity: TypeAffinity::Text,
                     primary_key: false,
                 },
                 Column {
                     name: b"rootpage".to_vec(),
-                    data_type: Some(DataType::Integer),
+                    type_affinity: TypeAffinity::Integer,
                     primary_key: false,
                 },
                 Column {
                     name: b"sql".to_vec(),
-                    data_type: Some(DataType::Text),
+                    type_affinity: TypeAffinity::Text,
                     primary_key: false,
                 },
             ],
@@ -274,7 +274,7 @@ impl Index {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Column {
     pub name: Vec<u8>,
-    pub data_type: Option<DataType>,
+    pub type_affinity: TypeAffinity,
     pub primary_key: bool,
 }
 
@@ -282,6 +282,38 @@ pub struct Column {
 pub enum ColumnNumber {
     RowId,
     Column(usize),
+}
+
+/// Convert type name (which is a identifier sequence) to type affinity.
+///
+/// https://www.sqlite.org/datatype3.html#determination_of_column_affinity
+fn calc_type_affinity(type_name: &[MaybeQuotedBytes]) -> TypeAffinity {
+    if type_name.is_empty() {
+        return TypeAffinity::Blob;
+    }
+    let mut affinity = TypeAffinity::Numeric;
+    for name in type_name {
+        let data_type = CaseInsensitiveBytes::from(name.raw());
+        if data_type.contains_lower_bytes(b"int") {
+            return TypeAffinity::Integer;
+        } else if data_type.contains_lower_bytes(b"char")
+            || data_type.contains_lower_bytes(b"clob")
+            || data_type.contains_lower_bytes(b"text")
+        {
+            affinity = TypeAffinity::Text;
+        } else if data_type.contains_lower_bytes(b"blob") {
+            if affinity != TypeAffinity::Text {
+                affinity = TypeAffinity::Blob;
+            }
+        } else if affinity == TypeAffinity::Numeric
+            && (data_type.contains_lower_bytes(b"real")
+                || data_type.contains_lower_bytes(b"floa")
+                || data_type.contains_lower_bytes(b"doub"))
+        {
+            affinity = TypeAffinity::Real;
+        }
+    }
+    affinity
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -323,7 +355,7 @@ impl Table {
 
             columns.push(Column {
                 name: column_name,
-                data_type: column_def.data_type,
+                type_affinity: calc_type_affinity(&column_def.type_name),
                 primary_key: column_def.primary_key,
             });
         }
@@ -345,7 +377,7 @@ impl Table {
             .position(|c| CaseInsensitiveBytes::from(&c.name) == column)
         {
             let column = &self.columns[i];
-            if column.primary_key && column.data_type == Some(DataType::Integer) {
+            if column.primary_key && column.type_affinity == TypeAffinity::Integer {
                 Some(ColumnNumber::RowId)
             } else {
                 Some(ColumnNumber::Column(i))
@@ -359,7 +391,7 @@ impl Table {
 
     pub fn all_column_index(&self) -> impl Iterator<Item = ColumnNumber> + '_ {
         self.columns.iter().enumerate().map(|(i, column)| {
-            if column.primary_key && column.data_type == Some(DataType::Integer) {
+            if column.primary_key && column.type_affinity == TypeAffinity::Integer {
                 ColumnNumber::RowId
             } else {
                 ColumnNumber::Column(i)
@@ -464,7 +496,7 @@ mod tests {
     #[test]
     fn parse_table() {
         let (table_name, table) = Table::parse(
-            b"create table example(col, col1 integer primary key, \"col2\", `co``l3`, [col4])",
+            b"create table example(col, col1 integer primary key, \"col2\" text, `co``l3` blob, [col4] real, col5 other)",
             1,
         )
         .unwrap();
@@ -476,33 +508,39 @@ mod tests {
                 columns: vec![
                     Column {
                         name: b"col".to_vec(),
-                        data_type: None,
+                        type_affinity: TypeAffinity::Blob,
                         primary_key: false,
                     },
                     Column {
                         name: b"col1".to_vec(),
-                        data_type: Some(DataType::Integer),
+                        type_affinity: TypeAffinity::Integer,
                         primary_key: true,
                     },
                     Column {
                         name: b"col2".to_vec(),
-                        data_type: None,
+                        type_affinity: TypeAffinity::Text,
                         primary_key: false,
                     },
                     Column {
                         name: b"co`l3".to_vec(),
-                        data_type: None,
+                        type_affinity: TypeAffinity::Blob,
                         primary_key: false,
                     },
                     Column {
                         name: b"col4".to_vec(),
-                        data_type: None,
+                        type_affinity: TypeAffinity::Real,
+                        primary_key: false,
+                    },
+                    Column {
+                        name: b"col5".to_vec(),
+                        type_affinity: TypeAffinity::Numeric,
                         primary_key: false,
                     },
                 ],
                 indexes: None,
             }
         );
+
         // multiple primary key
         assert!(Table::parse(
             b"create table example(col, col1 integer primary key, col2 text primary key)",
@@ -520,6 +558,7 @@ mod tests {
             "CREATE TABLE \"example2\"(col1 null, col2 integer);",
             "CREATE TABLE `exam``ple3`(COL1 real, Col2 text primary key, cOL3 blob, _);",
             "CREATE TABLE [example4](id integer primary key, col);",
+            "create table example5(col, col1 integer primary key, \"col2\" text, `co``l3` blob, [col4] real, col5 other)",
         ]);
         let schema = generate_schema(file.path());
 
@@ -529,7 +568,7 @@ mod tests {
                 root_page_id: 2,
                 columns: vec![Column {
                     name: b"col".to_vec(),
-                    data_type: None,
+                    type_affinity: TypeAffinity::Blob,
                     primary_key: false,
                 }],
                 indexes: None,
@@ -540,12 +579,12 @@ mod tests {
             vec![
                 Column {
                     name: b"col1".to_vec(),
-                    data_type: Some(DataType::Null),
+                    type_affinity: TypeAffinity::Numeric,
                     primary_key: false,
                 },
                 Column {
                     name: b"col2".to_vec(),
-                    data_type: Some(DataType::Integer),
+                    type_affinity: TypeAffinity::Integer,
                     primary_key: false,
                 }
             ]
@@ -555,41 +594,129 @@ mod tests {
             vec![
                 Column {
                     name: b"COL1".to_vec(),
-                    data_type: Some(DataType::Real),
+                    type_affinity: TypeAffinity::Real,
                     primary_key: false,
                 },
                 Column {
                     name: b"Col2".to_vec(),
-                    data_type: Some(DataType::Text),
+                    type_affinity: TypeAffinity::Text,
                     primary_key: true,
                 },
                 Column {
                     name: b"cOL3".to_vec(),
-                    data_type: Some(DataType::Blob),
+                    type_affinity: TypeAffinity::Blob,
                     primary_key: false,
                 },
                 Column {
                     name: b"_".to_vec(),
-                    data_type: None,
+                    type_affinity: TypeAffinity::Blob,
                     primary_key: false,
                 }
             ]
         );
+        assert!(schema.get_table(b"example4").is_some());
         assert_eq!(
-            schema.get_table(b"example4").unwrap().columns,
+            schema.get_table(b"example5").unwrap().columns,
             vec![
                 Column {
-                    name: b"id".to_vec(),
-                    data_type: Some(DataType::Integer),
+                    name: b"col".to_vec(),
+                    type_affinity: TypeAffinity::Blob,
+                    primary_key: false,
+                },
+                Column {
+                    name: b"col1".to_vec(),
+                    type_affinity: TypeAffinity::Integer,
                     primary_key: true,
                 },
                 Column {
-                    name: b"col".to_vec(),
-                    data_type: None,
+                    name: b"col2".to_vec(),
+                    type_affinity: TypeAffinity::Text,
                     primary_key: false,
-                }
+                },
+                Column {
+                    name: b"co`l3".to_vec(),
+                    type_affinity: TypeAffinity::Blob,
+                    primary_key: false,
+                },
+                Column {
+                    name: b"col4".to_vec(),
+                    type_affinity: TypeAffinity::Real,
+                    primary_key: false,
+                },
+                Column {
+                    name: b"col5".to_vec(),
+                    type_affinity: TypeAffinity::Numeric,
+                    primary_key: false,
+                },
             ]
         );
+    }
+
+    #[test]
+    fn test_get_table_type_affinity() {
+        let file = create_sqlite_database(&[
+            "CREATE TABLE integer(col1 long real blob text `Int``eger`, col2 integer text, col3 varint);",
+            "CREATE TABLE text(col1 long real blob chAr, col2 long cLoB blob, col3 longteXt);",
+            "CREATE TABLE blob(col1 long real Blob, col2, col3 bblob);",
+            "CREATE TABLE real(col1 long Real, col2 float, col3 dOuble);",
+            "CREATE TABLE numeric(col1 null, col2 long long, col3 `in``teger`);",
+        ]);
+        let schema = generate_schema(file.path());
+
+        let table = schema.get_table(b"integer").unwrap();
+        assert_eq!(table.columns.len(), 3);
+        for column in &table.columns {
+            assert_eq!(
+                column.type_affinity,
+                TypeAffinity::Integer,
+                "column: {:?}",
+                column
+            );
+        }
+
+        let table = schema.get_table(b"text").unwrap();
+        assert_eq!(table.columns.len(), 3);
+        for column in &table.columns {
+            assert_eq!(
+                column.type_affinity,
+                TypeAffinity::Text,
+                "column: {:?}",
+                column
+            );
+        }
+
+        let table = schema.get_table(b"blob").unwrap();
+        assert_eq!(table.columns.len(), 3);
+        for column in &table.columns {
+            assert_eq!(
+                column.type_affinity,
+                TypeAffinity::Blob,
+                "column: {:?}",
+                column
+            );
+        }
+
+        let table = schema.get_table(b"real").unwrap();
+        assert_eq!(table.columns.len(), 3);
+        for column in &table.columns {
+            assert_eq!(
+                column.type_affinity,
+                TypeAffinity::Real,
+                "column: {:?}",
+                column
+            );
+        }
+
+        let table = schema.get_table(b"numeric").unwrap();
+        assert_eq!(table.columns.len(), 3);
+        for column in &table.columns {
+            assert_eq!(
+                column.type_affinity,
+                TypeAffinity::Numeric,
+                "column: {:?}",
+                column
+            );
+        }
     }
 
     #[test]
