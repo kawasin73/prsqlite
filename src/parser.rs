@@ -77,6 +77,8 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
         let (mut n, mut token) = get_token_no_space(input).ok_or("no right paren")?;
         input = &input[n..];
 
+        // TODO: Parse type_name to type affinity without converting it to the temporary
+        // Vec. Use iterator instead.
         let mut type_name = Vec::new();
 
         if matches!(token, Token::Null | Token::Identifier(_)) {
@@ -96,6 +98,7 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
                         // Just check whether signed numbers are valid and move cursor without
                         // parsing the number. Signed numbers in a type name has no meanings to type
                         // affinity.
+                        // https://www.sqlite.org/datatype3.html#affinity_name_examples
                         loop {
                             (n, token) =
                                 get_token_no_space(input).ok_or("no signed number: first token")?;

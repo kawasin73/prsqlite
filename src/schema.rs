@@ -655,7 +655,7 @@ mod tests {
     #[test]
     fn test_get_table_type_affinity() {
         let file = create_sqlite_database(&[
-            "CREATE TABLE integer(col1 long real blob text `Int``eger`, col2 integer text, col3 varint);",
+            "CREATE TABLE integer(col1 long real blob text `Int``eger`, col2 integer text, col3 varint, col4 FLOAT POINT);",
             "CREATE TABLE text(col1 long real blob chAr, col2 long cLoB blob, col3 longteXt);",
             "CREATE TABLE blob(col1 long real Blob, col2, col3 bblob);",
             "CREATE TABLE real(col1 long Real, col2 float, col3 dOuble);",
@@ -664,7 +664,7 @@ mod tests {
         let schema = generate_schema(file.path());
 
         let table = schema.get_table(b"integer").unwrap();
-        assert_eq!(table.columns.len(), 3);
+        assert_eq!(table.columns.len(), 4);
         for column in &table.columns {
             assert_eq!(
                 column.type_affinity,
