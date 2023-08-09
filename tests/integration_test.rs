@@ -320,11 +320,11 @@ fn test_select_filter() {
 #[test]
 fn test_select_filter_eq() {
     let file = create_sqlite_database(&[
-        "CREATE TABLE example(col1, col2, col3);",
-        "INSERT INTO example(col1, col2, col3) VALUES ('hello', 2.0, 3);",
+        "CREATE TABLE example(col1, col2, col3, col4);",
+        "INSERT INTO example(col1, col2, col3, col4) VALUES ('hello', 2.0, 3, x'01ef');",
         // TODO: col2 = 2 integer?
-        "INSERT INTO example(col1, col2, col3) VALUES ('world', 2.0, 9);",
-        "INSERT INTO example(col1, col2, col3) VALUES ('hello', 5.0, 9);",
+        "INSERT INTO example(col1, col2, col3, col4) VALUES ('world', 2.0, 9, x'2345ab');",
+        "INSERT INTO example(col1, col2, col3, col4) VALUES ('hello', 5.0, 9, x'01ef');",
     ]);
 
     let mut conn = Connection::open(file.path()).unwrap();
@@ -390,16 +390,30 @@ fn test_select_filter_eq() {
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
+
+    let mut stmt = conn
+        .prepare("SELECT rowid, col4 FROM example WHERE col4 == x'2345ab';")
+        .unwrap();
+    let mut rows = stmt.execute().unwrap();
+
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns.get(0), &Value::Integer(2));
+    assert_eq!(columns.get(1), &Value::Blob(&[0x23, 0x45, 0xab]));
+    drop(row);
+
+    assert!(rows.next_row().unwrap().is_none());
 }
 
 #[test]
 fn test_select_filter_ne() {
     let file = create_sqlite_database(&[
-        "CREATE TABLE example(col1, col2, col3);",
-        "INSERT INTO example(col1, col2, col3) VALUES ('hello', 2.0, 3);",
+        "CREATE TABLE example(col1, col2, col3, col4);",
+        "INSERT INTO example(col1, col2, col3, col4) VALUES ('hello', 2.0, 3, x'01ef');",
         // TODO: col2 = 2 integer?
-        "INSERT INTO example(col1, col2, col3) VALUES ('world', 2.0, 9);",
-        "INSERT INTO example(col1, col2, col3) VALUES ('hello', 5.0, 9);",
+        "INSERT INTO example(col1, col2, col3, col4) VALUES ('world', 2.0, 9, x'2345ab');",
+        "INSERT INTO example(col1, col2, col3, col4) VALUES ('hello', 5.0, 9, x'01ef');",
     ]);
 
     let mut conn = Connection::open(file.path()).unwrap();
@@ -441,6 +455,20 @@ fn test_select_filter_ne() {
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(1));
     assert_eq!(columns.get(1), &Value::Integer(3));
+    drop(row);
+
+    assert!(rows.next_row().unwrap().is_none());
+
+    let mut stmt = conn
+        .prepare("SELECT rowid, col4 FROM example WHERE col4 != x'01ef';")
+        .unwrap();
+    let mut rows = stmt.execute().unwrap();
+
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns.get(0), &Value::Integer(2));
+    assert_eq!(columns.get(1), &Value::Blob(&[0x23, 0x45, 0xab]));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());

@@ -220,6 +220,7 @@ enum Selection {
     Integer(i64),
     Real(f64),
     Text(Vec<u8>),
+    Blob(Vec<u8>),
 }
 
 impl Selection {
@@ -228,6 +229,7 @@ impl Selection {
             Expr::Integer(i) => Ok(Self::Integer(i)),
             Expr::Real(f) => Ok(Self::Real(f)),
             Expr::Text(text) => Ok(Self::Text(text.dequote())),
+            Expr::Blob(hex) => Ok(Self::Blob(hex.decode())),
             Expr::BinaryOperator {
                 operator,
                 left,
@@ -289,6 +291,7 @@ impl Selection {
             Self::Integer(value) => Ok(Value::Integer(*value)),
             Self::Real(value) => Ok(Value::Real(*value)),
             Self::Text(value) => Ok(Value::Text(value)),
+            Self::Blob(value) => Ok(Value::Blob(value)),
         }
     }
 }

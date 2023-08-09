@@ -17,6 +17,7 @@ use crate::token::Token;
 use crate::utils::parse_float_literal;
 use crate::utils::parse_integer_literal;
 use crate::utils::CaseInsensitiveBytes;
+use crate::utils::HexedBytes;
 use crate::utils::MaybeQuotedBytes;
 
 pub type Error = &'static str;
@@ -333,6 +334,7 @@ pub enum Expr<'a> {
     Integer(i64),
     Real(f64),
     Text(MaybeQuotedBytes<'a>),
+    Blob(HexedBytes<'a>),
 }
 
 fn parse_expr(input: &[u8]) -> Result<(usize, Expr)> {
@@ -349,6 +351,7 @@ fn parse_expr(input: &[u8]) -> Result<(usize, Expr)> {
         }
         Some((n, Token::Float(buf))) => (n, Expr::Real(parse_float_literal(buf))),
         Some((n, Token::String(text))) => (n, Expr::Text(text)),
+        Some((n, Token::Blob(hex))) => (n, Expr::Blob(hex)),
         _ => return Err("no expr"),
     };
     let input = &input[n..];
@@ -600,5 +603,25 @@ mod tests {
         assert_eq!(parse_expr(b"1.01").unwrap(), (4, Expr::Real(1.01)));
         assert_eq!(parse_expr(b"1e1").unwrap(), (3, Expr::Real(10.0)));
         assert_eq!(parse_expr(b"1e-1").unwrap(), (4, Expr::Real(0.1)));
+
+        // Parse string
+        assert_eq!(
+            parse_expr(b"'hello'").unwrap(),
+            (7, Expr::Text(b"'hello'".as_slice().into()))
+        );
+        assert_eq!(
+            parse_expr(b"'hel''lo'").unwrap(),
+            (9, Expr::Text(b"'hel''lo'".as_slice().into()))
+        );
+
+        // Parse blob
+        assert_eq!(
+            parse_expr(b"x'0123456789abcdef' ").unwrap(),
+            (19, Expr::Blob(b"0123456789abcdef".as_slice().into()))
+        );
+        assert_eq!(
+            parse_expr(b"X'0123456789abcdef' ").unwrap(),
+            (19, Expr::Blob(b"0123456789abcdef".as_slice().into()))
+        );
     }
 }
