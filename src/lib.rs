@@ -30,13 +30,13 @@ use std::path::Path;
 
 use anyhow::bail;
 use anyhow::Context;
-use pager::PageId;
 
 // TODO: This is to suppress the unused warning.
 // pub use crate::btree::*;
 use crate::btree::BtreeContext;
 use crate::cursor::BtreeCursor;
 use crate::cursor::BtreePayload;
+use crate::pager::PageId;
 use crate::pager::Pager;
 use crate::parser::parse_select;
 use crate::parser::BinaryOperator;
@@ -50,6 +50,7 @@ use crate::schema::Schema;
 use crate::schema::Table;
 use crate::token::get_token_no_space;
 use crate::token::Token;
+use crate::value::TypeAffinity;
 pub use crate::value::Value;
 
 const SQLITE_MAX_PAGE_SIZE: u32 = 65536;
@@ -154,11 +155,10 @@ impl Connection {
                 }
                 ResultColumn::ColumnName(column_name) => {
                     let column_name = column_name.dequote();
-                    let column_idx =
-                        table.get_column_index(&column_name).ok_or(anyhow::anyhow!(
-                            "column not found: {}",
-                            std::str::from_utf8(&column_name).unwrap_or_default()
-                        ))?;
+                    let (column_idx, _) = table.get_column(&column_name).ok_or(anyhow::anyhow!(
+                        "column not found: {}",
+                        std::str::from_utf8(&column_name).unwrap_or_default()
+                    ))?;
                     columns.push(column_idx);
                 }
             }
@@ -175,7 +175,7 @@ impl Connection {
             right,
         }) = &selection
         {
-            if let Selection::Column(column_number) = left.as_ref() {
+            if let Selection::Column((column_number, _)) = left.as_ref() {
                 if let Selection::Integer(key) = right.as_ref() {
                     let mut next_index = table.indexes.as_ref();
                     while let Some(index) = next_index {
@@ -211,12 +211,13 @@ impl Connection {
 }
 
 enum Selection {
-    Column(ColumnNumber),
+    Column((ColumnNumber, TypeAffinity)),
     BinaryOperator {
         operator: BinaryOperator,
         left: Box<Selection>,
         right: Box<Selection>,
     },
+    Null,
     Integer(i64),
     Real(f64),
     Text(Vec<u8>),
@@ -226,6 +227,7 @@ enum Selection {
 impl Selection {
     fn from(expr: Expr, table: &Table) -> anyhow::Result<Self> {
         match expr {
+            Expr::Null => Ok(Self::Null),
             Expr::Integer(i) => Ok(Self::Integer(i)),
             Expr::Real(f) => Ok(Self::Real(f)),
             Expr::Text(text) => Ok(Self::Text(text.dequote())),
@@ -242,7 +244,7 @@ impl Selection {
             Expr::Column(column_name) => {
                 let column_name = column_name.dequote();
                 table
-                    .get_column_index(&column_name)
+                    .get_column(&column_name)
                     .map(Self::Column)
                     .ok_or(anyhow::anyhow!(
                         "column not found: {}",
@@ -252,46 +254,69 @@ impl Selection {
         }
     }
 
-    fn execute<'a>(&'a self, row: &'a RowRef) -> anyhow::Result<Value<'a>> {
+    fn execute<'a>(&'a self, row: &'a RowRef) -> anyhow::Result<(Value<'a>, Option<TypeAffinity>)> {
         match self {
-            Self::Column(idx) => row.get(idx),
+            Self::Column((idx, affinity)) => Ok((row.get(idx)?, Some(*affinity))),
             Self::BinaryOperator {
                 operator,
                 left,
                 right,
             } => {
-                let left = left.execute(row)?;
-                let right = right.execute(row)?;
-                let result = if operator == &BinaryOperator::Eq {
-                    left == right
-                } else if operator == &BinaryOperator::Ne {
-                    left != right
-                } else {
-                    let Value::Integer(left) = left else {
-                        bail!("invalid value for selection: {:?}", left);
-                    };
-                    let Value::Integer(right) = right else {
-                        bail!("invalid value for selection: {:?}", left);
-                    };
-                    match operator {
-                        BinaryOperator::Eq => left == right,
-                        BinaryOperator::Ne => left != right,
-                        BinaryOperator::Lt => left < right,
-                        BinaryOperator::Le => left <= right,
-                        BinaryOperator::Gt => left > right,
-                        BinaryOperator::Ge => left >= right,
+                let (left_value, left_affinity) = left.execute(row)?;
+                let (right_value, right_affinity) = right.execute(row)?;
+
+                match (&left_value, &right_value) {
+                    (Value::Null, _) => return Ok((Value::Null, None)),
+                    (_, Value::Null) => return Ok((Value::Null, None)),
+                    _ => {}
+                }
+
+                // TODO: Type Conversions Prior To Comparison
+                match (left_affinity, right_affinity) {
+                    (
+                        Some(TypeAffinity::Integer)
+                        | Some(TypeAffinity::Real)
+                        | Some(TypeAffinity::Numeric),
+                        Some(TypeAffinity::Text) | Some(TypeAffinity::Blob) | None,
+                    ) => {
+                        // TODO: Apply numeric affinity to the right operand.
                     }
+                    (
+                        Some(TypeAffinity::Text) | Some(TypeAffinity::Blob) | None,
+                        Some(TypeAffinity::Integer)
+                        | Some(TypeAffinity::Real)
+                        | Some(TypeAffinity::Numeric),
+                    ) => {
+                        // TODO: Apply numeric affinity to the left operand.
+                    }
+                    (Some(TypeAffinity::Text), None) => {
+                        // TODO: Apply text affinity to the right operands.
+                    }
+                    (None, Some(TypeAffinity::Text)) => {
+                        // TODO: Apply text affinity to the left operands.
+                    }
+                    _ => {}
+                }
+
+                let result = match operator {
+                    BinaryOperator::Eq => left_value == right_value,
+                    BinaryOperator::Ne => left_value != right_value,
+                    BinaryOperator::Lt => left_value < right_value,
+                    BinaryOperator::Le => left_value <= right_value,
+                    BinaryOperator::Gt => left_value > right_value,
+                    BinaryOperator::Ge => left_value >= right_value,
                 };
                 if result {
-                    Ok(Value::Integer(1))
+                    Ok((Value::Integer(1), None))
                 } else {
-                    Ok(Value::Integer(0))
+                    Ok((Value::Integer(0), None))
                 }
             }
-            Self::Integer(value) => Ok(Value::Integer(*value)),
-            Self::Real(value) => Ok(Value::Real(*value)),
-            Self::Text(value) => Ok(Value::Text(value)),
-            Self::Blob(value) => Ok(Value::Blob(value)),
+            Self::Null => Ok((Value::Null, None)),
+            Self::Integer(value) => Ok((Value::Integer(*value), None)),
+            Self::Real(value) => Ok((Value::Real(*value), None)),
+            Self::Text(value) => Ok((Value::Text(value), None)),
+            Self::Blob(value) => Ok((Value::Blob(value), None)),
         }
     }
 }
@@ -319,8 +344,12 @@ impl<'conn> Statement<'conn> {
                 left,
                 right,
             }) => match (left.as_ref(), right.as_ref()) {
-                (Selection::Column(ColumnNumber::RowId), Selection::Integer(value)) => Some(*value),
-                (Selection::Integer(value), Selection::Column(ColumnNumber::RowId)) => Some(*value),
+                (Selection::Column((ColumnNumber::RowId, _)), Selection::Integer(value)) => {
+                    Some(*value)
+                }
+                (Selection::Integer(value), Selection::Column((ColumnNumber::RowId, _))) => {
+                    Some(*value)
+                }
                 _ => None,
             },
             _ => None,
@@ -440,8 +469,9 @@ impl<'conn> Rows<'conn> {
                     use_local_buffer,
                     content_offset,
                 };
-                if selection.execute(&column_value_loader)? == Value::Integer(0) {
-                    continue;
+                match selection.execute(&column_value_loader)?.0 {
+                    Value::Null | Value::Integer(0) => continue,
+                    _ => {}
                 }
             }
 

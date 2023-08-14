@@ -475,6 +475,89 @@ fn test_select_filter_ne() {
 }
 
 #[test]
+fn test_select_filter_compare() {
+    let file = create_sqlite_database(&[
+        "CREATE TABLE example(col);",
+        "INSERT INTO example(col) VALUES (null);",
+        "INSERT INTO example(col) VALUES (-9223372036854775808);",
+        "INSERT INTO example(col) VALUES (-1);",
+        "INSERT INTO example(col) VALUES (0);",
+        "INSERT INTO example(col) VALUES (1);",
+        "INSERT INTO example(col) VALUES (2);",
+        "INSERT INTO example(col) VALUES (9223372036854775807);",
+        "INSERT INTO example(col) VALUES (-9999999999999999999.0);",
+        "INSERT INTO example(col) VALUES (-1.0);",
+        "INSERT INTO example(col) VALUES (0.0);",
+        "INSERT INTO example(col) VALUES (1.0);",
+        "INSERT INTO example(col) VALUES (2.0);",
+        "INSERT INTO example(col) VALUES (9999999999999999999.0);",
+        "INSERT INTO example(col) VALUES ('hello');",
+        "INSERT INTO example(col) VALUES ('');",
+        // TODO: Text convertable to numeric
+        "INSERT INTO example(col) VALUES (x'0123456789abcdef');",
+        "INSERT INTO example(col) VALUES (x'68656C6C6F');", // 'hello'
+        "INSERT INTO example(col) VALUES (x'');",
+        // TODO: Blob convertable to numeric
+    ]);
+
+    let mut conn = Connection::open(file.path()).unwrap();
+
+    let test_conn = rusqlite::Connection::open(file.path()).unwrap();
+
+    for compare_value in [
+        "null",
+        // TODO: Support unary operators.
+        // "-9223372036854775808",
+        // "-9223372036854775807",
+        // "-2",
+        // "-1",
+        "0",
+        "1",
+        "2",
+        "3",
+        "9223372036854775806",
+        "9223372036854775807",
+        "9223372036854775808",
+        "0.0",
+        "0.5",
+        "1.0",
+        "1.1",
+        "2.0",
+        "3.0",
+        "''",
+        "'hello'",
+        "'world'",
+        "x''",
+        "x'0123456789abcdef'",
+    ] {
+        for op in ["==", "=", "!=", "<", "<=", ">", ">="] {
+            let query = format!(
+                "SELECT rowid FROM example WHERE col {} {};",
+                op, compare_value
+            );
+            let mut stmt = test_conn.prepare(&query).unwrap();
+            let rows = stmt.query([]).unwrap();
+            let rowids: Vec<i64> = rows.mapped(|r| r.get(0)).map(|v| v.unwrap()).collect();
+
+            let mut stmt = conn.prepare(&query).unwrap();
+            let mut rows = stmt.execute().unwrap();
+            let mut results = Vec::new();
+            while let Some(row) = rows.next_row().unwrap() {
+                let columns = row.parse().unwrap();
+                assert_eq!(columns.len(), 1);
+                assert!(matches!(columns.get(0), &Value::Integer(_)));
+                let Value::Integer(rowid) = columns.get(0) else {
+                    unreachable!()
+                };
+                results.push(*rowid);
+            }
+
+            assert_eq!(results, rowids, "query: {}", query);
+        }
+    }
+}
+
+#[test]
 fn test_select_filter_with_rowid() {
     let file = create_sqlite_database(&[
         "CREATE TABLE example(col);",
@@ -498,6 +581,8 @@ fn test_select_filter_with_rowid() {
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
+
+    // TODO: Test with rowid = '2'
 }
 
 #[test]

@@ -347,6 +347,7 @@ pub enum Expr<'a> {
         left: Box<Expr<'a>>,
         right: Box<Expr<'a>>,
     },
+    Null,
     Integer(i64),
     Real(f64),
     Text(MaybeQuotedBytes<'a>),
@@ -357,6 +358,7 @@ fn parse_expr(input: &[u8]) -> Result<(usize, Expr)> {
     let input_len = input.len();
     let (n, left) = match get_token_no_space(input) {
         Some((n, Token::Identifier(id))) => (n, Expr::Column(id)),
+        Some((n, Token::Null)) => (n, Expr::Null),
         Some((n, Token::Integer(buf))) => {
             let v = parse_integer_literal(buf);
             if v < 0 {
@@ -608,6 +610,9 @@ mod tests {
 
     #[test]
     fn test_parse_expr() {
+        // Parse null
+        assert_eq!(parse_expr(b"null").unwrap(), (4, Expr::Null));
+
         // Parse integer
         assert_eq!(
             parse_expr(b"123456789a").unwrap(),

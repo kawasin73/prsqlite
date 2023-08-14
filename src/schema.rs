@@ -250,7 +250,7 @@ impl Index {
         for column in &create_index.columns {
             // TODO: use the reference of given column name.
             let column_name = column.name.dequote();
-            let Some(column_number) = table.get_column_index(&column_name) else {
+            let Some((column_number, _)) = table.get_column(&column_name) else {
                 bail!(
                     "column {:?} in create index sql is not found in table {:?}",
                     column.name,
@@ -369,21 +369,23 @@ impl Table {
         ))
     }
 
-    pub fn get_column_index(&self, column: &[u8]) -> Option<ColumnNumber> {
-        let column = CaseInsensitiveBytes::from(column);
-        if let Some(i) = self
+    pub fn get_column(&self, name: &[u8]) -> Option<(ColumnNumber, TypeAffinity)> {
+        let column = CaseInsensitiveBytes::from(name);
+        if let Some((i, column)) = self
             .columns
             .iter()
-            .position(|c| CaseInsensitiveBytes::from(&c.name) == column)
+            .enumerate()
+            .find(|(_, c)| CaseInsensitiveBytes::from(&c.name) == column)
         {
-            let column = &self.columns[i];
-            if column.primary_key && column.type_affinity == TypeAffinity::Integer {
-                Some(ColumnNumber::RowId)
-            } else {
-                Some(ColumnNumber::Column(i))
-            }
+            let column_number =
+                if column.primary_key && column.type_affinity == TypeAffinity::Integer {
+                    ColumnNumber::RowId
+                } else {
+                    ColumnNumber::Column(i)
+                };
+            Some((column_number, column.type_affinity))
         } else if column.equal_to_lower_bytes(&b"rowid"[..]) {
-            Some(ColumnNumber::RowId)
+            Some((ColumnNumber::RowId, TypeAffinity::Integer))
         } else {
             None
         }
@@ -730,43 +732,34 @@ mod tests {
         let schema = generate_schema(file.path());
 
         let table = schema.get_table(b"example").unwrap();
-        assert_eq!(
-            table.get_column_index(b"col"),
-            Some(ColumnNumber::Column(0))
-        );
-        assert_eq!(table.get_column_index(b"rowid"), Some(ColumnNumber::RowId));
-        assert_eq!(table.get_column_index(b"invalid"), None);
+        assert_eq!(table.get_column(b"col").unwrap().0, ColumnNumber::Column(0));
+        assert_eq!(table.get_column(b"rowid").unwrap().0, ColumnNumber::RowId);
+        assert!(table.get_column(b"invalid").is_none());
 
         let table = schema.get_table(b"example2").unwrap();
         assert_eq!(
-            table.get_column_index(b"col1"),
-            Some(ColumnNumber::Column(0))
+            table.get_column(b"col1").unwrap().0,
+            ColumnNumber::Column(0)
         );
         assert_eq!(
-            table.get_column_index(b"col2"),
-            Some(ColumnNumber::Column(1))
+            table.get_column(b"col2").unwrap().0,
+            ColumnNumber::Column(1)
         );
         assert_eq!(
-            table.get_column_index(b"rowid"),
-            Some(ColumnNumber::Column(2))
+            table.get_column(b"rowid").unwrap().0,
+            ColumnNumber::Column(2)
         );
-        assert_eq!(table.get_column_index(b"invalid"), None);
+        assert!(table.get_column(b"invalid").is_none());
 
         let table = schema.get_table(b"example3").unwrap();
-        assert_eq!(table.get_column_index(b"id"), Some(ColumnNumber::RowId));
-        assert_eq!(
-            table.get_column_index(b"col"),
-            Some(ColumnNumber::Column(1))
-        );
-        assert_eq!(table.get_column_index(b"rowid"), Some(ColumnNumber::RowId));
+        assert_eq!(table.get_column(b"id").unwrap().0, ColumnNumber::RowId);
+        assert_eq!(table.get_column(b"col").unwrap().0, ColumnNumber::Column(1));
+        assert_eq!(table.get_column(b"rowid").unwrap().0, ColumnNumber::RowId);
 
         let table = schema.get_table(b"example4").unwrap();
-        assert_eq!(table.get_column_index(b"id"), Some(ColumnNumber::Column(0)));
-        assert_eq!(
-            table.get_column_index(b"col"),
-            Some(ColumnNumber::Column(1))
-        );
-        assert_eq!(table.get_column_index(b"rowid"), Some(ColumnNumber::RowId));
+        assert_eq!(table.get_column(b"id").unwrap().0, ColumnNumber::Column(0));
+        assert_eq!(table.get_column(b"col").unwrap().0, ColumnNumber::Column(1));
+        assert_eq!(table.get_column(b"rowid").unwrap().0, ColumnNumber::RowId);
     }
 
     #[test]
