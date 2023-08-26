@@ -217,6 +217,54 @@ fn test_select_column_name_and_all() {
 }
 
 #[test]
+fn test_select_expression() {
+    let file = create_sqlite_database(&[
+        "CREATE TABLE example(col1, col2);",
+        "INSERT INTO example(col1, col2) VALUES (1, 2);",
+    ]);
+
+    let mut conn = Connection::open(file.path()).unwrap();
+
+    // Literals
+    let mut stmt = conn
+        .prepare("SELECT col1, 10, 10., 'text', x'0123456789abcdef' FROM example;")
+        .unwrap();
+    let mut rows = stmt.execute().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 5);
+    assert_eq!(columns.get(0), &Value::Integer(1));
+    assert_eq!(columns.get(1), &Value::Integer(10));
+    assert_eq!(columns.get(2), &Value::Real(10.0));
+    assert_eq!(columns.get(3), &Value::Text(b"text"));
+    assert_eq!(
+        columns.get(4),
+        &Value::Blob(b"\x01\x23\x45\x67\x89\xab\xcd\xef")
+    );
+    drop(row);
+    assert!(rows.next_row().unwrap().is_none());
+
+    // Comparison operators
+    let mut stmt = conn
+        .prepare(
+            "SELECT col1, 10 > col1, 10 < col1, col1 < col2, col1 > col2, 10 == 10 FROM example;",
+        )
+        .unwrap();
+    let mut rows = stmt.execute().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 6);
+    assert_eq!(columns.get(0), &Value::Integer(1));
+    assert_eq!(columns.get(1), &Value::Integer(1));
+    assert_eq!(columns.get(2), &Value::Integer(0));
+    assert_eq!(columns.get(3), &Value::Integer(1));
+    assert_eq!(columns.get(4), &Value::Integer(0));
+    assert_eq!(columns.get(5), &Value::Integer(1));
+    drop(row);
+    assert!(rows.next_row().unwrap().is_none());
+}
+
+#[test]
 fn test_select_primary_key() {
     let file = create_sqlite_database(&[
         "CREATE TABLE example(id integer primary key, col text);",

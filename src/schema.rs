@@ -391,12 +391,12 @@ impl Table {
         }
     }
 
-    pub fn all_column_index(&self) -> impl Iterator<Item = ColumnNumber> + '_ {
+    pub fn get_all_columns(&self) -> impl Iterator<Item = (ColumnNumber, TypeAffinity)> + '_ {
         self.columns.iter().enumerate().map(|(i, column)| {
             if column.primary_key && column.type_affinity == TypeAffinity::Integer {
-                ColumnNumber::RowId
+                (ColumnNumber::RowId, TypeAffinity::Integer)
             } else {
-                ColumnNumber::Column(i)
+                (ColumnNumber::Column(i), column.type_affinity)
             }
         })
     }
@@ -410,11 +410,15 @@ mod tests {
 
     use crate::test_utils::*;
     use crate::Connection;
+    use crate::Expression;
 
     fn generate_schema(filepath: &Path) -> Schema {
         let mut conn = Connection::open(filepath).unwrap();
         let schema_table = Schema::schema_table();
-        let columns = schema_table.all_column_index().collect::<Vec<_>>();
+        let columns = schema_table
+            .get_all_columns()
+            .map(Expression::Column)
+            .collect::<Vec<_>>();
         Schema::generate(
             Statement::new(&mut conn, schema_table.root_page_id, columns, None),
             schema_table,
@@ -763,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_all_column_index() {
+    fn test_table_get_all_columns() {
         let file = create_sqlite_database(&[
             "CREATE TABLE example(col);",
             "CREATE TABLE example2(col1, col2, rowid);",
@@ -773,29 +777,59 @@ mod tests {
         let schema = generate_schema(file.path());
 
         let table = schema.get_table(b"example").unwrap();
-        let mut iter = table.all_column_index();
-        assert_eq!(iter.next(), Some(ColumnNumber::Column(0)));
+        let mut iter = table.get_all_columns();
+        assert_eq!(
+            iter.next(),
+            Some((ColumnNumber::Column(0), TypeAffinity::Blob))
+        );
         assert_eq!(iter.next(), None);
 
         let table = schema.get_table(b"example2").unwrap();
-        let mut iter = table.all_column_index();
-        assert_eq!(iter.next(), Some(ColumnNumber::Column(0)));
-        assert_eq!(iter.next(), Some(ColumnNumber::Column(1)));
-        assert_eq!(iter.next(), Some(ColumnNumber::Column(2)));
+        let mut iter = table.get_all_columns();
+        assert_eq!(
+            iter.next(),
+            Some((ColumnNumber::Column(0), TypeAffinity::Blob))
+        );
+        assert_eq!(
+            iter.next(),
+            Some((ColumnNumber::Column(1), TypeAffinity::Blob))
+        );
+        assert_eq!(
+            iter.next(),
+            Some((ColumnNumber::Column(2), TypeAffinity::Blob))
+        );
         assert_eq!(iter.next(), None);
 
         let table = schema.get_table(b"example3").unwrap();
-        let mut iter = table.all_column_index();
-        assert_eq!(iter.next(), Some(ColumnNumber::Column(0)));
-        assert_eq!(iter.next(), Some(ColumnNumber::RowId));
-        assert_eq!(iter.next(), Some(ColumnNumber::Column(2)));
+        let mut iter = table.get_all_columns();
+        assert_eq!(
+            iter.next(),
+            Some((ColumnNumber::Column(0), TypeAffinity::Blob))
+        );
+        assert_eq!(
+            iter.next(),
+            Some((ColumnNumber::RowId, TypeAffinity::Integer))
+        );
+        assert_eq!(
+            iter.next(),
+            Some((ColumnNumber::Column(2), TypeAffinity::Blob))
+        );
         assert_eq!(iter.next(), None);
 
         let table = schema.get_table(b"example4").unwrap();
-        let mut iter = table.all_column_index();
-        assert_eq!(iter.next(), Some(ColumnNumber::Column(0)));
-        assert_eq!(iter.next(), Some(ColumnNumber::Column(1)));
-        assert_eq!(iter.next(), Some(ColumnNumber::Column(2)));
+        let mut iter = table.get_all_columns();
+        assert_eq!(
+            iter.next(),
+            Some((ColumnNumber::Column(0), TypeAffinity::Blob))
+        );
+        assert_eq!(
+            iter.next(),
+            Some((ColumnNumber::Column(1), TypeAffinity::Text))
+        );
+        assert_eq!(
+            iter.next(),
+            Some((ColumnNumber::Column(2), TypeAffinity::Blob))
+        );
         assert_eq!(iter.next(), None);
     }
 

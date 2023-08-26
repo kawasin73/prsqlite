@@ -132,7 +132,10 @@ impl Connection {
 
         if self.schema.is_none() {
             let schema_table = Schema::schema_table();
-            let columns = schema_table.all_column_index().collect::<Vec<_>>();
+            let columns = schema_table
+                .get_all_columns()
+                .map(Expression::Column)
+                .collect::<Vec<_>>();
             self.schema = Some(Schema::generate(
                 Statement::new(self, schema_table.root_page_id, columns, None),
                 schema_table,
@@ -146,37 +149,34 @@ impl Connection {
         ))?;
 
         let mut columns = Vec::new();
-        for column in select.columns.iter() {
+        for column in select.columns {
             match column {
                 ResultColumn::All => {
-                    for column_idx in table.all_column_index() {
-                        columns.push(column_idx);
-                    }
+                    columns.extend(table.get_all_columns().map(Expression::Column));
                 }
-                ResultColumn::ColumnName(column_name) => {
-                    let column_name = column_name.dequote();
-                    let (column_idx, _) = table.get_column(&column_name).ok_or(anyhow::anyhow!(
-                        "column not found: {}",
-                        std::str::from_utf8(&column_name).unwrap_or_default()
-                    ))?;
-                    columns.push(column_idx);
+                ResultColumn::Expr((expr, _alias)) => {
+                    // TODO: consider alias.
+                    columns.push(Expression::from(expr, table)?);
+                }
+                ResultColumn::AllOfTable(_table_name) => {
+                    todo!("ResultColumn::AllOfTable");
                 }
             }
         }
 
         let selection = select
             .selection
-            .map(|expr| Selection::from(expr, table))
+            .map(|expr| Expression::from(expr, table))
             .transpose()?;
 
-        let index = if let Some(Selection::BinaryOperator {
+        let index = if let Some(Expression::BinaryOperator {
             operator: BinaryOperator::Eq,
             left,
             right,
         }) = &selection
         {
-            if let Selection::Column((column_number, _)) = left.as_ref() {
-                if let Selection::Integer(key) = right.as_ref() {
+            if let Expression::Column((column_number, _)) = left.as_ref() {
+                if let Expression::Integer(key) = right.as_ref() {
                     let mut next_index = table.indexes.as_ref();
                     while let Some(index) = next_index {
                         if index.columns[0] == *column_number {
@@ -210,12 +210,12 @@ impl Connection {
     }
 }
 
-enum Selection {
+enum Expression {
     Column((ColumnNumber, TypeAffinity)),
     BinaryOperator {
         operator: BinaryOperator,
-        left: Box<Selection>,
-        right: Box<Selection>,
+        left: Box<Expression>,
+        right: Box<Expression>,
     },
     Null,
     Integer(i64),
@@ -224,7 +224,7 @@ enum Selection {
     Blob(Vec<u8>),
 }
 
-impl Selection {
+impl Expression {
     fn from(expr: Expr, table: &Table) -> anyhow::Result<Self> {
         match expr {
             Expr::Null => Ok(Self::Null),
@@ -254,9 +254,12 @@ impl Selection {
         }
     }
 
-    fn execute<'a>(&'a self, row: &'a RowRef) -> anyhow::Result<(Value<'a>, Option<TypeAffinity>)> {
+    fn execute<'a>(
+        &'a self,
+        row: &'a RowData,
+    ) -> anyhow::Result<(Value<'a>, Option<TypeAffinity>)> {
         match self {
-            Self::Column((idx, affinity)) => Ok((row.get(idx)?, Some(*affinity))),
+            Self::Column((idx, affinity)) => Ok((row.get_column_value(idx)?, Some(*affinity))),
             Self::BinaryOperator {
                 operator,
                 left,
@@ -325,8 +328,8 @@ impl Selection {
 pub struct Statement<'conn> {
     conn: &'conn mut Connection,
     table_page_id: PageId,
-    columns: Vec<ColumnNumber>,
-    selection: Option<Selection>,
+    columns: Vec<Expression>,
+    selection: Option<Expression>,
     rowid: Option<i64>,
     index: Option<(PageId, Vec<i64>)>,
 }
@@ -335,19 +338,19 @@ impl<'conn> Statement<'conn> {
     pub(crate) fn new(
         conn: &'conn mut Connection,
         table_page_id: PageId,
-        columns: Vec<ColumnNumber>,
-        selection: Option<Selection>,
+        columns: Vec<Expression>,
+        selection: Option<Expression>,
     ) -> Self {
         let rowid = match &selection {
-            Some(Selection::BinaryOperator {
+            Some(Expression::BinaryOperator {
                 operator: BinaryOperator::Eq,
                 left,
                 right,
             }) => match (left.as_ref(), right.as_ref()) {
-                (Selection::Column((ColumnNumber::RowId, _)), Selection::Integer(value)) => {
+                (Expression::Column((ColumnNumber::RowId, _)), Expression::Integer(value)) => {
                     Some(*value)
                 }
-                (Selection::Integer(value), Selection::Column((ColumnNumber::RowId, _))) => {
+                (Expression::Integer(value), Expression::Column((ColumnNumber::RowId, _))) => {
                     Some(*value)
                 }
                 _ => None,
@@ -367,8 +370,8 @@ impl<'conn> Statement<'conn> {
     fn with_index(
         conn: &'conn mut Connection,
         table_page_id: PageId,
-        columns: Vec<ColumnNumber>,
-        selection: Option<Selection>,
+        columns: Vec<Expression>,
+        selection: Option<Expression>,
         index: Option<(PageId, Vec<i64>)>,
     ) -> Self {
         Self {
@@ -451,6 +454,7 @@ impl<'conn> Rows<'conn> {
             content_offset = headers[0].1;
             let last_header = &headers[headers.len() - 1];
             let content_size = last_header.1 + last_header.0.content_size() - content_offset;
+            assert!(content_offset + content_size <= payload.size());
             use_local_buffer = payload.buf().len() >= (content_offset + content_size) as usize;
             if !use_local_buffer {
                 tmp_buf.resize(content_size as usize, 0);
@@ -461,17 +465,25 @@ impl<'conn> Rows<'conn> {
             };
 
             if let Some(selection) = &self.stmt.selection {
-                let column_value_loader = RowRef {
+                let data = RowData {
                     rowid,
-                    payload: &payload,
-                    tmp_buf: &tmp_buf,
-                    headers: &headers,
+                    payload,
+                    tmp_buf,
+                    headers,
                     use_local_buffer,
                     content_offset,
                 };
-                match selection.execute(&column_value_loader)?.0 {
-                    Value::Null | Value::Integer(0) => continue,
-                    _ => {}
+                let skip = matches!(selection.execute(&data)?.0, Value::Null | Value::Integer(0));
+                RowData {
+                    rowid: _,
+                    payload: _,
+                    tmp_buf,
+                    headers,
+                    use_local_buffer,
+                    content_offset,
+                } = data;
+                if skip {
+                    continue;
                 }
             }
 
@@ -485,12 +497,14 @@ impl<'conn> Rows<'conn> {
 
         Ok(Some(Row {
             stmt: self.stmt,
-            headers,
-            rowid,
-            payload,
-            content_offset,
-            use_local_buffer,
-            tmp_buf,
+            data: RowData {
+                headers,
+                rowid,
+                payload,
+                content_offset,
+                use_local_buffer,
+                tmp_buf,
+            },
         }))
     }
 
@@ -534,82 +548,49 @@ impl<'conn> Rows<'conn> {
 
 const STATIC_NULL_VALUE: Value = Value::Null;
 
-fn get_column_value<'a>(
-    column_idx: &ColumnNumber,
+struct RowData<'a> {
     rowid: i64,
-    payload: &'a BtreePayload<'a, 'a>,
-    tmp_buf: &'a [u8],
-    headers: &'a [(SerialType, i32)],
-    use_local_buffer: bool,
-    content_offset: i32,
-) -> anyhow::Result<Value<'a>> {
-    match column_idx {
-        ColumnNumber::Column(idx) => {
-            if let Some((serial_type, offset)) = headers.get(*idx) {
-                let contents_buffer = if use_local_buffer {
-                    &payload.buf()[content_offset as usize..]
-                } else {
-                    tmp_buf
-                };
-                serial_type
-                    .parse(&contents_buffer[(offset - content_offset) as usize..])
-                    .context("parse value")
-            } else {
-                Ok(STATIC_NULL_VALUE)
-            }
-        }
-        ColumnNumber::RowId => Ok(Value::Integer(rowid)),
-    }
-}
-
-struct RowRef<'a> {
-    rowid: i64,
-    payload: &'a BtreePayload<'a, 'a>,
-    tmp_buf: &'a [u8],
-    headers: &'a [(SerialType, i32)],
-    use_local_buffer: bool,
-    content_offset: i32,
-}
-
-impl<'a> RowRef<'a> {
-    fn get(&self, column_idx: &ColumnNumber) -> anyhow::Result<Value> {
-        get_column_value(
-            column_idx,
-            self.rowid,
-            self.payload,
-            self.tmp_buf,
-            self.headers,
-            self.use_local_buffer,
-            self.content_offset,
-        )
-    }
-}
-
-pub struct Row<'a> {
-    stmt: &'a Statement<'a>,
-    rowid: i64,
-    pub payload: BtreePayload<'a, 'a>,
+    payload: BtreePayload<'a, 'a>,
     headers: Vec<(SerialType, i32)>,
     content_offset: i32,
     use_local_buffer: bool,
     tmp_buf: Vec<u8>,
 }
 
+impl<'a> RowData<'a> {
+    fn get_column_value(&self, column_idx: &ColumnNumber) -> anyhow::Result<Value> {
+        match column_idx {
+            ColumnNumber::Column(idx) => {
+                if let Some((serial_type, offset)) = self.headers.get(*idx) {
+                    let contents_buffer = if self.use_local_buffer {
+                        &self.payload.buf()[self.content_offset as usize..]
+                    } else {
+                        &self.tmp_buf
+                    };
+                    serial_type
+                        .parse(&contents_buffer[(offset - self.content_offset) as usize..])
+                        .context("parse value")
+                } else {
+                    Ok(STATIC_NULL_VALUE)
+                }
+            }
+            ColumnNumber::RowId => Ok(Value::Integer(self.rowid)),
+        }
+    }
+}
+
+pub struct Row<'a> {
+    stmt: &'a Statement<'a>,
+    data: RowData<'a>,
+}
+
 impl<'a> Row<'a> {
     pub fn parse(&self) -> anyhow::Result<Columns<'_>> {
         let mut columns = Vec::with_capacity(self.stmt.columns.len());
-        for column_idx in self.stmt.columns.iter() {
-            columns.push(get_column_value(
-                column_idx,
-                self.rowid,
-                &self.payload,
-                &self.tmp_buf,
-                &self.headers,
-                self.use_local_buffer,
-                self.content_offset,
-            )?);
+        for expr in self.stmt.columns.iter() {
+            let (value, _) = expr.execute(&self.data)?;
+            columns.push(value);
         }
-
         Ok(Columns(columns))
     }
 }

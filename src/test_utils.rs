@@ -25,6 +25,7 @@ use crate::pager::Pager;
 use crate::schema::Schema;
 use crate::Connection;
 use crate::DatabaseHeader;
+use crate::Expression;
 use crate::Statement;
 use crate::DATABASE_HEADER_SIZE;
 
@@ -68,7 +69,10 @@ pub fn buffer_to_hex(buf: &[u8]) -> String {
 pub fn find_table_page_id(table: &str, filepath: &Path) -> PageId {
     let mut conn = Connection::open(filepath).unwrap();
     let schema_table = Schema::schema_table();
-    let columns = schema_table.all_column_index().collect::<Vec<_>>();
+    let columns = schema_table
+        .get_all_columns()
+        .map(Expression::Column)
+        .collect::<Vec<_>>();
     let schema = Schema::generate(
         Statement::new(&mut conn, schema_table.root_page_id, columns, None),
         schema_table,
@@ -80,7 +84,10 @@ pub fn find_table_page_id(table: &str, filepath: &Path) -> PageId {
 pub fn find_index_page_id(index: &str, filepath: &Path) -> PageId {
     let mut conn = Connection::open(filepath).unwrap();
     let schema_table = Schema::schema_table();
-    let columns = schema_table.all_column_index().collect::<Vec<_>>();
+    let columns = schema_table
+        .get_all_columns()
+        .map(Expression::Column)
+        .collect::<Vec<_>>();
     let schema = Schema::generate(
         Statement::new(&mut conn, schema_table.root_page_id, columns, None),
         schema_table,

@@ -309,17 +309,40 @@ pub fn parse_select(input: &[u8]) -> Result<(usize, Select)> {
     ))
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum ResultColumn<'a> {
     All,
-    ColumnName(MaybeQuotedBytes<'a>),
+    AllOfTable(MaybeQuotedBytes<'a>),
+    Expr((Expr<'a>, Option<MaybeQuotedBytes<'a>>)),
 }
 
+/// Parse result column.
+///
+/// https://www.sqlite.org/syntax/result-column.html
 fn parse_result_column(input: &[u8]) -> Result<(usize, ResultColumn)> {
     match get_token_no_space(input) {
-        Some((n, Token::Identifier(id))) => Ok((n, ResultColumn::ColumnName(id))),
-        Some((n, Token::Asterisk)) => Ok((n, ResultColumn::All)),
-        _ => Err("no result column name"),
+        Some((n, Token::Identifier(table_name))) => {
+            if let Some((nn, Token::Dot)) = get_token_no_space(&input[n..]) {
+                if let Some((nnn, Token::Asterisk)) = get_token_no_space(&input[n + nn..]) {
+                    return Ok((n + nn + nnn, ResultColumn::AllOfTable(table_name)));
+                }
+            }
+        }
+        Some((n, Token::Asterisk)) => return Ok((n, ResultColumn::All)),
+        _ => {}
+    }
+    let (n, expr) = parse_expr(input)?;
+    match get_token_no_space(&input[n..]) {
+        Some((nn, Token::Identifier(alias))) => {
+            Ok((n + nn, ResultColumn::Expr((expr, Some(alias)))))
+        }
+        Some((nn, Token::As)) => {
+            let Some((nnn, Token::Identifier(alias))) = get_token_no_space(&input[n + nn..]) else {
+                return Err("no alias");
+            };
+            Ok((n + nn + nnn, ResultColumn::Expr((expr, Some(alias)))))
+        }
+        _ => Ok((n, ResultColumn::Expr((expr, None)))),
     }
 }
 
@@ -354,6 +377,9 @@ pub enum Expr<'a> {
     Blob(HexedBytes<'a>),
 }
 
+/// Parse expression.
+///
+/// https://www.sqlite.org/syntax/expr.html
 fn parse_expr(input: &[u8]) -> Result<(usize, Expr)> {
     let input_len = input.len();
     let (n, left) = match get_token_no_space(input) {
@@ -568,18 +594,58 @@ mod tests {
 
     #[test]
     fn test_parse_select_columns() {
-        let input = b"select id,name,*,col from foo";
+        let input = b"select id,name,*,col as col2, col3 col4, 10, 'text' as col5, col = 11, col2 < col3 as col6 from foo";
         let (n, select) = parse_select(input).unwrap();
         assert_eq!(n, input.len());
         assert_eq!(select.table_name, b"foo".as_slice().into());
         assert_eq!(
             select.columns,
             vec![
-                ResultColumn::ColumnName(b"id".as_slice().into()),
-                ResultColumn::ColumnName(b"name".as_slice().into()),
+                ResultColumn::Expr((Expr::Column(b"id".as_slice().into()), None)),
+                ResultColumn::Expr((Expr::Column(b"name".as_slice().into()), None)),
                 ResultColumn::All,
-                ResultColumn::ColumnName(b"col".as_slice().into())
+                ResultColumn::Expr((
+                    Expr::Column(b"col".as_slice().into()),
+                    Some(b"col2".as_slice().into())
+                )),
+                ResultColumn::Expr((
+                    Expr::Column(b"col3".as_slice().into()),
+                    Some(b"col4".as_slice().into())
+                )),
+                ResultColumn::Expr((Expr::Integer(10), None)),
+                ResultColumn::Expr((
+                    Expr::Text(b"'text'".as_slice().into()),
+                    Some(b"col5".as_slice().into())
+                )),
+                ResultColumn::Expr((
+                    Expr::BinaryOperator {
+                        operator: BinaryOperator::Eq,
+                        left: Box::new(Expr::Column(b"col".as_slice().into())),
+                        right: Box::new(Expr::Integer(11)),
+                    },
+                    None
+                )),
+                ResultColumn::Expr((
+                    Expr::BinaryOperator {
+                        operator: BinaryOperator::Lt,
+                        left: Box::new(Expr::Column(b"col2".as_slice().into())),
+                        right: Box::new(Expr::Column(b"col3".as_slice().into())),
+                    },
+                    Some(b"col6".as_slice().into())
+                ))
             ]
+        );
+    }
+
+    #[test]
+    fn test_parse_select_table_all() {
+        let input = b"select bar.* from foo";
+        let (n, select) = parse_select(input).unwrap();
+        assert_eq!(n, input.len());
+        assert_eq!(select.table_name, b"foo".as_slice().into());
+        assert_eq!(
+            select.columns,
+            vec![ResultColumn::AllOfTable(b"bar".as_slice().into()),]
         );
     }
 

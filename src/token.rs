@@ -63,6 +63,7 @@ static CHAR_LOOKUP_TABLE: [u8; 256] = [
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Token<'a> {
     Select,
+    As,
     From,
     Where,
     Create,
@@ -218,6 +219,7 @@ pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
                 }
                 match &lower_id {
                     b"select\0" => Some((len, Token::Select)),
+                    b"as\0\0\0\0\0" => Some((len, Token::As)),
                     b"from\0\0\0" => Some((len, Token::From)),
                     b"where\0\0" => Some((len, Token::Where)),
                     b"create\0" => Some((len, Token::Create)),
@@ -650,6 +652,7 @@ mod tests {
     fn test_keywords() {
         for (keyword, token) in [
             ("select", Token::Select),
+            ("as", Token::As),
             ("from", Token::From),
             ("where", Token::Where),
             ("create", Token::Create),
@@ -867,13 +870,17 @@ mod tests {
                 ],
             ),
             (
-                "select(col1,col2)from table1 where \"col1\"=1.1;",
+                "select(col1,col2 as col3)from table1 where \"col1\"=1.1;",
                 vec![
                     Token::Select,
                     Token::LeftParen,
                     Token::Identifier(b"col1".as_slice().into()),
                     Token::Comma,
                     Token::Identifier(b"col2".as_slice().into()),
+                    Token::Space,
+                    Token::As,
+                    Token::Space,
+                    Token::Identifier(b"col3".as_slice().into()),
                     Token::RightParen,
                     Token::From,
                     Token::Space,
