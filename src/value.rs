@@ -36,6 +36,59 @@ impl<'a> Value<'a> {
             Value::Text(t) => w.write_all(t),
         }
     }
+
+    /// Convert the text value to a numeric value if it is well-formed.
+    /// Otherwise, return the original value.
+    pub fn apply_numeric_affinity(self) -> Value<'a> {
+        match self {
+            Value::Null => Value::Null,
+            Value::Integer(i) => Value::Integer(i),
+            Value::Real(d) => Value::Real(d),
+            Value::Text(t) => {
+                let Ok(s) = std::str::from_utf8(t) else {
+                    return Value::Text(t);
+                };
+                match s.parse::<i64>() {
+                    Ok(i) => Value::Integer(i),
+                    Err(_) => match s.parse::<f64>() {
+                        Ok(d) => Value::Real(d),
+                        Err(_) => Value::Text(t),
+                    },
+                }
+            }
+            Value::Blob(b) => Value::Blob(b),
+        }
+    }
+
+    /// Convert the value to a text value.
+    ///
+    /// For [Value::Text] and [Value::Blob] values, this just changes the type
+    /// of the value.
+    ///
+    /// For [Value::Integer] and [Value::Real] values, this
+    /// converts the value to a text value.
+    ///
+    /// This does not support [Value::Null] values.
+    pub fn apply_text_affinity<'b>(self, text_buf: &'b mut Vec<u8>) -> Value<'b>
+    where
+        'a: 'b,
+    {
+        assert_ne!(self, Value::Null);
+        match self {
+            Value::Null => unreachable!(),
+            Value::Integer(i) => {
+                write!(text_buf, "{}", i).unwrap();
+                Value::Text(text_buf)
+            }
+            Value::Real(d) => {
+                // TODO: Use the same format as SQLite "%!.15g".
+                write!(text_buf, "{}", d).unwrap();
+                Value::Text(text_buf)
+            }
+            Value::Text(t) => Value::Text(t),
+            Value::Blob(b) => Value::Text(b),
+        }
+    }
 }
 
 impl PartialEq for Value<'_> {
@@ -243,5 +296,105 @@ mod tests {
             Value::Blob(b"abcde").cmp(&Value::Blob(b"abcdd")),
             Ordering::Greater
         );
+    }
+
+    #[test]
+    fn test_apply_numeric_affinity() {
+        assert_eq!(Value::Null.apply_numeric_affinity(), Value::Null);
+        assert_eq!(
+            Value::Integer(12345).apply_numeric_affinity(),
+            Value::Integer(12345)
+        );
+        assert_eq!(
+            Value::Real(12345.1).apply_numeric_affinity(),
+            Value::Real(12345.1)
+        );
+        assert_eq!(
+            Value::Text(b"12345").apply_numeric_affinity(),
+            Value::Integer(12345)
+        );
+        assert_eq!(
+            Value::Text(b"9223372036854775807").apply_numeric_affinity(),
+            Value::Integer(9223372036854775807)
+        );
+        assert_eq!(
+            Value::Text(b"-9223372036854775808").apply_numeric_affinity(),
+            Value::Integer(-9223372036854775808)
+        );
+        assert_eq!(
+            Value::Text(b"12345.6").apply_numeric_affinity(),
+            Value::Real(12345.6)
+        );
+        assert_eq!(
+            Value::Text(b"12345.6e+10").apply_numeric_affinity(),
+            Value::Real(12345.6e10)
+        );
+        assert_eq!(
+            Value::Blob(b"12345").apply_numeric_affinity(),
+            Value::Blob(b"12345")
+        );
+
+        // TODO; i64 overflow should preserve 15 digits?
+        assert_eq!(
+            Value::Text(b"9223372036854775808").apply_numeric_affinity(),
+            Value::Real(9223372036854776e3)
+        );
+        assert_eq!(
+            Value::Text(b"-9223372036854775809").apply_numeric_affinity(),
+            Value::Real(-9223372036854776e3)
+        );
+
+        // Invalid text as numeric
+        assert_eq!(
+            Value::Text(b"12345a").apply_numeric_affinity(),
+            Value::Text(b"12345a")
+        );
+    }
+
+    #[test]
+    fn test_apply_text_affinity() {
+        assert_eq!(
+            Value::Integer(12345).apply_text_affinity(&mut Vec::new()),
+            Value::Text(b"12345")
+        );
+        assert_eq!(
+            Value::Integer(-12345).apply_text_affinity(&mut Vec::new()),
+            Value::Text(b"-12345")
+        );
+        assert_eq!(
+            Value::Real(12345.1).apply_text_affinity(&mut Vec::new()),
+            Value::Text(b"12345.1")
+        );
+        assert_eq!(
+            Value::Real(-12345.1).apply_text_affinity(&mut Vec::new()),
+            Value::Text(b"-12345.1")
+        );
+        assert_eq!(
+            Value::Text(b"abcde").apply_text_affinity(&mut Vec::new()),
+            Value::Text(b"abcde")
+        );
+        assert_eq!(
+            Value::Blob(b"abcde").apply_text_affinity(&mut Vec::new()),
+            Value::Text(b"abcde")
+        );
+    }
+
+    #[test]
+    fn test_apply_text_affinity_buffer() {
+        let mut buf = Vec::new();
+        Value::Integer(12345).apply_text_affinity(&mut buf);
+        assert_eq!(buf.len(), 5);
+
+        let mut buf = Vec::new();
+        Value::Real(12345.1).apply_text_affinity(&mut buf);
+        assert_eq!(buf.len(), 7);
+
+        let mut buf = Vec::new();
+        Value::Text(b"abcde").apply_text_affinity(&mut buf);
+        assert_eq!(buf.capacity(), 0);
+
+        let mut buf = Vec::new();
+        Value::Blob(b"abcde").apply_text_affinity(&mut buf);
+        assert_eq!(buf.capacity(), 0);
     }
 }

@@ -265,8 +265,8 @@ impl Expression {
                 left,
                 right,
             } => {
-                let (left_value, left_affinity) = left.execute(row)?;
-                let (right_value, right_affinity) = right.execute(row)?;
+                let (mut left_value, left_affinity) = left.execute(row)?;
+                let (mut right_value, right_affinity) = right.execute(row)?;
 
                 match (&left_value, &right_value) {
                     (Value::Null, _) => return Ok((Value::Null, None)),
@@ -274,7 +274,8 @@ impl Expression {
                     _ => {}
                 }
 
-                // TODO: Type Conversions Prior To Comparison
+                let mut text_buf = Vec::new();
+                // Type Conversions Prior To Comparison
                 match (left_affinity, right_affinity) {
                     (
                         Some(TypeAffinity::Integer)
@@ -282,7 +283,7 @@ impl Expression {
                         | Some(TypeAffinity::Numeric),
                         Some(TypeAffinity::Text) | Some(TypeAffinity::Blob) | None,
                     ) => {
-                        // TODO: Apply numeric affinity to the right operand.
+                        right_value = right_value.apply_numeric_affinity();
                     }
                     (
                         Some(TypeAffinity::Text) | Some(TypeAffinity::Blob) | None,
@@ -290,13 +291,13 @@ impl Expression {
                         | Some(TypeAffinity::Real)
                         | Some(TypeAffinity::Numeric),
                     ) => {
-                        // TODO: Apply numeric affinity to the left operand.
+                        left_value = left_value.apply_numeric_affinity();
                     }
                     (Some(TypeAffinity::Text), None) => {
-                        // TODO: Apply text affinity to the right operands.
+                        right_value = right_value.apply_text_affinity(&mut text_buf);
                     }
                     (None, Some(TypeAffinity::Text)) => {
-                        // TODO: Apply text affinity to the left operands.
+                        left_value = left_value.apply_text_affinity(&mut text_buf);
                     }
                     _ => {}
                 }
@@ -608,6 +609,10 @@ impl<'a> Columns<'a> {
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Value<'a>> {
+        self.0.iter()
     }
 }
 

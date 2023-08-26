@@ -302,6 +302,56 @@ fn test_select_primary_key() {
 }
 
 #[test]
+fn test_select_type_conversions_prior_to_comparison() {
+    // Test case from https://www.sqlite.org/datatype3.html#comparison_example
+    let file = create_sqlite_database(&[
+        "CREATE TABLE t1(a TEXT, b NUMERIC, c BLOB, d);",
+        "INSERT INTO t1 VALUES ('500', '500', '500', 500);",
+    ]);
+
+    let mut conn = Connection::open(file.path()).unwrap();
+
+    for (result, query) in [
+        (vec![0, 1, 1], "SELECT a < 40,   a < 60,   a < 600 FROM t1;"),
+        (
+            vec![0, 1, 1],
+            "SELECT a < '40', a < '60', a < '600' FROM t1;",
+        ),
+        (vec![0, 0, 1], "SELECT b < 40,   b < 60,   b < 600 FROM t1;"),
+        (
+            vec![0, 0, 1],
+            "SELECT b < '40', b < '60', b < '600' FROM t1;",
+        ),
+        (vec![0, 0, 0], "SELECT c < 40,   c < 60,   c < 600 FROM t1;"),
+        (
+            vec![0, 1, 1],
+            "SELECT c < '40', c < '60', c < '600' FROM t1;",
+        ),
+        (vec![0, 0, 1], "SELECT d < 40,   d < 60,   d < 600 FROM t1;"),
+        (
+            vec![1, 1, 1],
+            "SELECT d < '40', d < '60', d < '600' FROM t1;",
+        ),
+    ] {
+        let mut stmt = conn.prepare(query).unwrap();
+        let mut rows = stmt.execute().unwrap();
+        let row = rows.next_row().unwrap().unwrap();
+        let columns = row.parse().unwrap();
+        assert_eq!(columns.len(), result.len());
+        let columns = columns
+            .iter()
+            .map(|v| {
+                let Value::Integer(i) = *v else {
+                    unreachable!()
+                };
+                i
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(columns, result, "query: {}", query);
+    }
+}
+
+#[test]
 fn test_select_filter() {
     let file = create_sqlite_database(&[
         "CREATE TABLE example(col1, col2, col3);",
