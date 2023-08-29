@@ -20,7 +20,7 @@ use crate::utils::parse_integer;
 use crate::utils::ParseIntegerResult;
 
 // TODO: Own the buffer of Text and Blob.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Value<'a> {
     Null,
     Integer(i64),
@@ -51,9 +51,14 @@ impl<'a> Value<'a> {
             Value::Text(t) => match parse_integer(t) {
                 (true, ParseIntegerResult::Integer(i)) => Value::Integer(i),
                 _ => {
-                    let (valid, d) = parse_float(t);
+                    let (valid, _, d) = parse_float(t);
                     if valid {
-                        Value::Real(d)
+                        let di = real_to_int(d);
+                        if is_real_same_as_int(d, di) {
+                            Value::Integer(di)
+                        } else {
+                            Value::Real(d)
+                        }
                     } else {
                         Value::Text(t)
                     }
@@ -91,6 +96,98 @@ impl<'a> Value<'a> {
             Value::Text(t) => Value::Text(t),
             Value::Blob(b) => Value::Text(b),
         }
+    }
+
+    /// Convert the [Value] to the type of [TypeAffinity] even if the conversion
+    /// is lossy.
+    ///
+    /// This is used for the CAST expression.
+    ///
+    /// https://www.sqlite.org/lang_expr.html#castexpr
+    pub fn force_apply_type_affinity(self, type_affinity: TypeAffinity) -> Value<'a> {
+        match type_affinity {
+            TypeAffinity::Numeric => match self {
+                Value::Null => Value::Null,
+                Value::Integer(i) => Value::Integer(i),
+                Value::Real(d) => Value::Real(d),
+                Value::Text(buf) | Value::Blob(buf) => {
+                    let (_, pure_integer, d) = parse_float(buf);
+                    let mut v = if pure_integer {
+                        let (_, parsed_int) = parse_integer(buf);
+                        match parsed_int {
+                            ParseIntegerResult::Integer(i) => Value::Integer(i),
+                            _ => Value::Real(d),
+                        }
+                    } else {
+                        Value::Real(d)
+                    };
+                    if let Value::Real(d) = &v {
+                        let di = real_to_int(*d);
+                        if is_real_same_as_int(*d, di) {
+                            v = Value::Integer(di);
+                        }
+                    }
+                    v
+                }
+            },
+            TypeAffinity::Integer => match self {
+                Value::Null => Value::Null,
+                Value::Integer(i) => Value::Integer(i),
+                Value::Real(d) => Value::Integer(real_to_int(d)),
+                Value::Text(buf) | Value::Blob(buf) => {
+                    let (_, parsed_int) = parse_integer(buf);
+                    match parsed_int {
+                        ParseIntegerResult::Integer(i) => Value::Integer(i),
+                        ParseIntegerResult::Empty => Value::Integer(0),
+                        ParseIntegerResult::MaxPlusOne | ParseIntegerResult::TooBig(true) => {
+                            Value::Integer(i64::MAX)
+                        }
+                        ParseIntegerResult::TooBig(false) => Value::Integer(i64::MIN),
+                    }
+                }
+            },
+            TypeAffinity::Real => match self {
+                Value::Null => Value::Null,
+                Value::Integer(i) => Value::Real(i as f64),
+                Value::Real(d) => Value::Real(d),
+                Value::Text(buf) | Value::Blob(buf) => {
+                    let (_, _, d) = parse_float(buf);
+                    Value::Real(d)
+                }
+            },
+            TypeAffinity::Text | TypeAffinity::Blob => {
+                let value_type = if type_affinity == TypeAffinity::Text {
+                    Value::Text
+                } else {
+                    Value::Blob
+                };
+                match self {
+                    Value::Null => Value::Null,
+                    Value::Text(t) => value_type(t),
+                    Value::Blob(b) => value_type(b),
+                    _ => todo!("apply_type_affinity text"),
+                }
+            }
+        }
+    }
+}
+
+/// sqlite3RealSameAsInt() in vdbemem.c of SQLite
+fn is_real_same_as_int(d: f64, i: i64) -> bool {
+    let di = i as f64;
+    d == 0.0
+        || (d.to_ne_bytes() == di.to_ne_bytes()
+            && (-2251799813685248..2251799813685248).contains(&i))
+}
+
+/// doubleToInt64() in vdbemem.c of SQLite.
+fn real_to_int(d: f64) -> i64 {
+    if d >= i64::MAX as f64 {
+        i64::MAX
+    } else if d <= i64::MIN as f64 {
+        i64::MIN
+    } else {
+        d as i64
     }
 }
 
@@ -304,14 +401,17 @@ mod tests {
     #[test]
     fn test_apply_numeric_affinity() {
         assert_eq!(Value::Null.apply_numeric_affinity(), Value::Null);
+
         assert_eq!(
             Value::Integer(12345).apply_numeric_affinity(),
             Value::Integer(12345)
         );
+
         assert_eq!(
             Value::Real(12345.1).apply_numeric_affinity(),
             Value::Real(12345.1)
         );
+
         assert_eq!(
             Value::Text(b"12345").apply_numeric_affinity(),
             Value::Integer(12345)
@@ -329,6 +429,14 @@ mod tests {
             Value::Integer(-9223372036854775808)
         );
         assert_eq!(
+            Value::Text(b"0.0").apply_numeric_affinity(),
+            Value::Integer(0)
+        );
+        assert_eq!(
+            Value::Text(b"12345.0").apply_numeric_affinity(),
+            Value::Integer(12345)
+        );
+        assert_eq!(
             Value::Text(b"12345.6").apply_numeric_affinity(),
             Value::Real(12345.6)
         );
@@ -341,8 +449,24 @@ mod tests {
             Value::Real(12345.6e10)
         );
         assert_eq!(
-            Value::Blob(b"12345").apply_numeric_affinity(),
-            Value::Blob(b"12345")
+            Value::Text(b"12345e-1").apply_numeric_affinity(),
+            Value::Real(1234.5)
+        );
+        assert_eq!(
+            Value::Text(b"2251799813685248.0").apply_numeric_affinity(),
+            Value::Integer(2251799813685248)
+        );
+        assert_eq!(
+            Value::Text(b"-2251799813685248.0").apply_numeric_affinity(),
+            Value::Integer(-2251799813685248)
+        );
+        assert_eq!(
+            Value::Text(b"2251799813685249.0").apply_numeric_affinity(),
+            Value::Real(2251799813685249.0)
+        );
+        assert_eq!(
+            Value::Text(b"-2251799813685249.0").apply_numeric_affinity(),
+            Value::Real(-2251799813685249.0)
         );
 
         // TODO; i64 overflow should preserve 15 digits?
@@ -363,6 +487,19 @@ mod tests {
         assert_eq!(
             Value::Text(b"12345e").apply_numeric_affinity(),
             Value::Text(b"12345e")
+        );
+        assert_eq!(
+            Value::Text(b"a12345").apply_numeric_affinity(),
+            Value::Text(b"a12345")
+        );
+        assert_eq!(
+            Value::Text(b".").apply_numeric_affinity(),
+            Value::Text(b".")
+        );
+
+        assert_eq!(
+            Value::Blob(b"12345").apply_numeric_affinity(),
+            Value::Blob(b"12345")
         );
     }
 
@@ -411,5 +548,345 @@ mod tests {
         let mut buf = Vec::new();
         Value::Blob(b"abcde").apply_text_affinity(&mut buf);
         assert_eq!(buf.capacity(), 0);
+    }
+
+    #[test]
+    fn test_force_apply_type_affinity_numeric() {
+        assert_eq!(
+            Value::Null.force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Null
+        );
+
+        assert_eq!(
+            Value::Integer(12345).force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Integer(12345)
+        );
+
+        assert_eq!(
+            Value::Real(12345.1).force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Real(12345.1)
+        );
+
+        assert_eq!(
+            Value::Text(b"12345").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Integer(12345)
+        );
+        assert_eq!(
+            Value::Text(b" 12345 ").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Integer(12345)
+        );
+        assert_eq!(
+            Value::Text(b"9223372036854775807").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Integer(9223372036854775807)
+        );
+        assert_eq!(
+            Value::Text(b"-9223372036854775808").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Integer(-9223372036854775808)
+        );
+        assert_eq!(
+            Value::Text(b"0.0").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Integer(0)
+        );
+        assert_eq!(
+            Value::Text(b"12345.0").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Integer(12345)
+        );
+        assert_eq!(
+            Value::Text(b"12345.6").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Real(12345.6)
+        );
+        assert_eq!(
+            Value::Text(b" 12345.6 ").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Real(12345.6)
+        );
+        assert_eq!(
+            Value::Text(b"12345.6e+10").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Real(12345.6e10)
+        );
+        assert_eq!(
+            Value::Text(b"12345e-1").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Real(1234.5)
+        );
+        assert_eq!(
+            Value::Text(b"2251799813685248.0").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Integer(2251799813685248)
+        );
+        assert_eq!(
+            Value::Text(b"-2251799813685248.0").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Integer(-2251799813685248)
+        );
+        assert_eq!(
+            Value::Text(b"2251799813685249.0").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Real(2251799813685249.0)
+        );
+        assert_eq!(
+            Value::Text(b"-2251799813685249.0").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Real(-2251799813685249.0)
+        );
+
+        // TODO; i64 overflow should preserve 15 digits?
+        assert_eq!(
+            Value::Text(b"9223372036854775808").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Real(9223372036854776e3)
+        );
+        assert_eq!(
+            Value::Text(b"-9223372036854775809").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Real(-9223372036854776e3)
+        );
+
+        // Invalid text as numeric
+        assert_eq!(
+            Value::Text(b"9223372036854775807e").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Integer(9223372036854775807)
+        );
+        assert_eq!(
+            Value::Text(b"9223372036854775807.e").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Real(9223372036854776e3)
+        );
+        assert_eq!(
+            Value::Text(b"12345a").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Integer(12345)
+        );
+        assert_eq!(
+            Value::Text(b"12345e").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Integer(12345)
+        );
+        assert_eq!(
+            Value::Text(b"12345.e").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Integer(12345)
+        );
+        assert_eq!(
+            Value::Text(b"12345.6a").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Real(12345.6)
+        );
+        assert_eq!(
+            Value::Text(b"12345.6e").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Real(12345.6)
+        );
+        assert_eq!(
+            Value::Text(b"a12345").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Integer(0)
+        );
+        assert_eq!(
+            Value::Text(b".").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Integer(0)
+        );
+
+        assert_eq!(
+            Value::Blob(b"12345").force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Integer(12345)
+        );
+    }
+
+    #[test]
+    fn test_force_apply_type_affinity_integer() {
+        assert_eq!(
+            Value::Null.force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Null
+        );
+
+        assert_eq!(
+            Value::Integer(12345).force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(12345)
+        );
+
+        assert_eq!(
+            Value::Real(12345.1).force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(12345)
+        );
+
+        assert_eq!(
+            Value::Text(b"12345").force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(12345)
+        );
+        assert_eq!(
+            Value::Text(b"-12345").force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(-12345)
+        );
+        assert_eq!(
+            Value::Text(b"0012345").force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(12345)
+        );
+        assert_eq!(
+            Value::Text(b"-0012345").force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(-12345)
+        );
+        assert_eq!(
+            Value::Text(b"9223372036854775807").force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(9223372036854775807)
+        );
+        assert_eq!(
+            Value::Text(b"  0009223372036854775807")
+                .force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(9223372036854775807)
+        );
+        assert_eq!(
+            Value::Text(b"-9223372036854775808").force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(-9223372036854775808)
+        );
+        assert_eq!(
+            Value::Text(b"  -0009223372036854775808")
+                .force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(-9223372036854775808)
+        );
+        assert_eq!(
+            Value::Text(b"12345.6").force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(12345)
+        );
+        assert_eq!(
+            Value::Text(b"12345e-1").force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(12345)
+        );
+        assert_eq!(
+            Value::Text(b"12345.6e2").force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(12345)
+        );
+        assert_eq!(
+            Value::Text(b"9223372036854775808").force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(9223372036854775807)
+        );
+        assert_eq!(
+            Value::Text(b"-9223372036854775809").force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(-9223372036854775808)
+        );
+        assert_eq!(
+            Value::Text(b"12345a").force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(12345)
+        );
+        assert_eq!(
+            Value::Text(b"12345e").force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(12345)
+        );
+        assert_eq!(
+            Value::Text(b"12345a").force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(12345)
+        );
+        assert_eq!(
+            Value::Text(b"a12345").force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(0)
+        );
+        assert_eq!(
+            Value::Text(b"-+12345").force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(0)
+        );
+
+        assert_eq!(
+            Value::Blob(b"12345").force_apply_type_affinity(TypeAffinity::Integer),
+            Value::Integer(12345)
+        );
+    }
+
+    #[test]
+    fn test_force_apply_type_affinity_real() {
+        assert_eq!(
+            Value::Null.force_apply_type_affinity(TypeAffinity::Real),
+            Value::Null
+        );
+
+        assert_eq!(
+            Value::Integer(12345).force_apply_type_affinity(TypeAffinity::Real),
+            Value::Real(12345.0)
+        );
+        assert_eq!(
+            Value::Integer(9223372036854775807).force_apply_type_affinity(TypeAffinity::Real),
+            Value::Real(9223372036854776e3)
+        );
+
+        assert_eq!(
+            Value::Real(12345.1).force_apply_type_affinity(TypeAffinity::Real),
+            Value::Real(12345.1)
+        );
+
+        assert_eq!(
+            Value::Text(b"0.1").force_apply_type_affinity(TypeAffinity::Real),
+            Value::Real(0.1)
+        );
+        assert_eq!(
+            Value::Text(b".1").force_apply_type_affinity(TypeAffinity::Real),
+            Value::Real(0.1)
+        );
+        assert_eq!(
+            Value::Text(b"12345").force_apply_type_affinity(TypeAffinity::Real),
+            Value::Real(12345.0)
+        );
+        assert_eq!(
+            Value::Text(b"12345.6").force_apply_type_affinity(TypeAffinity::Real),
+            Value::Real(12345.6)
+        );
+        assert_eq!(
+            Value::Text(b"-12345.6").force_apply_type_affinity(TypeAffinity::Real),
+            Value::Real(-12345.6)
+        );
+        assert_eq!(
+            Value::Text(b"0012345.6").force_apply_type_affinity(TypeAffinity::Real),
+            Value::Real(12345.6)
+        );
+        assert_eq!(
+            Value::Text(b"-0012345.6").force_apply_type_affinity(TypeAffinity::Real),
+            Value::Real(-12345.6)
+        );
+        assert_eq!(
+            Value::Text(b"12345.6e-1").force_apply_type_affinity(TypeAffinity::Real),
+            Value::Real(1234.56)
+        );
+        assert_eq!(
+            Value::Text(b"12345e-1").force_apply_type_affinity(TypeAffinity::Real),
+            Value::Real(1234.5)
+        );
+        assert_eq!(
+            Value::Text(b"9223372036854775808").force_apply_type_affinity(TypeAffinity::Real),
+            Value::Real(9223372036854776e3)
+        );
+        assert_eq!(
+            Value::Text(b"12345a").force_apply_type_affinity(TypeAffinity::Real),
+            Value::Real(12345.0)
+        );
+        assert_eq!(
+            Value::Text(b"a12345").force_apply_type_affinity(TypeAffinity::Real),
+            Value::Real(0.0)
+        );
+        assert_eq!(
+            Value::Text(b"+-12345").force_apply_type_affinity(TypeAffinity::Real),
+            Value::Real(0.0)
+        );
+
+        assert_eq!(
+            Value::Text(b"12345").force_apply_type_affinity(TypeAffinity::Real),
+            Value::Real(12345.0)
+        );
+    }
+
+    #[test]
+    fn test_force_apply_type_affinity_text() {
+        assert_eq!(
+            Value::Null.force_apply_type_affinity(TypeAffinity::Text),
+            Value::Null
+        );
+        // TODO; tests for integer/real
+        assert_eq!(
+            Value::Text(b"12345").force_apply_type_affinity(TypeAffinity::Text),
+            Value::Text(b"12345")
+        );
+        assert_eq!(
+            Value::Blob(b"12345").force_apply_type_affinity(TypeAffinity::Text),
+            Value::Text(b"12345")
+        );
+    }
+
+    #[test]
+    fn test_force_apply_type_affinity_blob() {
+        assert_eq!(
+            Value::Null.force_apply_type_affinity(TypeAffinity::Blob),
+            Value::Null
+        );
+        // TODO; tests for integer/real
+        assert_eq!(
+            Value::Text(b"12345").force_apply_type_affinity(TypeAffinity::Blob),
+            Value::Blob(b"12345")
+        );
+        assert_eq!(
+            Value::Blob(b"12345").force_apply_type_affinity(TypeAffinity::Blob),
+            Value::Blob(b"12345")
+        );
     }
 }

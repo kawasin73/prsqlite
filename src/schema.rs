@@ -287,7 +287,7 @@ pub enum ColumnNumber {
 /// Convert type name (which is a identifier sequence) to type affinity.
 ///
 /// https://www.sqlite.org/datatype3.html#determination_of_column_affinity
-fn calc_type_affinity(type_name: &[MaybeQuotedBytes]) -> TypeAffinity {
+pub fn calc_type_affinity(type_name: &[MaybeQuotedBytes]) -> TypeAffinity {
     if type_name.is_empty() {
         return TypeAffinity::Blob;
     }

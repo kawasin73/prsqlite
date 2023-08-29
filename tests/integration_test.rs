@@ -219,8 +219,8 @@ fn test_select_column_name_and_all() {
 #[test]
 fn test_select_expression() {
     let file = create_sqlite_database(&[
-        "CREATE TABLE example(col1, col2, col3);",
-        "INSERT INTO example(col1, col2, col3) VALUES (1, 2, -3);",
+        "CREATE TABLE example(col1, col2, col3, col4);",
+        "INSERT INTO example(col1, col2, col3, col4) VALUES (1, 2, -3, 4.5);",
     ]);
 
     let mut conn = Connection::open(file.path()).unwrap();
@@ -295,6 +295,70 @@ fn test_select_expression() {
     assert_eq!(columns.get(5), &Value::Integer(1));
     drop(row);
     assert!(rows.next_row().unwrap().is_none());
+
+    // Cast to numeric
+    let mut stmt = conn
+        .prepare(
+            "SELECT CAST(col1 AS NUMERIC), CAST(col4 AS NUMERIC), CAST(' 10 ' AS NUMERIC), CAST('10a' AS NUMERIC), CAST('10e.1' AS NUMERIC), CAST('a3' AS NUMERIC), CAST('10.12e1' AS NUMERIC) FROM example;",
+        )
+        .unwrap();
+    let mut rows = stmt.execute().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 7);
+    assert_eq!(columns.get(0), &Value::Integer(1));
+    assert_eq!(columns.get(1), &Value::Real(4.5));
+    assert_eq!(columns.get(2), &Value::Integer(10));
+    assert_eq!(columns.get(3), &Value::Integer(10));
+    assert_eq!(columns.get(4), &Value::Integer(10));
+    assert_eq!(columns.get(5), &Value::Integer(0));
+    assert_eq!(columns.get(6), &Value::Real(101.2));
+    drop(row);
+    assert!(rows.next_row().unwrap().is_none());
+
+    // Cast to integer
+    let mut stmt = conn
+        .prepare(
+            "SELECT CAST(col1 AS INTEGER), CAST(col4 AS INTEGER), CAST(' 10 ' AS INTEGER), CAST('10a' AS INTEGER), CAST('10e.1' AS INTEGER), CAST('a3' AS INTEGER), CAST('10.12e1' AS INTEGER) FROM example;",
+        )
+        .unwrap();
+    let mut rows = stmt.execute().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 7);
+    assert_eq!(columns.get(0), &Value::Integer(1));
+    assert_eq!(columns.get(1), &Value::Integer(4));
+    assert_eq!(columns.get(2), &Value::Integer(10));
+    assert_eq!(columns.get(3), &Value::Integer(10));
+    assert_eq!(columns.get(4), &Value::Integer(10));
+    assert_eq!(columns.get(5), &Value::Integer(0));
+    assert_eq!(columns.get(6), &Value::Integer(10));
+    drop(row);
+    assert!(rows.next_row().unwrap().is_none());
+
+    // Cast to float
+    let mut stmt = conn
+        .prepare(
+            "SELECT CAST(col1 AS FLOAT), CAST(col4 AS FLOAT), CAST(' 10 ' AS FLOAT), CAST('10a' AS FLOAT), CAST('10e.1' AS FLOAT), CAST('a3' AS FLOAT), CAST('10.12e1' AS FLOAT) FROM example;",
+        )
+        .unwrap();
+    let mut rows = stmt.execute().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 7);
+    assert_eq!(columns.get(0), &Value::Real(1.0));
+    assert_eq!(columns.get(1), &Value::Real(4.5));
+    assert_eq!(columns.get(2), &Value::Real(10.0));
+    assert_eq!(columns.get(3), &Value::Real(10.0));
+    assert_eq!(columns.get(4), &Value::Real(10.0));
+    assert_eq!(columns.get(5), &Value::Real(0.0));
+    assert_eq!(columns.get(6), &Value::Real(101.2));
+    drop(row);
+    assert!(rows.next_row().unwrap().is_none());
+
+    // TODO: Cast to text
+
+    // TODO: Cast to blob
 }
 
 #[test]
@@ -338,17 +402,23 @@ fn test_select_primary_key() {
 fn test_select_type_conversions_prior_to_comparison() {
     // Test case from https://www.sqlite.org/datatype3.html#comparison_example
     let file = create_sqlite_database(&[
-        "CREATE TABLE t1(a TEXT, b NUMERIC, c BLOB, d);",
-        "INSERT INTO t1 VALUES ('500', '500', '500', 500);",
+        "CREATE TABLE t1(a TEXT, b NUMERIC, c BLOB, d, e BLOB);",
+        "INSERT INTO t1 VALUES ('500', '500', '500', 500, 500);",
     ]);
 
+    let test_conn = rusqlite::Connection::open(file.path()).unwrap();
     let mut conn = Connection::open(file.path()).unwrap();
 
-    for (result, query) in [
+    for (expected, query) in [
         (vec![0, 1, 1], "SELECT a < 40,   a < 60,   a < 600 FROM t1;"),
         (
             vec![0, 1, 1],
             "SELECT a < '40', a < '60', a < '600' FROM t1;",
+        ),
+        // numeric affinity is prioritized over text affinity
+        (
+            vec![0, 0, 1],
+            "SELECT a < CAST('40' AS NUMERIC), a < CAST('60' AS NUMERIC), a < CAST('600' AS NUMERIC) FROM t1;",
         ),
         (vec![0, 0, 1], "SELECT b < 40,   b < 60,   b < 600 FROM t1;"),
         (
@@ -371,12 +441,33 @@ fn test_select_type_conversions_prior_to_comparison() {
             vec![1, 1, 1],
             "SELECT d < '40', d < '60', d < '600' FROM t1;",
         ),
+        // no affinity is converted to text
+        (
+            vec![0, 1, 1],
+            "SELECT 500 < CAST('40' AS TEXT), 500 < CAST('60' AS TEXT), 500 < CAST('600' AS TEXT) FROM t1;",
+        ),
+        // blob affinity is not converted to text
+        (
+            vec![1, 1, 1],
+            "SELECT e < CAST('40' AS TEXT), e < CAST('60' AS TEXT), e < CAST('600' AS TEXT) FROM t1;",
+        ),
     ] {
+        let mut stmt = test_conn.prepare(query).unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        let row = rows.next().unwrap().unwrap();
+        let result: Vec<i64> = (0..expected.len())
+            .map(|i| {
+                let v: i64 = row.get(i).unwrap();
+                v
+            })
+            .collect();
+        assert_eq!(result, expected, "query: {}", query);
+
         let mut stmt = conn.prepare(query).unwrap();
         let mut rows = stmt.execute().unwrap();
         let row = rows.next_row().unwrap().unwrap();
         let columns = row.parse().unwrap();
-        assert_eq!(columns.len(), result.len());
+        assert_eq!(columns.len(), expected.len());
         let columns = columns
             .iter()
             .map(|v| {
@@ -386,7 +477,7 @@ fn test_select_type_conversions_prior_to_comparison() {
                 i
             })
             .collect::<Vec<_>>();
-        assert_eq!(columns, result, "query: {}", query);
+        assert_eq!(columns, expected, "query: {}", query);
     }
 }
 

@@ -74,6 +74,7 @@ pub enum Token<'a> {
     Key,
     On,
     Null,
+    Cast,
     Space,
     LeftParen,
     RightParen,
@@ -230,6 +231,7 @@ pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
                     b"key\0\0\0\0" => Some((len, Token::Key)),
                     b"on\0\0\0\0\0" => Some((len, Token::On)),
                     b"null\0\0\0" => Some((len, Token::Null)),
+                    b"cast\0\0\0" => Some((len, Token::Cast)),
                     _ => Some((len, Token::Identifier(id.into()))),
                 }
             } else {
@@ -670,6 +672,7 @@ mod tests {
             ("key", Token::Key),
             ("on", Token::On),
             ("null", Token::Null),
+            ("cast", Token::Cast),
         ] {
             assert_eq!(get_token(keyword.as_bytes()), Some((keyword.len(), token)));
             let input = format!("{keyword} ");

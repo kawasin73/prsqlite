@@ -178,8 +178,9 @@ pub fn parse_integer(input: &[u8]) -> (bool, ParseIntegerResult) {
 /// * Contain '.'
 /// * Contain 'e' or 'E'
 /// * Overflow i64 range
-pub fn parse_float(input: &[u8]) -> (bool, f64) {
+pub fn parse_float(input: &[u8]) -> (bool, bool, f64) {
     let mut n = 0;
+    let mut pure_integer = false;
 
     // Skip leading spaces
     for byte in input.iter() {
@@ -209,6 +210,7 @@ pub fn parse_float(input: &[u8]) -> (bool, f64) {
             break;
         }
         n_zero += 1;
+        pure_integer = true;
     }
     n += n_zero;
 
@@ -221,6 +223,7 @@ pub fn parse_float(input: &[u8]) -> (bool, f64) {
         if byte.is_ascii_digit() {
             significand = significand * 10 + (byte - b'0') as i64;
             digits += 1;
+            pure_integer = true;
             if significand < (i64::MAX - 9) / 10 {
                 continue;
             }
@@ -239,6 +242,7 @@ pub fn parse_float(input: &[u8]) -> (bool, f64) {
 
     // Parse fractional part
     if let Some(&b'.') = input.get(n) {
+        pure_integer = false;
         n += 1;
         let mut fractional_digits = 0;
         for byte in &input[n..] {
@@ -287,6 +291,9 @@ pub fn parse_float(input: &[u8]) -> (bool, f64) {
                 }
             }
             dicimal_point += (exponent * exponent_sign) as i64;
+            if valid_exponent {
+                pure_integer = false;
+            }
             valid_exponent
         }
         _ => true,
@@ -333,7 +340,7 @@ pub fn parse_float(input: &[u8]) -> (bool, f64) {
     };
     let v = if positive { v } else { -v };
 
-    (valid, v)
+    (valid, pure_integer, v)
 }
 
 /// Converts a single byte to its uppercase equivalent.
@@ -785,43 +792,63 @@ mod tests {
             ("2e0123456789", f64::INFINITY),
             ("1e10000", f64::INFINITY),
             ("1e-10000", 0.0),
-            ("9223372036854775807", 9223372036854775808.0),
-            ("9223372036854775808", 9223372036854775808.0),
-            ("9223372036854775808", i64::MAX as f64),
-            ("9999999999999999999", 9999999999999999999.0),
             ("922337203685477580.0", 922337203685477580.0),
             // "SELECT 922337203685477580.0e-10" show 92233720.3685478 in sqlite.
             ("922337203685477580.0e-10", 92233720.36854777),
         ] {
             assert_eq!(
                 parse_float(literal.as_bytes()),
-                (true, value),
+                (true, false, value),
                 "literal: {}",
                 literal
             );
             let with_extra = format!("{literal}abc");
             assert_eq!(
                 parse_float(with_extra.as_bytes()),
-                (false, value),
+                (false, false, value),
                 "literal: {}",
                 with_extra
             );
             let with_e = format!("{literal}e");
             assert_eq!(
                 parse_float(with_e.as_bytes()),
-                (false, value),
+                (false, false, value),
                 "literal: {}",
                 with_e
             );
         }
-        assert_eq!(parse_float("1.23".as_bytes()), (true, 1.23));
-        assert_eq!(parse_float("1.23e".as_bytes()), (false, 1.23));
-        assert_eq!(parse_float("1.23e-".as_bytes()), (false, 1.23));
-        assert_eq!(parse_float(".".as_bytes()), (false, 0.0));
-        assert_eq!(parse_float("".as_bytes()), (false, 0.0));
-        assert_eq!(parse_float(" ".as_bytes()), (false, 0.0));
-        assert_eq!(parse_float("abc".as_bytes()), (false, 0.0));
-        assert_eq!(parse_float("a1.23".as_bytes()), (false, 0.0));
+        assert_eq!(parse_float("1.23".as_bytes()), (true, false, 1.23));
+        assert_eq!(parse_float("1.23e".as_bytes()), (false, false, 1.23));
+        assert_eq!(parse_float("1.23e-".as_bytes()), (false, false, 1.23));
+        assert_eq!(parse_float(".".as_bytes()), (false, false, 0.0));
+        assert_eq!(parse_float("".as_bytes()), (false, false, 0.0));
+        assert_eq!(parse_float(" ".as_bytes()), (false, false, 0.0));
+        assert_eq!(parse_float("abc".as_bytes()), (false, false, 0.0));
+        assert_eq!(parse_float("a1.23".as_bytes()), (false, false, 0.0));
+
+        // Pure integer
+        assert_eq!(parse_float("0".as_bytes()), (true, true, 0.0));
+        assert_eq!(parse_float("123".as_bytes()), (true, true, 123.0));
+        assert_eq!(
+            parse_float("9223372036854775807".as_bytes()),
+            (true, true, 9223372036854775808.0)
+        );
+        assert_eq!(
+            parse_float("9223372036854775808".as_bytes()),
+            (true, true, 9223372036854775808.0)
+        );
+        assert_eq!(
+            parse_float("9999999999999999999".as_bytes()),
+            (true, true, 9999999999999999999.0)
+        );
+        assert_eq!(
+            parse_float("9223372036854775807a".as_bytes()),
+            (false, true, 9223372036854775808.0)
+        );
+        assert_eq!(
+            parse_float("9223372036854775807e".as_bytes()),
+            (false, true, 9223372036854775808.0)
+        );
     }
 
     #[test]

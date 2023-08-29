@@ -45,6 +45,7 @@ use crate::parser::ResultColumn;
 use crate::record::parse_record_header;
 use crate::record::Record;
 use crate::record::SerialType;
+use crate::schema::calc_type_affinity;
 use crate::schema::ColumnNumber;
 use crate::schema::Schema;
 use crate::schema::Table;
@@ -220,6 +221,10 @@ enum Expression {
         left: Box<Expression>,
         right: Box<Expression>,
     },
+    Cast {
+        expr: Box<Expression>,
+        type_affinity: TypeAffinity,
+    },
     Null,
     Integer(i64),
     Real(f64),
@@ -257,6 +262,10 @@ impl Expression {
                         std::str::from_utf8(&column_name).unwrap_or_default()
                     ))
             }
+            Expr::Cast { expr, type_name } => Ok(Self::Cast {
+                expr: Box::new(Self::from(*expr, table)?),
+                type_affinity: calc_type_affinity(&type_name),
+            }),
         }
     }
 
@@ -331,6 +340,16 @@ impl Expression {
                 } else {
                     Ok((Value::Integer(0), None))
                 }
+            }
+            Self::Cast {
+                expr,
+                type_affinity,
+            } => {
+                let (value, _affinity) = expr.execute(row)?;
+                Ok((
+                    value.force_apply_type_affinity(*type_affinity),
+                    Some(*type_affinity),
+                ))
             }
             Self::Null => Ok((Value::Null, None)),
             Self::Integer(value) => Ok((Value::Integer(*value), None)),

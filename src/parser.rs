@@ -40,6 +40,77 @@ pub struct ColumnDef<'a> {
     pub primary_key: bool,
 }
 
+/// https://www.sqlite.org/syntax/signed-number.html
+fn skip_signed_number(input: &[u8]) -> Result<usize> {
+    let (mut nn, mut token) = get_token_no_space(input).ok_or("no signed number: first token")?;
+    let mut n = nn;
+    if matches!(token, Token::Plus | Token::Minus) {
+        (nn, token) = get_token_no_space(&input[n..]).ok_or("no signed number: number")?;
+        n += nn;
+    }
+    if !matches!(token, Token::Integer(_) | Token::Float(_)) {
+        return Err("no signed number is not numeric");
+    }
+    Ok(n)
+}
+
+/// https://www.sqlite.org/syntax/type-name.html
+fn parse_type_name(input: &[u8]) -> Result<(usize, Vec<MaybeQuotedBytes<'_>>)> {
+    // TODO: Parse type_name to type affinity without converting it to the temporary
+    // Vec. Use iterator instead.
+    let mut type_name = Vec::new();
+
+    let mut n = match get_token_no_space(input) {
+        Some((n, Token::Null)) => {
+            type_name.push(NULL_BYTES.into());
+            n
+        }
+        Some((n, Token::Identifier(id))) => {
+            type_name.push(id);
+            n
+        }
+        _ => return Ok((0, Vec::new())),
+    };
+
+    loop {
+        match get_token_no_space(&input[n..]) {
+            Some((nn, Token::Null)) => {
+                type_name.push(NULL_BYTES.into());
+                n += nn;
+            }
+            Some((nn, Token::Identifier(id))) => {
+                type_name.push(id);
+                n += nn;
+            }
+            Some((nn, Token::LeftParen)) => {
+                n += nn;
+                // Just check whether signed numbers are valid and move cursor without
+                // parsing the number. Signed numbers in a type name has no meanings to type
+                // affinity.
+                // https://www.sqlite.org/datatype3.html#affinity_name_examples
+                // Parse signed numbers.
+                n += skip_signed_number(&input[n..])?;
+                let (mut nn, mut token) =
+                    get_token_no_space(&input[n..]).ok_or("no signed number last token")?;
+                n += nn;
+                if token == Token::Comma {
+                    n += skip_signed_number(&input[n..])?;
+                    (nn, token) =
+                        get_token_no_space(&input[n..]).ok_or("no signed number last token")?;
+                    n += nn;
+                }
+                if token != Token::RightParen {
+                    return Err("no right paren");
+                }
+                break;
+            }
+            _ => break,
+        };
+    }
+
+    Ok((n, type_name))
+}
+
 /// Parse CREATE TABLE statement.
 ///
 /// https://www.sqlite.org/lang_createtable.html
@@ -75,65 +146,13 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
         };
         input = &input[n..];
 
+        let (n, type_name) = parse_type_name(input)?;
+        input = &input[n..];
+
         let (mut n, mut token) = get_token_no_space(input).ok_or("no right paren")?;
         input = &input[n..];
 
-        // TODO: Parse type_name to type affinity without converting it to the temporary
-        // Vec. Use iterator instead.
-        let mut type_name = Vec::new();
-
-        if matches!(token, Token::Null | Token::Identifier(_)) {
-            loop {
-                match token {
-                    Token::Null => {
-                        (n, token) = get_token_no_space(input).ok_or("no right paren")?;
-                        input = &input[n..];
-                        type_name.push(NULL_BYTES.into());
-                    }
-                    Token::Identifier(id) => {
-                        (n, token) = get_token_no_space(input).ok_or("no right paren")?;
-                        input = &input[n..];
-                        type_name.push(id);
-                    }
-                    Token::LeftParen => {
-                        // Just check whether signed numbers are valid and move cursor without
-                        // parsing the number. Signed numbers in a type name has no meanings to type
-                        // affinity.
-                        // https://www.sqlite.org/datatype3.html#affinity_name_examples
-                        loop {
-                            (n, token) =
-                                get_token_no_space(input).ok_or("no signed number: first token")?;
-                            input = &input[n..];
-                            if matches!(token, Token::Plus | Token::Minus) {
-                                (n, token) =
-                                    get_token_no_space(input).ok_or("no signed number: number")?;
-                                input = &input[n..];
-                            }
-                            if !matches!(token, Token::Integer(_) | Token::Float(_)) {
-                                return Err("no signed number is not numeric");
-                            }
-                            (n, token) =
-                                get_token_no_space(input).ok_or("no signed number last token")?;
-                            input = &input[n..];
-                            match token {
-                                Token::Comma => continue,
-                                Token::RightParen => {
-                                    (n, token) = get_token_no_space(input)
-                                        .ok_or("no signed number right paren")?;
-                                    input = &input[n..];
-                                    break;
-                                }
-                                _ => return Err("type name not completed"),
-                            }
-                        }
-                        break;
-                    }
-                    _ => break,
-                };
-            }
-        }
-
-        let primary_key = if let Token::Primary = token {
+        let primary_key = if token == Token::Primary {
             match get_token_no_space(input) {
                 Some((n, Token::Key)) => {
                     input = &input[n..];
@@ -372,6 +391,10 @@ pub enum Expr<'a> {
         left: Box<Expr<'a>>,
         right: Box<Expr<'a>>,
     },
+    Cast {
+        expr: Box<Expr<'a>>,
+        type_name: Vec<MaybeQuotedBytes<'a>>,
+    },
     Null,
     Integer(i64),
     Real(f64),
@@ -396,6 +419,35 @@ fn parse_expr(input: &[u8]) -> Result<(usize, Expr)> {
 fn parse_expr_with_token<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'a>)> {
     let (n, left) = match token {
         Token::Identifier(id) => (0, Expr::Column(id)),
+        Token::Cast => {
+            let Some((mut n, Token::LeftParen)) = get_token_no_space(input) else {
+                return Err("no cast left paren");
+            };
+
+            let (nn, expr) = parse_expr(&input[n..])?;
+            n += nn;
+
+            let Some((nn, Token::As)) = get_token_no_space(&input[n..]) else {
+                return Err("no cast as");
+            };
+            n += nn;
+
+            let (nn, type_name) = parse_type_name(&input[n..])?;
+            n += nn;
+
+            let Some((nn, Token::RightParen)) = get_token_no_space(&input[n..]) else {
+                return Err("no cast right paren");
+            };
+            n += nn;
+
+            (
+                n,
+                Expr::Cast {
+                    expr: Box::new(expr),
+                    type_name,
+                },
+            )
+        }
         Token::Null => (0, Expr::Null),
         Token::Integer(buf) => {
             let (valid, parsed_int) = parse_integer(buf);
@@ -403,8 +455,9 @@ fn parse_expr_with_token<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize
             match parsed_int {
                 ParseIntegerResult::Integer(v) => (0, Expr::Integer(v)),
                 ParseIntegerResult::MaxPlusOne | ParseIntegerResult::TooBig(_) => {
-                    let (valid, d) = parse_float(buf);
+                    let (valid, pure_integer, d) = parse_float(buf);
                     assert!(valid);
+                    assert!(pure_integer);
                     (0, Expr::Real(d))
                 }
                 ParseIntegerResult::Empty => {
@@ -413,8 +466,9 @@ fn parse_expr_with_token<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize
             }
         }
         Token::Float(buf) => {
-            let (valid, d) = parse_float(buf);
+            let (valid, pure_integer, d) = parse_float(buf);
             assert!(valid);
+            assert!(!pure_integer);
             (0, Expr::Real(d))
         }
         Token::String(text) => (0, Expr::Text(text)),
@@ -432,8 +486,9 @@ fn parse_expr_with_token<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize
                     ParseIntegerResult::Integer(v) => (n, Expr::Integer(-v)),
                     ParseIntegerResult::MaxPlusOne => (n, Expr::Integer(i64::MIN)),
                     ParseIntegerResult::TooBig(_) => {
-                        let (valid, d) = parse_float(buf);
+                        let (valid, pure_integer, d) = parse_float(buf);
                         assert!(valid);
+                        assert!(pure_integer);
                         (n, Expr::Real(-d))
                     }
                     ParseIntegerResult::Empty => {
@@ -442,8 +497,9 @@ fn parse_expr_with_token<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize
                 }
             }
             Some((n, Token::Float(buf))) => {
-                let (valid, d) = parse_float(buf);
+                let (valid, pure_integer, d) = parse_float(buf);
                 assert!(valid);
+                assert!(!pure_integer);
                 (n, Expr::Real(-d))
             }
             Some((n, token)) => {
@@ -525,7 +581,7 @@ mod tests {
     }
     #[test]
     fn test_parse_create_table_type_name() {
-        let input = b"create table foo (col1 type type primary key, col2 Varint(10), col3 [Float](+10), col4 \"test\"(-10.0), col5 null(0), col6 `blob```(1,2))";
+        let input = b"create table foo (col1 type type primary key, col2 Varint(10), col3 [Float](+10), col4 \"test\"(-10.0), col5 null(0), col6 `blob```(1,+2))";
         let (n, create_table) = parse_create_table(input).unwrap();
         assert_eq!(n, input.len());
         assert_eq!(create_table.table_name, b"foo".as_slice().into());
@@ -730,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_expr_literals() {
+    fn test_parse_expr_literal_value() {
         // Parse null
         assert_eq!(parse_expr(b"null").unwrap(), (4, Expr::Null));
 
@@ -949,6 +1005,30 @@ mod tests {
                     operator: BinaryOperator::Ne,
                     left: Box::new(Expr::Integer(-1)),
                     right: Box::new(Expr::Integer(2)),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_expr_cast() {
+        assert_eq!(
+            parse_expr(b"cast(100as text) ").unwrap(),
+            (
+                16,
+                Expr::Cast {
+                    expr: Box::new(Expr::Integer(100)),
+                    type_name: vec![b"text".as_slice().into()],
+                }
+            )
+        );
+        assert_eq!(
+            parse_expr(b"cast ( '100' as integer) ").unwrap(),
+            (
+                24,
+                Expr::Cast {
+                    expr: Box::new(Expr::Text(b"'100'".as_slice().into())),
+                    type_name: vec![b"integer".as_slice().into()],
                 }
             )
         );
