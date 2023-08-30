@@ -27,7 +27,7 @@ const CHAR_INVALID: u8 = 0xFF;
 
 static CHAR_LOOKUP_TABLE: [u8; 256] = [
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0x00 - 0x07
-    b' ', b' ', 0xFF, b' ', b' ', 0xFF, 0xFF, 0xFF, // 0x08 - 0x0F
+    0xFF, b' ', b' ', 0xFF, b' ', b' ', 0xFF, 0xFF, // 0x08 - 0x0F
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0x10 - 0x17
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0x18 - 0x1F
     b' ', b'!', 0x05, 0xFF, 0x04, 0xFF, 0xFF, 0x05, // 0x20 - 0x27
@@ -120,7 +120,9 @@ pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
     match CHAR_LOOKUP_TABLE[input[0] as usize] {
         b' ' => {
             for (i, &byte) in input.iter().skip(1).enumerate() {
-                if byte != b' ' {
+                // u8::is_ascii_whitespace() is not usable because it does not
+                // include b'\x0b'.
+                if byte < b'\t' || byte > b'\r' && byte != b' ' {
                     return Some((i + 1, Token::Space));
                 }
             }
@@ -373,6 +375,13 @@ mod tests {
         assert_eq!(get_token(b" "), Some((1, Token::Space)));
         assert_eq!(get_token(b"     a"), Some((5, Token::Space)));
         assert_eq!(get_token(b"     "), Some((5, Token::Space)));
+
+        assert_eq!(get_token(b"\t"), Some((1, Token::Space)));
+        assert_eq!(get_token(b"\n"), Some((1, Token::Space)));
+        assert_eq!(get_token(b"\x0b"), Some((1, Token::Illegal)));
+        assert_eq!(get_token(b"\x0c"), Some((1, Token::Space)));
+        assert_eq!(get_token(b"\r"), Some((1, Token::Space)));
+        assert_eq!(get_token(b"  \t\n\x0b\x0c\r\x0e"), Some((7, Token::Space)));
     }
 
     #[test]
