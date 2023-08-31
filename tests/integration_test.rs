@@ -355,6 +355,12 @@ fn test_select_type_conversions_prior_to_comparison() {
             vec![0, 0, 1],
             "SELECT b < '40', b < '60', b < '600' FROM t1;",
         ),
+        (vec![0, 0, 1], "SELECT b < 40,   b < 60,   b < 600 FROM t1;"),
+        // Leading and tailing spaces in text are ignored.
+        (
+            vec![0, 0, 1],
+            "SELECT b < ' 40 ', b < ' 60 ', b < ' 600 ' FROM t1;",
+        ),
         (vec![0, 0, 0], "SELECT c < 40,   c < 60,   c < 600 FROM t1;"),
         (
             vec![0, 1, 1],

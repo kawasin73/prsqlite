@@ -15,6 +15,10 @@
 use std::cmp::Ordering;
 use std::io::Write;
 
+use crate::utils::parse_float;
+use crate::utils::parse_integer;
+use crate::utils::ParseIntegerResult;
+
 // TODO: Own the buffer of Text and Blob.
 #[derive(Debug)]
 pub enum Value<'a> {
@@ -44,18 +48,17 @@ impl<'a> Value<'a> {
             Value::Null => Value::Null,
             Value::Integer(i) => Value::Integer(i),
             Value::Real(d) => Value::Real(d),
-            Value::Text(t) => {
-                let Ok(s) = std::str::from_utf8(t) else {
-                    return Value::Text(t);
-                };
-                match s.parse::<i64>() {
-                    Ok(i) => Value::Integer(i),
-                    Err(_) => match s.parse::<f64>() {
-                        Ok(d) => Value::Real(d),
-                        Err(_) => Value::Text(t),
-                    },
+            Value::Text(t) => match parse_integer(t) {
+                (true, ParseIntegerResult::Integer(i)) => Value::Integer(i),
+                _ => {
+                    let (valid, d) = parse_float(t);
+                    if valid {
+                        Value::Real(d)
+                    } else {
+                        Value::Text(t)
+                    }
                 }
-            }
+            },
             Value::Blob(b) => Value::Blob(b),
         }
     }
@@ -314,6 +317,10 @@ mod tests {
             Value::Integer(12345)
         );
         assert_eq!(
+            Value::Text(b" 12345 ").apply_numeric_affinity(),
+            Value::Integer(12345)
+        );
+        assert_eq!(
             Value::Text(b"9223372036854775807").apply_numeric_affinity(),
             Value::Integer(9223372036854775807)
         );
@@ -323,6 +330,10 @@ mod tests {
         );
         assert_eq!(
             Value::Text(b"12345.6").apply_numeric_affinity(),
+            Value::Real(12345.6)
+        );
+        assert_eq!(
+            Value::Text(b" 12345.6 ").apply_numeric_affinity(),
             Value::Real(12345.6)
         );
         assert_eq!(
@@ -348,6 +359,10 @@ mod tests {
         assert_eq!(
             Value::Text(b"12345a").apply_numeric_affinity(),
             Value::Text(b"12345a")
+        );
+        assert_eq!(
+            Value::Text(b"12345e").apply_numeric_affinity(),
+            Value::Text(b"12345e")
         );
     }
 
