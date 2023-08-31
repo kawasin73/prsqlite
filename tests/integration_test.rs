@@ -219,8 +219,8 @@ fn test_select_column_name_and_all() {
 #[test]
 fn test_select_expression() {
     let file = create_sqlite_database(&[
-        "CREATE TABLE example(col1, col2);",
-        "INSERT INTO example(col1, col2) VALUES (1, 2);",
+        "CREATE TABLE example(col1, col2, col3);",
+        "INSERT INTO example(col1, col2, col3) VALUES (1, 2, -3);",
     ]);
 
     let mut conn = Connection::open(file.path()).unwrap();
@@ -241,6 +241,39 @@ fn test_select_expression() {
         columns.get(4),
         &Value::Blob(b"\x01\x23\x45\x67\x89\xab\xcd\xef")
     );
+    drop(row);
+    assert!(rows.next_row().unwrap().is_none());
+
+    let mut stmt = conn
+        .prepare("SELECT 9223372036854775807, 9223372036854775808, 9223372036854775809, -9223372036854775808, -123 FROM example;")
+        .unwrap();
+    let mut rows = stmt.execute().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 5);
+    assert_eq!(columns.get(0), &Value::Integer(9223372036854775807));
+    assert_eq!(columns.get(1), &Value::Real(9223372036854775808.0));
+    assert_eq!(columns.get(2), &Value::Real(9223372036854775809.0));
+    assert_eq!(columns.get(3), &Value::Integer(-9223372036854775808));
+    assert_eq!(columns.get(4), &Value::Integer(-123));
+    drop(row);
+    assert!(rows.next_row().unwrap().is_none());
+
+    // Unary operators
+    let mut stmt = conn
+        .prepare("SELECT -col1, -col2, -col3, -+-+-col2, -+-+-123, ++++123, -+-+123 FROM example;")
+        .unwrap();
+    let mut rows = stmt.execute().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 7);
+    assert_eq!(columns.get(0), &Value::Integer(-1));
+    assert_eq!(columns.get(1), &Value::Integer(-2));
+    assert_eq!(columns.get(2), &Value::Integer(3));
+    assert_eq!(columns.get(3), &Value::Integer(-2));
+    assert_eq!(columns.get(4), &Value::Integer(-123));
+    assert_eq!(columns.get(5), &Value::Integer(123));
+    assert_eq!(columns.get(6), &Value::Integer(123));
     drop(row);
     assert!(rows.next_row().unwrap().is_none());
 
@@ -604,11 +637,10 @@ fn test_select_filter_compare() {
 
     for compare_value in [
         "null",
-        // TODO: Support unary operators.
-        // "-9223372036854775808",
-        // "-9223372036854775807",
-        // "-2",
-        // "-1",
+        "-9223372036854775808",
+        "-9223372036854775807",
+        "-2",
+        "-1",
         "0",
         "1",
         "2",

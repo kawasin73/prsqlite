@@ -15,9 +15,10 @@
 use crate::token::get_token_no_space;
 use crate::token::Token;
 use crate::utils::parse_float_literal;
-use crate::utils::parse_integer_literal;
+use crate::utils::parse_integer;
 use crate::utils::HexedBytes;
 use crate::utils::MaybeQuotedBytes;
+use crate::utils::ParseIntegerResult;
 
 pub type Error = &'static str;
 pub type Result<T> = std::result::Result<T, Error>;
@@ -365,6 +366,7 @@ pub enum BinaryOperator {
 #[derive(Debug, PartialEq)]
 pub enum Expr<'a> {
     Column(MaybeQuotedBytes<'a>),
+    UnaryMinus(Box<Expr<'a>>),
     BinaryOperator {
         operator: BinaryOperator,
         left: Box<Expr<'a>>,
@@ -381,25 +383,64 @@ pub enum Expr<'a> {
 ///
 /// https://www.sqlite.org/syntax/expr.html
 fn parse_expr(input: &[u8]) -> Result<(usize, Expr)> {
-    let input_len = input.len();
-    let (n, left) = match get_token_no_space(input) {
-        Some((n, Token::Identifier(id))) => (n, Expr::Column(id)),
-        Some((n, Token::Null)) => (n, Expr::Null),
-        Some((n, Token::Integer(buf))) => {
-            let v = parse_integer_literal(buf);
-            if v < 0 {
-                (n, Expr::Real(parse_float_literal(buf)))
-            } else {
-                (n, Expr::Integer(v))
+    let Some((n, token)) = get_token_no_space(input) else {
+        return Err("no expr");
+    };
+    let (nn, expr) = parse_expr_with_token(token, &input[n..])?;
+    Ok((n + nn, expr))
+}
+
+/// Parse expression.
+///
+/// https://www.sqlite.org/syntax/expr.html
+fn parse_expr_with_token<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'a>)> {
+    let (n, left) = match token {
+        Token::Identifier(id) => (0, Expr::Column(id)),
+        Token::Null => (0, Expr::Null),
+        Token::Integer(buf) => {
+            let (valid, parsed_int) = parse_integer(buf);
+            assert!(valid);
+            match parsed_int {
+                ParseIntegerResult::Integer(v) => (0, Expr::Integer(v)),
+                ParseIntegerResult::MaxPlusOne | ParseIntegerResult::TooBig(_) => {
+                    (0, Expr::Real(parse_float_literal(buf)))
+                }
+                ParseIntegerResult::Empty => {
+                    unreachable!("token integer must contain at least 1 digits only")
+                }
             }
         }
-        Some((n, Token::Float(buf))) => (n, Expr::Real(parse_float_literal(buf))),
-        Some((n, Token::String(text))) => (n, Expr::Text(text)),
-        Some((n, Token::Blob(hex))) => (n, Expr::Blob(hex)),
+        Token::Float(buf) => (0, Expr::Real(parse_float_literal(buf))),
+        Token::String(text) => (0, Expr::Text(text)),
+        Token::Blob(hex) => (0, Expr::Blob(hex)),
+        Token::Plus => {
+            // Unary operator + is a no-op.
+            let (n, expr) = parse_expr(input)?;
+            (n, expr)
+        }
+        Token::Minus => match get_token_no_space(input) {
+            Some((n, Token::Integer(buf))) => {
+                let (valid, parsed_int) = parse_integer(buf);
+                assert!(valid);
+                match parsed_int {
+                    ParseIntegerResult::Integer(v) => (n, Expr::Integer(-v)),
+                    ParseIntegerResult::MaxPlusOne => (n, Expr::Integer(i64::MIN)),
+                    ParseIntegerResult::TooBig(_) => (n, Expr::Real(-parse_float_literal(buf))),
+                    ParseIntegerResult::Empty => {
+                        unreachable!("token integer must contain at least 1 digits only")
+                    }
+                }
+            }
+            Some((n, Token::Float(buf))) => (n, Expr::Real(-parse_float_literal(buf))),
+            Some((n, token)) => {
+                let (nn, expr) = parse_expr_with_token(token, &input[n..])?;
+                (n + nn, Expr::UnaryMinus(Box::new(expr)))
+            }
+            _ => return Err("no expr"),
+        },
         _ => return Err("no expr"),
     };
-    let input = &input[n..];
-    let (n, operator) = match get_token_no_space(input) {
+    let (nn, operator) = match get_token_no_space(&input[n..]) {
         Some((n, Token::Eq)) => (n, BinaryOperator::Eq),
         Some((n, Token::Ne)) => (n, BinaryOperator::Ne),
         Some((n, Token::Gt)) => (n, BinaryOperator::Gt),
@@ -408,12 +449,12 @@ fn parse_expr(input: &[u8]) -> Result<(usize, Expr)> {
         Some((n, Token::Le)) => (n, BinaryOperator::Le),
         _ => return Ok((n, left)),
     };
-    let input = &input[n..];
+    let n = n + nn;
 
-    let (n, right) = parse_expr(input)?;
+    let (nn, right) = parse_expr(&input[n..])?;
 
     Ok((
-        input_len - input.len() + n,
+        n + nn,
         Expr::BinaryOperator {
             operator,
             left: Box::new(left),
@@ -675,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_expr() {
+    fn test_parse_expr_literals() {
         // Parse null
         assert_eq!(parse_expr(b"null").unwrap(), (4, Expr::Null));
 
@@ -739,6 +780,163 @@ mod tests {
         assert_eq!(
             parse_expr(b"X'0123456789abcdef' ").unwrap(),
             (19, Expr::Blob(b"0123456789abcdef".as_slice().into()))
+        );
+    }
+
+    #[test]
+    fn test_parse_expr_column() {
+        assert_eq!(
+            parse_expr(b"foo").unwrap(),
+            (3, Expr::Column(b"foo".as_slice().into()))
+        );
+        assert_eq!(
+            parse_expr(b"\"foo\"").unwrap(),
+            (5, Expr::Column(b"\"foo\"".as_slice().into()))
+        );
+    }
+
+    #[test]
+    fn test_parse_expr_unary_operator() {
+        assert_eq!(
+            parse_expr(b"+foo").unwrap(),
+            (4, Expr::Column(b"foo".as_slice().into()))
+        );
+        assert_eq!(
+            parse_expr(b"-foo").unwrap(),
+            (
+                4,
+                Expr::UnaryMinus(Box::new(Expr::Column(b"foo".as_slice().into())))
+            )
+        );
+        assert_eq!(
+            parse_expr(b"-+-+-foo").unwrap(),
+            (
+                8,
+                Expr::UnaryMinus(Box::new(Expr::UnaryMinus(Box::new(Expr::UnaryMinus(
+                    Box::new(Expr::Column(b"foo".as_slice().into()))
+                )))))
+            )
+        );
+        assert_eq!(parse_expr(b"+123").unwrap(), (4, Expr::Integer(123)));
+        assert_eq!(parse_expr(b"+ 123").unwrap(), (5, Expr::Integer(123)));
+        assert_eq!(parse_expr(b"-123").unwrap(), (4, Expr::Integer(-123)));
+        assert_eq!(parse_expr(b"- 123").unwrap(), (5, Expr::Integer(-123)));
+        assert_eq!(
+            parse_expr(b"-9223372036854775808").unwrap(),
+            (20, Expr::Integer(-9223372036854775808))
+        );
+        assert_eq!(
+            parse_expr(b"-+-123").unwrap(),
+            (6, Expr::UnaryMinus(Box::new(Expr::Integer(-123))))
+        );
+        assert_eq!(parse_expr(b"+123.4").unwrap(), (6, Expr::Real(123.4)));
+        assert_eq!(parse_expr(b"-123.4").unwrap(), (6, Expr::Real(-123.4)));
+        assert_eq!(
+            parse_expr(b"-+-123.4").unwrap(),
+            (8, Expr::UnaryMinus(Box::new(Expr::Real(-123.4))))
+        );
+        assert_eq!(
+            parse_expr(b"+'abc'").unwrap(),
+            (6, Expr::Text(b"'abc'".as_slice().into()))
+        );
+        assert_eq!(
+            parse_expr(b"-'abc'").unwrap(),
+            (
+                6,
+                Expr::UnaryMinus(Box::new(Expr::Text(b"'abc'".as_slice().into())))
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_expr_binary_operator() {
+        assert_eq!(
+            parse_expr(b"-1 < 2").unwrap(),
+            (
+                6,
+                Expr::BinaryOperator {
+                    operator: BinaryOperator::Lt,
+                    left: Box::new(Expr::Integer(-1)),
+                    right: Box::new(Expr::Integer(2)),
+                }
+            )
+        );
+        assert_eq!(
+            parse_expr(b"-1 <= 2").unwrap(),
+            (
+                7,
+                Expr::BinaryOperator {
+                    operator: BinaryOperator::Le,
+                    left: Box::new(Expr::Integer(-1)),
+                    right: Box::new(Expr::Integer(2)),
+                }
+            )
+        );
+        assert_eq!(
+            parse_expr(b"-1 > 2").unwrap(),
+            (
+                6,
+                Expr::BinaryOperator {
+                    operator: BinaryOperator::Gt,
+                    left: Box::new(Expr::Integer(-1)),
+                    right: Box::new(Expr::Integer(2)),
+                }
+            )
+        );
+        assert_eq!(
+            parse_expr(b"-1 >= 2").unwrap(),
+            (
+                7,
+                Expr::BinaryOperator {
+                    operator: BinaryOperator::Ge,
+                    left: Box::new(Expr::Integer(-1)),
+                    right: Box::new(Expr::Integer(2)),
+                }
+            )
+        );
+        assert_eq!(
+            parse_expr(b"-1 = 2").unwrap(),
+            (
+                6,
+                Expr::BinaryOperator {
+                    operator: BinaryOperator::Eq,
+                    left: Box::new(Expr::Integer(-1)),
+                    right: Box::new(Expr::Integer(2)),
+                }
+            )
+        );
+        assert_eq!(
+            parse_expr(b"-1 == 2").unwrap(),
+            (
+                7,
+                Expr::BinaryOperator {
+                    operator: BinaryOperator::Eq,
+                    left: Box::new(Expr::Integer(-1)),
+                    right: Box::new(Expr::Integer(2)),
+                }
+            )
+        );
+        assert_eq!(
+            parse_expr(b"-1 != 2").unwrap(),
+            (
+                7,
+                Expr::BinaryOperator {
+                    operator: BinaryOperator::Ne,
+                    left: Box::new(Expr::Integer(-1)),
+                    right: Box::new(Expr::Integer(2)),
+                }
+            )
+        );
+        assert_eq!(
+            parse_expr(b"-1 <> 2").unwrap(),
+            (
+                7,
+                Expr::BinaryOperator {
+                    operator: BinaryOperator::Ne,
+                    left: Box::new(Expr::Integer(-1)),
+                    right: Box::new(Expr::Integer(2)),
+                }
+            )
         );
     }
 }

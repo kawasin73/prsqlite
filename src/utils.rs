@@ -59,40 +59,111 @@ pub fn unsafe_parse_varint(buf: &[u8]) -> (i64, usize) {
     }
 }
 
+/// Whether the byte is a space or not.
+///
+/// u8::is_ascii_whitespace() is not usable because it does not include b'\x0b'.
+#[inline]
+pub fn is_space(c: u8) -> bool {
+    c == b' ' || (b'\t'..=b'\r').contains(&c)
+}
+
+const MAX_I64_PLUS_ONE: u64 = 9223372036854775808;
+
+/// Result of parse_integer()
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ParseIntegerResult {
+    /// Parsed integer
+    Integer(i64),
+    /// 9223372036854775808
+    MaxPlusOne,
+    /// Exceeds i64 range
+    TooBig(bool),
+    /// No digits
+    Empty,
+}
+
 /// Parse integer literal.
 ///
-/// Returns -1 if it is 9223372036854775808. If it exceeds i64 range, it returns
-/// i64::MIN.
+/// This is inspired by `sqlite3Atoi64()` of SQLite.
 ///
-/// All bytes must be ascii digit.
-pub fn parse_integer_literal(input: &[u8]) -> i64 {
-    assert!(!input.is_empty());
+/// This ignores leading and tailing spaces.
+///
+/// The first bool value returned indicates whether the input is valid or not.
+/// Invalid inputs are:
+///
+/// * Contains non-digit characters
+/// * Contains no digits
+pub fn parse_integer(input: &[u8]) -> (bool, ParseIntegerResult) {
+    let mut n = 0;
+
+    // Skip leading spaces
+    for byte in input.iter() {
+        if !is_space(*byte) {
+            break;
+        }
+        n += 1;
+    }
+
+    // Sign
+    let positive = match input.get(n) {
+        Some(b'-') => {
+            n += 1;
+            false
+        }
+        Some(b'+') => {
+            n += 1;
+            true
+        }
+        _ => true,
+    };
 
     // Skip leading zeros
-    let mut n_zeros = input.len();
-    for (i, byte) in input.iter().enumerate() {
+    let mut n_zero = 0;
+    for byte in &input[n..] {
         if *byte != b'0' {
-            n_zeros = i;
+            break;
+        }
+        n_zero += 1;
+    }
+
+    // Parse digits
+    let mut u = 0_u64;
+    let mut digits = 0;
+    for &byte in input[n + n_zero..].iter() {
+        if byte.is_ascii_digit() {
+            u = u.wrapping_mul(10).wrapping_add((byte - b'0') as u64);
+            digits += 1;
+        } else {
             break;
         }
     }
-    // i64::MAX is 19 digits. Parsing more than 19 digits cause u64 overflow.
-    if input.len() - n_zeros > 19 {
-        return i64::MIN;
+
+    // Extra non-digits at the tail
+    let mut valid = true;
+    for byte in &input[(n + n_zero + digits)..] {
+        if !is_space(*byte) {
+            valid = false;
+            break;
+        }
     }
 
-    let mut v = 0_u64;
-    for &byte in input[n_zeros..].iter() {
-        assert!(byte.is_ascii_digit());
-        v = v * 10 + (byte - b'0') as u64;
-    }
-
-    if v <= i64::MAX as u64 {
-        v as i64
-    } else if v == i64::MAX as u64 + 1 {
-        -1
+    if n_zero + digits == 0 {
+        (false, ParseIntegerResult::Empty)
+    } else if digits < 19 {
+        let v = if positive { u as i64 } else { -(u as i64) };
+        (valid, ParseIntegerResult::Integer(v))
+    } else if digits > 19 || u > MAX_I64_PLUS_ONE {
+        (valid, ParseIntegerResult::TooBig(positive))
+    } else if u == MAX_I64_PLUS_ONE {
+        if positive {
+            (valid, ParseIntegerResult::MaxPlusOne)
+        } else {
+            (valid, ParseIntegerResult::Integer(i64::MIN))
+        }
     } else {
-        i64::MIN
+        assert!(u < MAX_I64_PLUS_ONE);
+        let v = if positive { u as i64 } else { -(u as i64) };
+        (valid, ParseIntegerResult::Integer(v))
     }
 }
 
@@ -544,31 +615,91 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_integer_literal() {
+    fn test_parse_integer() {
         let mut test_cases = Vec::new();
         for i in 0..=1000 {
-            test_cases.push((i.to_string(), i));
+            test_cases.push((i.to_string(), ParseIntegerResult::Integer(i)));
         }
         for (l, v) in [
-            ("0", 0),
-            ("00", 0),
-            ("00000000000000000000", 0),
-            ("000000000000000000001", 1),
-            ("9223372036854775807", 9223372036854775807),
-            ("9223372036854775808", -1),
-            ("9223372036854775809", i64::MIN),
-            ("9999999999999999999", i64::MIN),
+            (" 12345 ", ParseIntegerResult::Integer(12345)),
+            ("\t12345\t", ParseIntegerResult::Integer(12345)),
+            ("\n12345\n", ParseIntegerResult::Integer(12345)),
+            ("\x0b12345\x0b", ParseIntegerResult::Integer(12345)),
+            ("\x0c12345\x0c", ParseIntegerResult::Integer(12345)),
+            ("\r12345\r", ParseIntegerResult::Integer(12345)),
+            ("   12345   ", ParseIntegerResult::Integer(12345)),
+            ("   +12345   ", ParseIntegerResult::Integer(12345)),
+            ("   -12345   ", ParseIntegerResult::Integer(-12345)),
+            ("   +012345   ", ParseIntegerResult::Integer(12345)),
+            ("   -012345   ", ParseIntegerResult::Integer(-12345)),
+            ("0", ParseIntegerResult::Integer(0)),
+            ("+0", ParseIntegerResult::Integer(0)),
+            ("-0", ParseIntegerResult::Integer(0)),
+            ("00", ParseIntegerResult::Integer(0)),
+            ("00000000000000000000", ParseIntegerResult::Integer(0)),
+            ("000000000000000000001", ParseIntegerResult::Integer(1)),
+            (
+                "9223372036854775807",
+                ParseIntegerResult::Integer(9223372036854775807),
+            ),
+            (
+                "09223372036854775807",
+                ParseIntegerResult::Integer(9223372036854775807),
+            ),
+            (
+                "-9223372036854775807",
+                ParseIntegerResult::Integer(-9223372036854775807),
+            ),
+            ("9223372036854775808", ParseIntegerResult::MaxPlusOne),
+            ("09223372036854775808", ParseIntegerResult::MaxPlusOne),
+            (
+                "-9223372036854775808",
+                ParseIntegerResult::Integer(-9223372036854775808),
+            ),
+            ("9223372036854775809", ParseIntegerResult::TooBig(true)),
+            ("-9223372036854775809", ParseIntegerResult::TooBig(false)),
+            ("9999999999999999999", ParseIntegerResult::TooBig(true)),
+            ("-9999999999999999999", ParseIntegerResult::TooBig(false)),
+            ("99999999999999999999", ParseIntegerResult::TooBig(true)),
+            ("-99999999999999999999", ParseIntegerResult::TooBig(false)),
+            ("999999999999999999999", ParseIntegerResult::TooBig(true)),
+            ("-999999999999999999999", ParseIntegerResult::TooBig(false)),
         ] {
             test_cases.push((l.to_string(), v));
         }
-        for (literal, value) in test_cases {
+        for (mut literal, value) in test_cases {
             assert_eq!(
-                parse_integer_literal(literal.as_bytes()),
-                value,
-                "literal: {}",
+                parse_integer(literal.as_bytes()),
+                (true, value),
+                "literal: \"{}\"",
+                literal
+            );
+            literal += "abc";
+            assert_eq!(
+                parse_integer(literal.as_bytes()),
+                (false, value),
+                "literal: \"{}\"",
                 literal
             );
         }
+
+        assert_eq!(parse_integer(b""), (false, ParseIntegerResult::Empty));
+        assert_eq!(parse_integer(b" "), (false, ParseIntegerResult::Empty));
+        assert_eq!(parse_integer(b"+"), (false, ParseIntegerResult::Empty));
+        assert_eq!(parse_integer(b"-"), (false, ParseIntegerResult::Empty));
+        assert_eq!(parse_integer(b"++10"), (false, ParseIntegerResult::Empty));
+        assert_eq!(parse_integer(b"--10"), (false, ParseIntegerResult::Empty));
+        assert_eq!(parse_integer(b"-+10"), (false, ParseIntegerResult::Empty));
+        assert_eq!(parse_integer(b"a"), (false, ParseIntegerResult::Empty));
+        assert_eq!(parse_integer(b"a123"), (false, ParseIntegerResult::Empty));
+        assert_eq!(
+            parse_integer(b"123.456"),
+            (false, ParseIntegerResult::Integer(123))
+        );
+        assert_eq!(
+            parse_integer(b"123e3"),
+            (false, ParseIntegerResult::Integer(123))
+        );
     }
 
     #[test]

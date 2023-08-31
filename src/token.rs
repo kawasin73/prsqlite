@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::utils::is_space;
 use crate::utils::HexedBytes;
 use crate::utils::MaybeQuotedBytes;
 use crate::utils::UPPER_TO_LOWER;
@@ -120,9 +121,7 @@ pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
     match CHAR_LOOKUP_TABLE[input[0] as usize] {
         b' ' => {
             for (i, &byte) in input.iter().skip(1).enumerate() {
-                // u8::is_ascii_whitespace() is not usable because it does not
-                // include b'\x0b'.
-                if byte < b'\t' || byte > b'\r' && byte != b' ' {
+                if !is_space(byte) {
                     return Some((i + 1, Token::Space));
                 }
             }

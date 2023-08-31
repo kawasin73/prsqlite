@@ -212,6 +212,9 @@ impl Connection {
 
 enum Expression {
     Column((ColumnNumber, TypeAffinity)),
+    UnaryMinus {
+        expr: Box<Expression>,
+    },
     BinaryOperator {
         operator: BinaryOperator,
         left: Box<Expression>,
@@ -232,6 +235,9 @@ impl Expression {
             Expr::Real(f) => Ok(Self::Real(f)),
             Expr::Text(text) => Ok(Self::Text(text.dequote())),
             Expr::Blob(hex) => Ok(Self::Blob(hex.decode())),
+            Expr::UnaryMinus(expr) => Ok(Self::UnaryMinus {
+                expr: Box::new(Self::from(*expr, table)?),
+            }),
             Expr::BinaryOperator {
                 operator,
                 left,
@@ -260,6 +266,16 @@ impl Expression {
     ) -> anyhow::Result<(Value<'a>, Option<TypeAffinity>)> {
         match self {
             Self::Column((idx, affinity)) => Ok((row.get_column_value(idx)?, Some(*affinity))),
+            Self::UnaryMinus { expr } => {
+                let (value, _) = expr.execute(row)?;
+                let value = match value {
+                    Value::Null => Value::Null,
+                    Value::Integer(i) => Value::Integer(-i),
+                    Value::Real(d) => Value::Real(-d),
+                    Value::Text(_) | Value::Blob(_) => Value::Integer(0),
+                };
+                Ok((value, None))
+            }
             Self::BinaryOperator {
                 operator,
                 left,
