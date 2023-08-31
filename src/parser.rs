@@ -14,7 +14,7 @@
 
 use crate::token::get_token_no_space;
 use crate::token::Token;
-use crate::utils::parse_float_literal;
+use crate::utils::parse_float;
 use crate::utils::parse_integer;
 use crate::utils::HexedBytes;
 use crate::utils::MaybeQuotedBytes;
@@ -403,14 +403,20 @@ fn parse_expr_with_token<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize
             match parsed_int {
                 ParseIntegerResult::Integer(v) => (0, Expr::Integer(v)),
                 ParseIntegerResult::MaxPlusOne | ParseIntegerResult::TooBig(_) => {
-                    (0, Expr::Real(parse_float_literal(buf)))
+                    let (valid, d) = parse_float(buf);
+                    assert!(valid);
+                    (0, Expr::Real(d))
                 }
                 ParseIntegerResult::Empty => {
                     unreachable!("token integer must contain at least 1 digits only")
                 }
             }
         }
-        Token::Float(buf) => (0, Expr::Real(parse_float_literal(buf))),
+        Token::Float(buf) => {
+            let (valid, d) = parse_float(buf);
+            assert!(valid);
+            (0, Expr::Real(d))
+        }
         Token::String(text) => (0, Expr::Text(text)),
         Token::Blob(hex) => (0, Expr::Blob(hex)),
         Token::Plus => {
@@ -425,13 +431,21 @@ fn parse_expr_with_token<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize
                 match parsed_int {
                     ParseIntegerResult::Integer(v) => (n, Expr::Integer(-v)),
                     ParseIntegerResult::MaxPlusOne => (n, Expr::Integer(i64::MIN)),
-                    ParseIntegerResult::TooBig(_) => (n, Expr::Real(-parse_float_literal(buf))),
+                    ParseIntegerResult::TooBig(_) => {
+                        let (valid, d) = parse_float(buf);
+                        assert!(valid);
+                        (n, Expr::Real(-d))
+                    }
                     ParseIntegerResult::Empty => {
                         unreachable!("token integer must contain at least 1 digits only")
                     }
                 }
             }
-            Some((n, Token::Float(buf))) => (n, Expr::Real(-parse_float_literal(buf))),
+            Some((n, Token::Float(buf))) => {
+                let (valid, d) = parse_float(buf);
+                assert!(valid);
+                (n, Expr::Real(-d))
+            }
             Some((n, token)) => {
                 let (nn, expr) = parse_expr_with_token(token, &input[n..])?;
                 (n + nn, Expr::UnaryMinus(Box::new(expr)))

@@ -169,98 +169,140 @@ pub fn parse_integer(input: &[u8]) -> (bool, ParseIntegerResult) {
 
 /// Parse float literal.
 ///
-/// The input must satisfy either of these conditions otherwise that must be
-/// parsed as an integer literal:
+/// This is inspired by `sqlite3AtoF()` of SQLite.
 ///
-/// * Contains '.'
-/// * Contains 'e' or 'E'
-/// * Overflows i64 range
+/// This ignores leading and tailing spaces.
 ///
-/// input must not be empty.
+/// The input may:
 ///
-/// input must not contains `0` value.
-///
-/// This is compatible with `sqlite3AtoF()` in SQLite except this only support
-/// utf8.
-pub fn parse_float_literal(input: &[u8]) -> f64 {
-    assert!(!input.is_empty());
-    let mut iter = input.iter();
-    let mut byte = *iter.next().unwrap();
+/// * Contain '.'
+/// * Contain 'e' or 'E'
+/// * Overflow i64 range
+pub fn parse_float(input: &[u8]) -> (bool, f64) {
+    let mut n = 0;
+
+    // Skip leading spaces
+    for byte in input.iter() {
+        if !is_space(*byte) {
+            break;
+        }
+        n += 1;
+    }
+
+    // Sign
+    let positive = match input.get(n) {
+        Some(b'-') => {
+            n += 1;
+            false
+        }
+        Some(b'+') => {
+            n += 1;
+            true
+        }
+        _ => true,
+    };
 
     // Skip leading zeros
-    while byte == b'0' {
-        // 0 only literal is not a float literal.
-        byte = *iter.next().unwrap();
+    let mut n_zero = 0;
+    for byte in &input[n..] {
+        if *byte != b'0' {
+            break;
+        }
+        n_zero += 1;
     }
+    n += n_zero;
+
     let mut significand = 0;
     let mut dicimal_point: i64 = 0;
+    let mut digits = 0;
 
     // Parse integer part
-    while byte.is_ascii_digit() {
-        significand = significand * 10 + (byte - b'0') as i64;
-        // input must have more characters since this is not an integer literal.
-        byte = *iter.next().unwrap();
-        if significand >= (i64::MAX - 9) / 10 {
-            while byte.is_ascii_digit() {
-                dicimal_point += 1;
-                let Some(&b) = iter.next() else {
-                    byte = 0;
-                    break;
-                };
-                byte = b;
+    for byte in &input[n..] {
+        if byte.is_ascii_digit() {
+            significand = significand * 10 + (byte - b'0') as i64;
+            digits += 1;
+            if significand < (i64::MAX - 9) / 10 {
+                continue;
             }
+        }
+        break;
+    }
+    n += digits;
+    for byte in &input[n..] {
+        if byte.is_ascii_digit() {
+            dicimal_point += 1;
+            n += 1;
+        } else {
+            break;
         }
     }
 
     // Parse fractional part
-    if byte == b'.' {
-        while {
-            if let Some(&b) = iter.next() {
-                byte = b;
+    if let Some(&b'.') = input.get(n) {
+        n += 1;
+        let mut fractional_digits = 0;
+        for byte in &input[n..] {
+            if byte.is_ascii_digit() {
+                if significand < (i64::MAX - 9) / 10 {
+                    significand = significand * 10 + (byte - b'0') as i64;
+                    dicimal_point -= 1;
+                }
+                fractional_digits += 1;
             } else {
-                byte = 0;
-            };
-            byte.is_ascii_digit()
-        } {
-            if significand < (i64::MAX - 9) / 10 {
-                significand = significand * 10 + (byte - b'0') as i64;
-                dicimal_point -= 1;
+                break;
             }
         }
+        digits += fractional_digits;
+        n += fractional_digits;
     }
 
     // Parse exponent part
-    if byte != 0 {
-        assert!(byte == b'e' || byte == b'E');
-        byte = *iter.next().unwrap();
-        let exponent_sign = match byte {
-            b'+' => {
-                byte = *iter.next().unwrap();
-                1
-            }
-            b'-' => {
-                byte = *iter.next().unwrap();
-                -1
-            }
-            _ => 1,
-        };
-        assert!(byte.is_ascii_digit());
-        let mut exponent = (byte - b'0') as i32;
-        for b in iter {
-            assert!(b.is_ascii_digit());
-            exponent = if exponent < 10000 {
-                exponent * 10 + (b - b'0') as i32
-            } else {
-                10000
+    let mut valid = match input.get(n) {
+        Some(b'e') | Some(b'E') => {
+            n += 1;
+            let exponent_sign = match input.get(n) {
+                Some(b'+') => {
+                    n += 1;
+                    1
+                }
+                Some(b'-') => {
+                    n += 1;
+                    -1
+                }
+                _ => 1,
             };
+            let mut exponent = 0;
+            let mut valid_exponent = false;
+            for byte in &input[n..] {
+                if byte.is_ascii_digit() {
+                    exponent = if exponent < 10000 {
+                        exponent * 10 + (byte - b'0') as i32
+                    } else {
+                        10000
+                    };
+                    n += 1;
+                    valid_exponent = true;
+                } else {
+                    break;
+                }
+            }
+            dicimal_point += (exponent * exponent_sign) as i64;
+            valid_exponent
         }
-        dicimal_point += (exponent * exponent_sign) as i64;
-        byte = 0;
-    } else {
-        assert!(iter.next().is_none());
-    }
+        _ => true,
+    };
 
-    assert_eq!(byte, 0, "float value {:?} was not fully consumed", input);
+    valid = valid && n_zero + digits > 0;
+
+    // Skip leading spaces
+    if valid {
+        for byte in &input[n..] {
+            if !is_space(*byte) {
+                valid = false;
+                break;
+            }
+        }
+    }
 
     // Attempt to reduce exponent.
     loop {
@@ -279,7 +321,7 @@ pub fn parse_float_literal(input: &[u8]) -> f64 {
 
     // TODO: Further optimization. I'm not sure why 307, 342 from sqlite src/util.c
     // source code gives better performance...
-    match dicimal_point.try_into() {
+    let v = match dicimal_point.try_into() {
         Ok(dicimal_point) => significand as f64 * 10.0f64.powi(dicimal_point),
         Err(_) => {
             if dicimal_point > 0 {
@@ -288,7 +330,10 @@ pub fn parse_float_literal(input: &[u8]) -> f64 {
                 0.0
             }
         }
-    }
+    };
+    let v = if positive { v } else { -v };
+
+    (valid, v)
 }
 
 /// Converts a single byte to its uppercase equivalent.
@@ -703,8 +748,19 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_float_literal() {
+    fn test_parse_float() {
         for (literal, value) in [
+            (" 1.23 ", 1.23),
+            ("\t1.23\t", 1.23),
+            ("\n1.23\n", 1.23),
+            ("\x0b1.23\x0b", 1.23),
+            ("\x0c1.23\x0c", 1.23),
+            ("\r1.23\r", 1.23),
+            ("   1.23   ", 1.23),
+            ("   +1.23   ", 1.23),
+            ("   -1.23   ", -1.23),
+            ("   +01.23   ", 1.23),
+            ("   -01.23   ", -1.23),
             ("0.1", 0.1),
             ("0.01", 0.01),
             ("00.1", 00.1),
@@ -725,6 +781,7 @@ mod tests {
             (".2e+6", 0.2e+6),
             (".34567e7", 0.34567e7),
             ("1.e5", 1.0e5),
+            ("-1.23e5", -1.23e5),
             ("2e0123456789", f64::INFINITY),
             ("1e10000", f64::INFINITY),
             ("1e-10000", 0.0),
@@ -737,13 +794,34 @@ mod tests {
             ("922337203685477580.0e-10", 92233720.36854777),
         ] {
             assert_eq!(
-                parse_float_literal(literal.as_bytes()),
-                value,
+                parse_float(literal.as_bytes()),
+                (true, value),
                 "literal: {}",
                 literal
             );
+            let with_extra = format!("{literal}abc");
+            assert_eq!(
+                parse_float(with_extra.as_bytes()),
+                (false, value),
+                "literal: {}",
+                with_extra
+            );
+            let with_e = format!("{literal}e");
+            assert_eq!(
+                parse_float(with_e.as_bytes()),
+                (false, value),
+                "literal: {}",
+                with_e
+            );
         }
-        assert_eq!(parse_float_literal("1.23".as_bytes()), 1.23);
+        assert_eq!(parse_float("1.23".as_bytes()), (true, 1.23));
+        assert_eq!(parse_float("1.23e".as_bytes()), (false, 1.23));
+        assert_eq!(parse_float("1.23e-".as_bytes()), (false, 1.23));
+        assert_eq!(parse_float(".".as_bytes()), (false, 0.0));
+        assert_eq!(parse_float("".as_bytes()), (false, 0.0));
+        assert_eq!(parse_float(" ".as_bytes()), (false, 0.0));
+        assert_eq!(parse_float("abc".as_bytes()), (false, 0.0));
+        assert_eq!(parse_float("a1.23".as_bytes()), (false, 0.0));
     }
 
     #[test]
