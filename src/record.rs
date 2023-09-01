@@ -21,17 +21,13 @@ use crate::cursor::BtreePayload;
 use crate::utils::parse_varint;
 use crate::value::Value;
 
-pub fn compare_record(keys: &[i64], payload: &BtreePayload) -> anyhow::Result<Ordering> {
+pub fn compare_record(keys: &[Value], payload: &BtreePayload) -> anyhow::Result<Ordering> {
     let mut record = Record::parse(payload)?;
     if record.len() < keys.len() {
         bail!("keys is more than index columns");
     }
     for (i, key) in keys.iter().enumerate() {
         let index_value = record.get(i)?;
-        // TODO: support non integer comparison.
-        let Value::Integer(index_value) = index_value else {
-            unimplemented!("non integer comparison is not implemented")
-        };
         match key.cmp(&index_value) {
             Ordering::Equal => continue,
             o => return Ok(o),

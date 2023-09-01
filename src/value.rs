@@ -94,7 +94,7 @@ impl<'a> Value<'a> {
                 Value::Text(text_buf)
             }
             Value::Text(t) => Value::Text(t),
-            Value::Blob(b) => Value::Text(b),
+            Value::Blob(b) => Value::Blob(b),
         }
     }
 
@@ -527,7 +527,7 @@ mod tests {
         );
         assert_eq!(
             Value::Blob(b"abcde").apply_text_affinity(&mut Vec::new()),
-            Value::Text(b"abcde")
+            Value::Blob(b"abcde")
         );
     }
 

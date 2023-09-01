@@ -30,6 +30,7 @@ use crate::pager::PageBuffer;
 use crate::pager::PageId;
 use crate::pager::Pager;
 use crate::record::compare_record;
+use crate::value::Value;
 
 pub struct BtreePayload<'a, 'pager> {
     pager: &'pager Pager,
@@ -224,8 +225,7 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
     /// Move to the specified btree index cell with the key.
     ///
     /// If it does not exist, move to the next cell.
-    /// TODO: support non-integer keys
-    pub fn index_move_to(&mut self, keys: &[i64]) -> anyhow::Result<()> {
+    pub fn index_move_to(&mut self, keys: &[Value]) -> anyhow::Result<()> {
         self.move_to_root()?;
         loop {
             if !self.current_page.page_type.is_index() {
@@ -643,7 +643,7 @@ mod tests {
         assert!(cursor.get_index_payload().unwrap().is_none());
         cursor.next().unwrap();
         assert!(cursor.get_index_payload().unwrap().is_none());
-        cursor.index_move_to(&[0]).unwrap();
+        cursor.index_move_to(&[Value::Integer(0)]).unwrap();
         assert!(cursor.get_index_payload().unwrap().is_none());
     }
 
@@ -760,7 +760,9 @@ mod tests {
         let (rowid, _) = payload.unwrap();
         assert_eq!(rowid, 2000);
 
-        index2_cursor.index_move_to(&[2000]).unwrap();
+        index2_cursor
+            .index_move_to(&[Value::Integer(2000)])
+            .unwrap();
         let payload = index2_cursor.get_index_payload().unwrap();
         let payload = payload.unwrap();
         let mut index_record = Record::parse(&payload).unwrap();
@@ -769,7 +771,9 @@ mod tests {
         assert_eq!(payload.size(), payload.buf().len() as i32);
         drop(payload);
 
-        index2_cursor.index_move_to(&[3000, 3001]).unwrap();
+        index2_cursor
+            .index_move_to(&[Value::Integer(3000), Value::Integer(3001)])
+            .unwrap();
         let payload = index2_cursor.get_index_payload().unwrap();
         let payload = payload.unwrap();
         let mut index_record = Record::parse(&payload).unwrap();
@@ -778,7 +782,9 @@ mod tests {
         assert_eq!(payload.size(), payload.buf().len() as i32);
         drop(payload);
 
-        index2_cursor.index_move_to(&[3000, 3003]).unwrap();
+        index2_cursor
+            .index_move_to(&[Value::Integer(3000), Value::Integer(3003)])
+            .unwrap();
         let payload = index2_cursor.get_index_payload().unwrap();
         let payload = payload.unwrap();
         let mut index_record = Record::parse(&payload).unwrap();
@@ -998,7 +1004,7 @@ mod tests {
         let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
 
         for i in 0..3 {
-            cursor.index_move_to(&[2 * i]).unwrap();
+            cursor.index_move_to(&[Value::Integer(2 * i)]).unwrap();
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some());
             let mut record = Record::parse(payload.as_ref().unwrap()).unwrap();
@@ -1006,7 +1012,7 @@ mod tests {
             assert_eq!(record.get(1).unwrap(), Value::Integer(2 * i + 1));
             drop(payload);
 
-            cursor.index_move_to(&[2 * i + 1]).unwrap();
+            cursor.index_move_to(&[Value::Integer(2 * i + 1)]).unwrap();
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some());
             let mut record = Record::parse(payload.as_ref().unwrap()).unwrap();
@@ -1014,7 +1020,7 @@ mod tests {
             assert_eq!(record.get(1).unwrap(), Value::Integer(2 * i + 1));
         }
 
-        cursor.index_move_to(&[10]).unwrap();
+        cursor.index_move_to(&[Value::Integer(10)]).unwrap();
         let payload = cursor.get_index_payload().unwrap();
         assert!(payload.is_some());
         let mut record = Record::parse(payload.as_ref().unwrap()).unwrap();
@@ -1025,7 +1031,9 @@ mod tests {
         drop(payload);
 
         for i in 10..13 {
-            cursor.index_move_to(&[10, i]).unwrap();
+            cursor
+                .index_move_to(&[Value::Integer(10), Value::Integer(i)])
+                .unwrap();
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some());
             let mut record = Record::parse(payload.as_ref().unwrap()).unwrap();
@@ -1033,7 +1041,9 @@ mod tests {
             assert_eq!(record.get(1).unwrap(), Value::Integer(i));
         }
 
-        cursor.index_move_to(&[10, 13]).unwrap();
+        cursor
+            .index_move_to(&[Value::Integer(10), Value::Integer(13)])
+            .unwrap();
         let payload = cursor.get_index_payload().unwrap();
         assert!(payload.is_some());
         let mut record = Record::parse(payload.as_ref().unwrap()).unwrap();
@@ -1041,9 +1051,106 @@ mod tests {
         assert_eq!(record.get(1).unwrap(), Value::Integer(14));
         drop(payload);
 
-        cursor.index_move_to(&[11, 16]).unwrap();
+        cursor
+            .index_move_to(&[Value::Integer(11), Value::Integer(16)])
+            .unwrap();
         let payload = cursor.get_index_payload().unwrap();
         assert!(payload.is_none());
+    }
+
+    #[test]
+    fn test_index_move_to_multi_column() {
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col1, col2);",
+            "CREATE INDEX index1 ON example(col1, col2);",
+            "INSERT INTO example(col1, col2) VALUES (1, NULL);",
+            "INSERT INTO example(col1, col2) VALUES (1, NULL);",
+            "INSERT INTO example(col1, col2) VALUES (1, -10);",
+            "INSERT INTO example(col1, col2) VALUES (1, 2);",
+            "INSERT INTO example(col1, col2) VALUES (1, 5.1);",
+            "INSERT INTO example(col1, col2) VALUES (1, 100);",
+            "INSERT INTO example(col1, col2) VALUES (1, '');",
+            "INSERT INTO example(col1, col2) VALUES (1, '0123');",
+            "INSERT INTO example(col1, col2) VALUES (1, '0123');",
+            "INSERT INTO example(col1, col2) VALUES (1, '0124');",
+            "INSERT INTO example(col1, col2) VALUES (1, '0125');",
+            "INSERT INTO example(col1, col2) VALUES (1, x'0123');",
+            "INSERT INTO example(col1, col2) VALUES (1, x'0124');",
+            "INSERT INTO example(col1, col2) VALUES (1, x'0125');",
+            "INSERT INTO example(col1) VALUES (NULL);",
+            "INSERT INTO example(col1) VALUES (-10);",
+            "INSERT INTO example(col1) VALUES (2);",
+            "INSERT INTO example(col1) VALUES (5.1);",
+            "INSERT INTO example(col1) VALUES (100);",
+            "INSERT INTO example(col1) VALUES ('');",
+            "INSERT INTO example(col1) VALUES ('0123');",
+            "INSERT INTO example(col1) VALUES ('0123');",
+            "INSERT INTO example(col1) VALUES ('0123');",
+            "INSERT INTO example(col1) VALUES ('0124');",
+            "INSERT INTO example(col1) VALUES ('0125');",
+            "INSERT INTO example(col1) VALUES (x'0123');",
+            "INSERT INTO example(col1) VALUES (x'0124');",
+            "INSERT INTO example(col1) VALUES (x'0125');",
+        ]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let page_id = find_index_page_id("index1", file.path());
+
+        let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
+
+        for (expected, keys) in [
+            (15, vec![Value::Null, Value::Null, Value::Null]),
+            (1, vec![Value::Integer(1), Value::Null, Value::Null]),
+            (2, vec![Value::Integer(1), Value::Null, Value::Integer(2)]),
+            (4, vec![Value::Integer(1), Value::Integer(0), Value::Null]),
+            (3, vec![Value::Integer(1), Value::Real(-10.1), Value::Null]),
+            (5, vec![Value::Integer(1), Value::Integer(5), Value::Null]),
+            (7, vec![Value::Integer(1), Value::Integer(101), Value::Null]),
+            (7, vec![Value::Integer(1), Value::Text(b""), Value::Null]),
+            (8, vec![Value::Integer(1), Value::Text(b"\0"), Value::Null]),
+            (
+                10,
+                vec![Value::Integer(1), Value::Text(b"01234"), Value::Null],
+            ),
+            (
+                10,
+                vec![Value::Integer(1), Value::Text(b"0124"), Value::Null],
+            ),
+            (
+                13,
+                vec![Value::Integer(1), Value::Blob(&[0x01, 0x24]), Value::Null],
+            ),
+            (
+                17,
+                vec![Value::Integer(1), Value::Blob(&[0x01, 0x26]), Value::Null],
+            ),
+            (17, vec![Value::Integer(2), Value::Null, Value::Null]),
+            (18, vec![Value::Integer(3), Value::Null, Value::Null]),
+            (21, vec![Value::Text(b"0123"), Value::Null, Value::Null]),
+            (
+                22,
+                vec![Value::Text(b"0123"), Value::Null, Value::Integer(22)],
+            ),
+            (
+                24,
+                vec![Value::Text(b"0123"), Value::Integer(1), Value::Null],
+            ),
+            (
+                27,
+                vec![Value::Blob(&[0x01, 0x24]), Value::Null, Value::Null],
+            ),
+        ] {
+            cursor.index_move_to(&keys).unwrap();
+            let payload = cursor.get_index_payload().unwrap();
+            assert!(payload.is_some());
+            let payload = payload.unwrap();
+            let mut record = Record::parse(&payload).unwrap();
+            if let Value::Integer(rowid) = record.get(record.len() - 1).unwrap() {
+                assert_eq!(rowid, expected, "{:?}", keys);
+            } else {
+                panic!("unexpected payload: {:?}", keys);
+            }
+        }
     }
 
     #[test]
@@ -1059,7 +1166,7 @@ mod tests {
         let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
 
         for i in 0..3 {
-            cursor.index_move_to(&[i]).unwrap();
+            cursor.index_move_to(&[Value::Integer(i)]).unwrap();
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_none());
         }
@@ -1103,7 +1210,7 @@ mod tests {
         let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
 
         for i in 0..2000 {
-            cursor.index_move_to(&[2 * i]).unwrap();
+            cursor.index_move_to(&[Value::Integer(2 * i)]).unwrap();
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some(), "i = {}", i);
             let mut record = Record::parse(payload.as_ref().unwrap()).unwrap();
@@ -1114,7 +1221,7 @@ mod tests {
             // Reset the cursor.
             cursor.move_to_first().unwrap();
 
-            cursor.index_move_to(&[2 * i + 1]).unwrap();
+            cursor.index_move_to(&[Value::Integer(2 * i + 1)]).unwrap();
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some(), "i = {}", i);
             let mut record = Record::parse(payload.as_ref().unwrap()).unwrap();
@@ -1126,7 +1233,7 @@ mod tests {
             cursor.move_to_first().unwrap();
         }
 
-        cursor.index_move_to(&[10000]).unwrap();
+        cursor.index_move_to(&[Value::Integer(10000)]).unwrap();
         let payload = cursor.get_index_payload().unwrap();
         assert!(payload.is_none());
     }

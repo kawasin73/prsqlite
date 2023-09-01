@@ -176,8 +176,8 @@ impl Connection {
             right,
         }) = &selection
         {
-            if let Expression::Column((column_number, _)) = left.as_ref() {
-                if let Expression::Integer(key) = right.as_ref() {
+            if let Expression::Column((column_number, type_affinity)) = left.as_ref() {
+                if let Expression::Const(const_value) = right.as_ref() {
                     let mut next_index = table.indexes.as_ref();
                     while let Some(index) = next_index {
                         if index.columns[0] == *column_number {
@@ -185,7 +185,35 @@ impl Connection {
                         }
                         next_index = index.next.as_ref();
                     }
-                    next_index.map(|index| (index.root_page_id, vec![*key, i64::MIN]))
+                    if let Some(index) = next_index {
+                        let value = match type_affinity {
+                            TypeAffinity::Integer | TypeAffinity::Real | TypeAffinity::Numeric => {
+                                ConstantValue::copy_from(
+                                    const_value.as_ref().apply_numeric_affinity(),
+                                )
+                            }
+                            TypeAffinity::Text => {
+                                let mut text_buf = Vec::new();
+                                let value = const_value.as_ref().apply_text_affinity(&mut text_buf);
+                                if matches!(
+                                    const_value,
+                                    ConstantValue::Integer(_) | ConstantValue::Real(_)
+                                ) {
+                                    ConstantValue::Text(text_buf)
+                                } else {
+                                    ConstantValue::copy_from(value)
+                                }
+                            }
+                            TypeAffinity::Blob => ConstantValue::copy_from(const_value.as_ref()),
+                        };
+                        Some(IndexInfo {
+                            page_id: index.root_page_id,
+                            keys: vec![value],
+                            n_extra: index.columns.len() - 1,
+                        })
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -211,6 +239,35 @@ impl Connection {
     }
 }
 
+enum ConstantValue {
+    Integer(i64),
+    Real(f64),
+    Text(Vec<u8>),
+    Blob(Vec<u8>),
+}
+
+impl ConstantValue {
+    fn copy_from(value: Value) -> Self {
+        assert_ne!(value, Value::Null);
+        match value {
+            Value::Null => unreachable!("null value"),
+            Value::Integer(i) => Self::Integer(i),
+            Value::Real(f) => Self::Real(f),
+            Value::Text(text) => Self::Text(text.to_vec()),
+            Value::Blob(blob) => Self::Blob(blob.to_vec()),
+        }
+    }
+
+    fn as_ref(&self) -> Value {
+        match self {
+            Self::Integer(i) => Value::Integer(*i),
+            Self::Real(f) => Value::Real(*f),
+            Self::Text(text) => Value::Text(text),
+            Self::Blob(blob) => Value::Blob(blob),
+        }
+    }
+}
+
 enum Expression {
     Column((ColumnNumber, TypeAffinity)),
     UnaryMinus {
@@ -226,20 +283,17 @@ enum Expression {
         type_affinity: TypeAffinity,
     },
     Null,
-    Integer(i64),
-    Real(f64),
-    Text(Vec<u8>),
-    Blob(Vec<u8>),
+    Const(ConstantValue),
 }
 
 impl Expression {
     fn from(expr: Expr, table: &Table) -> anyhow::Result<Self> {
         match expr {
             Expr::Null => Ok(Self::Null),
-            Expr::Integer(i) => Ok(Self::Integer(i)),
-            Expr::Real(f) => Ok(Self::Real(f)),
-            Expr::Text(text) => Ok(Self::Text(text.dequote())),
-            Expr::Blob(hex) => Ok(Self::Blob(hex.decode())),
+            Expr::Integer(i) => Ok(Self::Const(ConstantValue::Integer(i))),
+            Expr::Real(f) => Ok(Self::Const(ConstantValue::Real(f))),
+            Expr::Text(text) => Ok(Self::Const(ConstantValue::Text(text.dequote()))),
+            Expr::Blob(hex) => Ok(Self::Const(ConstantValue::Blob(hex.decode()))),
             Expr::UnaryMinus(expr) => Ok(Self::UnaryMinus {
                 expr: Box::new(Self::from(*expr, table)?),
             }),
@@ -352,12 +406,15 @@ impl Expression {
                 ))
             }
             Self::Null => Ok((Value::Null, None)),
-            Self::Integer(value) => Ok((Value::Integer(*value), None)),
-            Self::Real(value) => Ok((Value::Real(*value), None)),
-            Self::Text(value) => Ok((Value::Text(value), None)),
-            Self::Blob(value) => Ok((Value::Blob(value), None)),
+            Self::Const(value) => Ok((value.as_ref(), None)),
         }
     }
+}
+
+struct IndexInfo {
+    page_id: PageId,
+    keys: Vec<ConstantValue>,
+    n_extra: usize,
 }
 
 // TODO: make Connection non mut and support multiple statements.
@@ -367,7 +424,7 @@ pub struct Statement<'conn> {
     columns: Vec<Expression>,
     selection: Option<Expression>,
     rowid: Option<i64>,
-    index: Option<(PageId, Vec<i64>)>,
+    index: Option<IndexInfo>,
 }
 
 impl<'conn> Statement<'conn> {
@@ -383,12 +440,14 @@ impl<'conn> Statement<'conn> {
                 left,
                 right,
             }) => match (left.as_ref(), right.as_ref()) {
-                (Expression::Column((ColumnNumber::RowId, _)), Expression::Integer(value)) => {
-                    Some(*value)
-                }
-                (Expression::Integer(value), Expression::Column((ColumnNumber::RowId, _))) => {
-                    Some(*value)
-                }
+                (
+                    Expression::Column((ColumnNumber::RowId, _)),
+                    Expression::Const(ConstantValue::Integer(value)),
+                ) => Some(*value),
+                (
+                    Expression::Const(ConstantValue::Integer(value)),
+                    Expression::Column((ColumnNumber::RowId, _)),
+                ) => Some(*value),
                 _ => None,
             },
             _ => None,
@@ -408,7 +467,7 @@ impl<'conn> Statement<'conn> {
         table_page_id: PageId,
         columns: Vec<Expression>,
         selection: Option<Expression>,
-        index: Option<(PageId, Vec<i64>)>,
+        index: Option<IndexInfo>,
     ) -> Self {
         Self {
             conn,
@@ -424,14 +483,18 @@ impl<'conn> Statement<'conn> {
         // TODO: check schema version.
         let mut cursor =
             BtreeCursor::new(self.table_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
-        let index = if let Some(rowid) = self.rowid {
+        let index_cursor = if let Some(rowid) = self.rowid {
             cursor.table_move_to(rowid)?;
             None
-        } else if let Some((index_page_id, keys)) = &self.index {
+        } else if let Some(index) = &self.index {
             let mut index_cursor =
-                BtreeCursor::new(*index_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
-            index_cursor.index_move_to(keys)?;
-            Some((index_cursor, &keys[..keys.len() - 1]))
+                BtreeCursor::new(index.page_id, &self.conn.pager, &self.conn.btree_ctx)?;
+            let mut keys = Vec::with_capacity(index.keys.len() + index.n_extra + 1);
+            keys.extend(index.keys.iter().map(|v| v.as_ref()));
+            // +1 for rowid
+            keys.extend((0..index.n_extra + 1).map(|_| Value::Null));
+            index_cursor.index_move_to(&keys)?;
+            Some(index_cursor)
         } else {
             cursor.move_to_first()?;
             None
@@ -439,7 +502,7 @@ impl<'conn> Statement<'conn> {
         Ok(Rows {
             stmt: self,
             cursor,
-            index,
+            index_cursor,
             is_first_row: true,
             completed: false,
         })
@@ -449,7 +512,7 @@ impl<'conn> Statement<'conn> {
 pub struct Rows<'conn> {
     stmt: &'conn Statement<'conn>,
     cursor: BtreeCursor<'conn, 'conn>,
-    index: Option<(BtreeCursor<'conn, 'conn>, &'conn [i64])>,
+    index_cursor: Option<BtreeCursor<'conn, 'conn>>,
     is_first_row: bool,
     completed: bool,
 }
@@ -550,27 +613,25 @@ impl<'conn> Rows<'conn> {
         } else if self.stmt.rowid.is_some() {
             // Only one row is selected.
             return Ok(false);
-        } else if let Some((index_cursor, _)) = &mut self.index {
+        } else if let Some(index_cursor) = &mut self.index_cursor {
             index_cursor.next()?;
         } else {
             self.cursor.next()?;
         }
-        if let Some((index_cursor, keys)) = &mut self.index {
+        if let Some(index_cursor) = &mut self.index_cursor {
             let Some(index_payload) = index_cursor.get_index_payload()? else {
                 return Ok(false);
             };
             let mut record = Record::parse(&index_payload)?;
+            // self.stmt.index must be present if self.index_cursor is present.
+            assert!(self.stmt.index.is_some());
+            let keys = self.stmt.index.as_ref().unwrap().keys.as_slice();
             if record.len() < keys.len() {
                 bail!("index payload is too short");
             }
             for (i, key) in keys.iter().enumerate() {
-                if let Value::Integer(v) = record.get(i)? {
-                    if v != *key {
-                        return Ok(false);
-                    }
-                } else {
-                    // TODO: support other key types.
-                    bail!("index payload is not integer");
+                if record.get(i)? != key.as_ref() {
+                    return Ok(false);
                 }
             }
             let Value::Integer(rowid) = record.get(record.len() - 1)? else {

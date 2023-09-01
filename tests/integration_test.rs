@@ -26,6 +26,22 @@ fn create_sqlite_database(queries: &[&str]) -> NamedTempFile {
     file
 }
 
+fn load_rowids(conn: &mut Connection, query: &str) -> Vec<i64> {
+    let mut stmt = conn.prepare(query).unwrap();
+    let mut rows = stmt.execute().unwrap();
+    let mut results = Vec::new();
+    while let Some(row) = rows.next_row().unwrap() {
+        let columns = row.parse().unwrap();
+        assert_eq!(columns.len(), 1);
+        assert!(matches!(columns.get(0), &Value::Integer(_)));
+        let Value::Integer(rowid) = columns.get(0) else {
+            unreachable!()
+        };
+        results.push(*rowid);
+    }
+    results
+}
+
 #[test]
 fn test_select_all_from_table() {
     let mut queries = vec![
@@ -766,19 +782,7 @@ fn test_select_filter_compare() {
             let rows = stmt.query([]).unwrap();
             let rowids: Vec<i64> = rows.mapped(|r| r.get(0)).map(|v| v.unwrap()).collect();
 
-            let mut stmt = conn.prepare(&query).unwrap();
-            let mut rows = stmt.execute().unwrap();
-            let mut results = Vec::new();
-            while let Some(row) = rows.next_row().unwrap() {
-                let columns = row.parse().unwrap();
-                assert_eq!(columns.len(), 1);
-                assert!(matches!(columns.get(0), &Value::Integer(_)));
-                let Value::Integer(rowid) = columns.get(0) else {
-                    unreachable!()
-                };
-                results.push(*rowid);
-            }
-
+            let results = load_rowids(&mut conn, &query);
             assert_eq!(results, rowids, "query: {}", query);
         }
     }
@@ -916,4 +920,98 @@ fn test_select_with_index() {
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
+}
+
+#[test]
+fn test_select_with_index_multi_type() {
+    let file = create_sqlite_database(&[
+        "CREATE TABLE example(col1, col2 INTEGER, col3 TEXT);",
+        "CREATE INDEX index1 ON example(col1);",
+        "CREATE INDEX index2 ON example(col2);",
+        "CREATE INDEX index3 ON example(col3);",
+        "INSERT INTO example(col1, col2, col3) VALUES ('abc', 'abc', 'abc');",
+        "INSERT INTO example(col1, col2, col3) VALUES ('1234', '1234', '1234');",
+        "INSERT INTO example(col1, col2, col3) VALUES (x'31323334', x'31323334', x'31323334');",
+        "INSERT INTO example(col1, col2, col3) VALUES (1234, 1234, 1234);",
+        "INSERT INTO example(col1, col2, col3) VALUES (1234.5, 1234.5, 1234.5);",
+        "INSERT INTO example(col1, col2, col3) VALUES (NULL, NULL, NULL);",
+        "INSERT INTO example(col1, col2, col3) VALUES (1234, 1234, 1234);",
+        "INSERT INTO example(col1, col2, col3) VALUES ('1234', '1234', '1234');",
+        "INSERT INTO example(col1, col2, col3) VALUES ('01234', '01234', '01234');",
+    ]);
+
+    let test_conn = rusqlite::Connection::open(file.path()).unwrap();
+    let mut conn = Connection::open(file.path()).unwrap();
+
+    for (expected, query) in [
+        (vec![4, 7], "col1 = 1234"),
+        (vec![2, 4, 7, 8, 9], "col2 = 1234"),
+        (vec![2, 4, 7, 8], "col3 = 1234"),
+        (vec![], "col1 = 0"),
+        (vec![], "col2 = 0"),
+        (vec![], "col3 = 0"),
+        (vec![2, 8], "col1 = '1234'"),
+        (vec![2, 4, 7, 8, 9], "col2 = '1234'"),
+        (vec![2, 4, 7, 8], "col3 = '1234'"),
+        (vec![9], "col1 = '01234'"),
+        (vec![2, 4, 7, 8, 9], "col2 = '01234'"),
+        (vec![9], "col3 = '01234'"),
+        (vec![], "col1 = '0'"),
+        (vec![], "col2 = '0'"),
+        (vec![], "col3 = '0'"),
+        (vec![5], "col1 = 1234.5"),
+        (vec![5], "col2 = 1234.5"),
+        (vec![5], "col3 = 1234.5"),
+        (vec![3], "col1 = x'31323334'"),
+        (vec![3], "col2 = x'31323334'"),
+        (vec![3], "col3 = x'31323334'"),
+    ] {
+        let query = format!("SELECT rowid FROM example WHERE {};", query);
+        let mut stmt = test_conn.prepare(&query).unwrap();
+        let rows = stmt.query([]).unwrap();
+        let rowids: Vec<i64> = rows.mapped(|r| r.get(0)).map(|v| v.unwrap()).collect();
+        assert_eq!(rowids, expected, "query: {}", query);
+
+        let results = load_rowids(&mut conn, &query);
+
+        assert_eq!(results, expected, "query: {}", query);
+    }
+}
+
+#[test]
+fn test_select_with_index_same_items() {
+    let mut queries = vec![
+        "CREATE TABLE example(col1, col2, col3);",
+        "CREATE INDEX index1 ON example(col1, col2, col3);",
+    ];
+    queries.resize(
+        queries.len() + 100,
+        "INSERT INTO example(col1, col2, col3) VALUES ('abc', NULL, NULL);",
+    );
+    queries.resize(
+        queries.len() + 100,
+        "INSERT INTO example(col1, col2, col3) VALUES (123, NULL, NULL);",
+    );
+    queries.resize(
+        queries.len() + 100,
+        "INSERT INTO example(col1, col2, col3) VALUES (NULL, NULL, NULL);",
+    );
+    let file = create_sqlite_database(&queries);
+
+    let test_conn = rusqlite::Connection::open(file.path()).unwrap();
+    let mut conn = Connection::open(file.path()).unwrap();
+
+    for (expected, query) in [
+        ((1..=100).collect::<Vec<i64>>(), "col1 = 'abc'"),
+        ((101..=200).collect::<Vec<i64>>(), "col1 = 123"),
+    ] {
+        let query = format!("SELECT rowid FROM example WHERE {};", query);
+        let mut stmt = test_conn.prepare(&query).unwrap();
+        let rows = stmt.query([]).unwrap();
+        let rowids: Vec<i64> = rows.mapped(|r| r.get(0)).map(|v| v.unwrap()).collect();
+        assert_eq!(rowids, expected, "query: {}", query);
+
+        let results = load_rowids(&mut conn, &query);
+        assert_eq!(results, expected, "query: {}", query);
+    }
 }
