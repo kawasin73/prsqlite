@@ -216,9 +216,20 @@ impl<'a> Value<'a> {
                 };
                 match self {
                     Value::Null => Value::Null,
+                    Value::Integer(i) => {
+                        // i64 is at most 19 digits. 1 byte is for sign (-).
+                        let mut text_buf = Vec::with_capacity(20);
+                        write!(text_buf, "{}", i).unwrap();
+                        value_type(Buffer::Owned(text_buf))
+                    }
+                    Value::Real(d) => {
+                        // TODO: Use the same format as SQLite "%!.15g".
+                        let mut text_buf = Vec::new();
+                        write!(text_buf, "{}", d).unwrap();
+                        value_type(Buffer::Owned(text_buf))
+                    }
                     Value::Text(buf) => value_type(buf),
                     Value::Blob(buf) => value_type(buf),
-                    _ => todo!("apply_type_affinity text"),
                 }
             }
         }
@@ -958,7 +969,22 @@ mod tests {
             Value::Null.force_apply_type_affinity(TypeAffinity::Text),
             Value::Null
         );
-        // TODO; tests for integer/real
+        assert_eq!(
+            Value::Integer(12345).force_apply_type_affinity(TypeAffinity::Text),
+            Value::Text(b"12345".as_slice().into())
+        );
+        assert_eq!(
+            Value::Integer(9223372036854775807).force_apply_type_affinity(TypeAffinity::Text),
+            Value::Text(b"9223372036854775807".as_slice().into())
+        );
+        assert_eq!(
+            Value::Integer(-9223372036854775808).force_apply_type_affinity(TypeAffinity::Text),
+            Value::Text(b"-9223372036854775808".as_slice().into())
+        );
+        assert_eq!(
+            Value::Real(1234.5).force_apply_type_affinity(TypeAffinity::Text),
+            Value::Text(b"1234.5".as_slice().into())
+        );
         assert_eq!(
             Value::Text(b"12345".as_slice().into()).force_apply_type_affinity(TypeAffinity::Text),
             Value::Text(b"12345".as_slice().into())
@@ -975,7 +1001,18 @@ mod tests {
             Value::Null.force_apply_type_affinity(TypeAffinity::Blob),
             Value::Null
         );
-        // TODO; tests for integer/real
+        assert_eq!(
+            Value::Integer(9223372036854775807).force_apply_type_affinity(TypeAffinity::Blob),
+            Value::Blob(b"9223372036854775807".as_slice().into())
+        );
+        assert_eq!(
+            Value::Integer(-9223372036854775808).force_apply_type_affinity(TypeAffinity::Blob),
+            Value::Blob(b"-9223372036854775808".as_slice().into())
+        );
+        assert_eq!(
+            Value::Real(1234.5).force_apply_type_affinity(TypeAffinity::Blob),
+            Value::Blob(b"1234.5".as_slice().into())
+        );
         assert_eq!(
             Value::Text(b"12345".as_slice().into()).force_apply_type_affinity(TypeAffinity::Blob),
             Value::Blob(b"12345".as_slice().into())

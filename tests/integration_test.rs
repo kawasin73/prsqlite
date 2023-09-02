@@ -375,9 +375,41 @@ fn test_select_expression() {
     drop(row);
     assert!(rows.next_row().unwrap().is_none());
 
-    // TODO: Cast to text
+    // Cast to text
+    let mut stmt = conn
+        .prepare(
+            "SELECT CAST(col1 AS TEXT), CAST(col3 AS TEXT), CAST(col4 AS TEXT), CAST(' 10 ' AS TEXT), CAST(x'3132333435' AS TEXT) FROM example;",
+        )
+        .unwrap();
+    let mut rows = stmt.execute().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 5);
+    assert_eq!(columns.get(0), &Value::Text(b"1".to_vec().into()));
+    assert_eq!(columns.get(1), &Value::Text(b"-3".to_vec().into()));
+    assert_eq!(columns.get(2), &Value::Text(b"4.5".to_vec().into()));
+    assert_eq!(columns.get(3), &Value::Text(b" 10 ".as_slice().into()));
+    assert_eq!(columns.get(4), &Value::Text(b"12345".as_slice().into()));
+    drop(row);
+    assert!(rows.next_row().unwrap().is_none());
 
-    // TODO: Cast to blob
+    // Cast to blob
+    let mut stmt = conn
+        .prepare(
+            "SELECT CAST(col1 AS BLOB), CAST(col3 AS BLOB), CAST(col4 AS BLOB), CAST(' 10 ' AS BLOB), CAST(x'3132333435' AS BLOB) FROM example;",
+        )
+        .unwrap();
+    let mut rows = stmt.execute().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    assert_eq!(columns.len(), 5);
+    assert_eq!(columns.get(0), &Value::Blob(b"1".to_vec().into()));
+    assert_eq!(columns.get(1), &Value::Blob(b"-3".to_vec().into()));
+    assert_eq!(columns.get(2), &Value::Blob(b"4.5".to_vec().into()));
+    assert_eq!(columns.get(3), &Value::Blob(b" 10 ".as_slice().into()));
+    assert_eq!(columns.get(4), &Value::Blob(b"12345".as_slice().into()));
+    drop(row);
+    assert!(rows.next_row().unwrap().is_none());
 }
 
 #[test]
@@ -746,11 +778,11 @@ fn test_select_filter_compare() {
         "INSERT INTO example(col) VALUES (9999999999999999999.0);",
         "INSERT INTO example(col) VALUES ('hello');",
         "INSERT INTO example(col) VALUES ('');",
-        // TODO: Text convertable to numeric
+        "INSERT INTO example(col) VALUES ('123');",
         "INSERT INTO example(col) VALUES (x'0123456789abcdef');",
         "INSERT INTO example(col) VALUES (x'68656C6C6F');", // 'hello'
         "INSERT INTO example(col) VALUES (x'');",
-        // TODO: Blob convertable to numeric
+        "INSERT INTO example(col) VALUES (x'313233');",
     ]);
 
     let mut conn = Connection::open(file.path()).unwrap();
