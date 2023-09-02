@@ -193,16 +193,7 @@ impl Connection {
                                 )
                             }
                             TypeAffinity::Text => {
-                                let mut text_buf = Vec::new();
-                                let value = const_value.as_ref().apply_text_affinity(&mut text_buf);
-                                if matches!(
-                                    const_value,
-                                    ConstantValue::Integer(_) | ConstantValue::Real(_)
-                                ) {
-                                    ConstantValue::Text(text_buf)
-                                } else {
-                                    ConstantValue::copy_from(value)
-                                }
+                                ConstantValue::copy_from(const_value.as_ref().apply_text_affinity())
                             }
                             TypeAffinity::Blob => ConstantValue::copy_from(const_value.as_ref()),
                         };
@@ -253,8 +244,8 @@ impl ConstantValue {
             Value::Null => unreachable!("null value"),
             Value::Integer(i) => Self::Integer(i),
             Value::Real(f) => Self::Real(f),
-            Value::Text(text) => Self::Text(text.to_vec()),
-            Value::Blob(blob) => Self::Blob(blob.to_vec()),
+            Value::Text(buf) => Self::Text(buf.into_vec()),
+            Value::Blob(buf) => Self::Blob(buf.into_vec()),
         }
     }
 
@@ -262,8 +253,8 @@ impl ConstantValue {
         match self {
             Self::Integer(i) => Value::Integer(*i),
             Self::Real(f) => Value::Real(*f),
-            Self::Text(text) => Value::Text(text),
-            Self::Blob(blob) => Value::Blob(blob),
+            Self::Text(text) => Value::Text(text.as_slice().into()),
+            Self::Blob(blob) => Value::Blob(blob.as_slice().into()),
         }
     }
 }
@@ -353,7 +344,6 @@ impl Expression {
                     _ => {}
                 }
 
-                let mut text_buf = Vec::new();
                 // Type Conversions Prior To Comparison
                 match (left_affinity, right_affinity) {
                     (
@@ -373,10 +363,10 @@ impl Expression {
                         left_value = left_value.apply_numeric_affinity();
                     }
                     (Some(TypeAffinity::Text), None) => {
-                        right_value = right_value.apply_text_affinity(&mut text_buf);
+                        right_value = right_value.apply_text_affinity();
                     }
                     (None, Some(TypeAffinity::Text)) => {
-                        left_value = left_value.apply_text_affinity(&mut text_buf);
+                        left_value = left_value.apply_text_affinity();
                     }
                     _ => {}
                 }

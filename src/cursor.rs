@@ -1106,38 +1106,87 @@ mod tests {
             (3, vec![Value::Integer(1), Value::Real(-10.1), Value::Null]),
             (5, vec![Value::Integer(1), Value::Integer(5), Value::Null]),
             (7, vec![Value::Integer(1), Value::Integer(101), Value::Null]),
-            (7, vec![Value::Integer(1), Value::Text(b""), Value::Null]),
-            (8, vec![Value::Integer(1), Value::Text(b"\0"), Value::Null]),
             (
-                10,
-                vec![Value::Integer(1), Value::Text(b"01234"), Value::Null],
+                7,
+                vec![
+                    Value::Integer(1),
+                    Value::Text(b"".as_slice().into()),
+                    Value::Null,
+                ],
+            ),
+            (
+                8,
+                vec![
+                    Value::Integer(1),
+                    Value::Text(b"\0".as_slice().into()),
+                    Value::Null,
+                ],
             ),
             (
                 10,
-                vec![Value::Integer(1), Value::Text(b"0124"), Value::Null],
+                vec![
+                    Value::Integer(1),
+                    Value::Text(b"01234".as_slice().into()),
+                    Value::Null,
+                ],
+            ),
+            (
+                10,
+                vec![
+                    Value::Integer(1),
+                    Value::Text(b"0124".as_slice().into()),
+                    Value::Null,
+                ],
             ),
             (
                 13,
-                vec![Value::Integer(1), Value::Blob(&[0x01, 0x24]), Value::Null],
+                vec![
+                    Value::Integer(1),
+                    Value::Blob([0x01, 0x24].as_slice().into()),
+                    Value::Null,
+                ],
             ),
             (
                 17,
-                vec![Value::Integer(1), Value::Blob(&[0x01, 0x26]), Value::Null],
+                vec![
+                    Value::Integer(1),
+                    Value::Blob([0x01, 0x26].as_slice().into()),
+                    Value::Null,
+                ],
             ),
             (17, vec![Value::Integer(2), Value::Null, Value::Null]),
             (18, vec![Value::Integer(3), Value::Null, Value::Null]),
-            (21, vec![Value::Text(b"0123"), Value::Null, Value::Null]),
+            (
+                21,
+                vec![
+                    Value::Text(b"0123".as_slice().into()),
+                    Value::Null,
+                    Value::Null,
+                ],
+            ),
             (
                 22,
-                vec![Value::Text(b"0123"), Value::Null, Value::Integer(22)],
+                vec![
+                    Value::Text(b"0123".as_slice().into()),
+                    Value::Null,
+                    Value::Integer(22),
+                ],
             ),
             (
                 24,
-                vec![Value::Text(b"0123"), Value::Integer(1), Value::Null],
+                vec![
+                    Value::Text(b"0123".as_slice().into()),
+                    Value::Integer(1),
+                    Value::Null,
+                ],
             ),
             (
                 27,
-                vec![Value::Blob(&[0x01, 0x24]), Value::Null, Value::Null],
+                vec![
+                    Value::Blob([0x01, 0x24].as_slice().into()),
+                    Value::Null,
+                    Value::Null,
+                ],
             ),
         ] {
             cursor.index_move_to(&keys).unwrap();

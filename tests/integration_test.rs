@@ -76,14 +76,17 @@ fn test_select_all_from_table() {
     assert_eq!(columns.len(), 3);
     assert_eq!(columns.get(0), &Value::Integer(10000));
     assert_eq!(columns.get(1), &Value::Null);
-    assert_eq!(columns.get(2), &Value::Text(b"hello"));
+    assert_eq!(columns.get(2), &Value::Text(b"hello".as_slice().into()));
     assert_eq!(columns.get(3), &Value::Null);
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 3);
-    assert_eq!(columns.get(0), &Value::Blob(&[0xFF; 10000]));
+    assert_eq!(
+        columns.get(0),
+        &Value::Blob([0xFF; 10000].as_slice().into())
+    );
     assert_eq!(columns.get(1), &Value::Integer(20000));
     assert_eq!(columns.get(2), &Value::Null);
     assert_eq!(columns.get(3), &Value::Null);
@@ -252,10 +255,10 @@ fn test_select_expression() {
     assert_eq!(columns.get(0), &Value::Integer(1));
     assert_eq!(columns.get(1), &Value::Integer(10));
     assert_eq!(columns.get(2), &Value::Real(10.0));
-    assert_eq!(columns.get(3), &Value::Text(b"text"));
+    assert_eq!(columns.get(3), &Value::Text(b"text".as_slice().into()));
     assert_eq!(
         columns.get(4),
-        &Value::Blob(b"\x01\x23\x45\x67\x89\xab\xcd\xef")
+        &Value::Blob(b"\x01\x23\x45\x67\x89\xab\xcd\xef".as_slice().into())
     );
     drop(row);
     assert!(rows.next_row().unwrap().is_none());
@@ -394,21 +397,21 @@ fn test_select_primary_key() {
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(1));
-    assert_eq!(columns.get(1), &Value::Text(b"10"));
+    assert_eq!(columns.get(1), &Value::Text(b"10".as_slice().into()));
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(3));
-    assert_eq!(columns.get(1), &Value::Text(b"30"));
+    assert_eq!(columns.get(1), &Value::Text(b"30".as_slice().into()));
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(5));
-    assert_eq!(columns.get(1), &Value::Text(b"20"));
+    assert_eq!(columns.get(1), &Value::Text(b"20".as_slice().into()));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -581,14 +584,14 @@ fn test_select_filter_eq() {
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(1));
-    assert_eq!(columns.get(1), &Value::Text(b"hello"));
+    assert_eq!(columns.get(1), &Value::Text(b"hello".as_slice().into()));
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(3));
-    assert_eq!(columns.get(1), &Value::Text(b"hello"));
+    assert_eq!(columns.get(1), &Value::Text(b"hello".as_slice().into()));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -644,7 +647,10 @@ fn test_select_filter_eq() {
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(2));
-    assert_eq!(columns.get(1), &Value::Blob(&[0x23, 0x45, 0xab]));
+    assert_eq!(
+        columns.get(1),
+        &Value::Blob([0x23, 0x45, 0xab].as_slice().into())
+    );
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -670,7 +676,7 @@ fn test_select_filter_ne() {
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(2));
-    assert_eq!(columns.get(1), &Value::Text(b"world"));
+    assert_eq!(columns.get(1), &Value::Text(b"world".as_slice().into()));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -712,7 +718,10 @@ fn test_select_filter_ne() {
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
     assert_eq!(columns.get(0), &Value::Integer(2));
-    assert_eq!(columns.get(1), &Value::Blob(&[0x23, 0x45, 0xab]));
+    assert_eq!(
+        columns.get(1),
+        &Value::Blob([0x23, 0x45, 0xab].as_slice().into())
+    );
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -834,7 +843,7 @@ fn test_select_filter_with_primary_key() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Text(b"20"));
+    assert_eq!(columns.get(0), &Value::Text(b"20".as_slice().into()));
     assert_eq!(columns.get(1), &Value::Integer(3));
     drop(row);
     assert!(rows.next_row().unwrap().is_none());

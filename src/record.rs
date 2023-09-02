@@ -19,6 +19,7 @@ use anyhow::Context;
 
 use crate::cursor::BtreePayload;
 use crate::utils::parse_varint;
+use crate::value::Buffer;
 use crate::value::Value;
 
 pub fn compare_record(keys: &[Value], payload: &BtreePayload) -> anyhow::Result<Ordering> {
@@ -108,9 +109,9 @@ impl SerialType {
                 }
                 let buf = &buf[..size];
                 if n & 1 == 0 {
-                    Value::Blob(buf)
+                    Value::Blob(Buffer::Ref(buf))
                 } else {
-                    Value::Text(buf)
+                    Value::Text(Buffer::Ref(buf))
                 }
             }
         };
@@ -289,10 +290,17 @@ mod tests {
         let mut record = Record::parse(&payload).unwrap();
         assert_eq!(record.get(0).unwrap(), Value::Integer(0));
         assert_eq!(record.get(1).unwrap(), Value::Integer(1));
-        assert_eq!(record.get(2).unwrap(), Value::Text(b"hello"));
+        assert_eq!(
+            record.get(2).unwrap(),
+            Value::Text(b"hello".as_slice().into())
+        );
         assert_eq!(
             record.get(3).unwrap(),
-            Value::Blob(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef])
+            Value::Blob(
+                [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]
+                    .as_slice()
+                    .into()
+            )
         );
         drop(payload);
 

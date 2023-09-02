@@ -42,25 +42,25 @@ struct SchemaRecord<'a> {
 }
 
 impl<'a> SchemaRecord<'a> {
-    fn parse(columns: Columns<'a>) -> anyhow::Result<Self> {
-        let &Value::Text(type_) = columns.get(0) else {
+    fn parse(columns: &'a Columns<'a>) -> anyhow::Result<Self> {
+        let Value::Text(type_) = columns.get(0) else {
             bail!("invalid type: {:?}", columns.get(0));
         };
 
-        let &Value::Text(name) = columns.get(1) else {
+        let Value::Text(name) = columns.get(1) else {
             bail!("invalid name: {:?}", columns.get(1));
         };
 
-        let &Value::Text(table_name) = columns.get(2) else {
+        let Value::Text(table_name) = columns.get(2) else {
             bail!("invalid tbl_name: {:?}", columns.get(2));
         };
 
-        let &Value::Integer(root_page_id) = columns.get(3) else {
+        let Value::Integer(root_page_id) = columns.get(3) else {
             bail!("invalid root_page_id: {:?}", columns.get(3));
         };
-        let root_page_id = root_page_id.try_into().context("parse root_page_id")?;
+        let root_page_id = (*root_page_id).try_into().context("parse root_page_id")?;
 
-        let sql = match *columns.get(4) {
+        let sql: Option<&[u8]> = match columns.get(4) {
             Value::Null => None,
             Value::Text(sql) => Some(sql),
             _ => bail!("invalid sql: {:?}", columns.get(4)),
@@ -124,7 +124,7 @@ impl Schema {
         let mut indexes = HashMap::new();
         while let Some(row) = rows.next_row()? {
             let columns = row.parse()?;
-            let schema = SchemaRecord::parse(columns)?;
+            let schema = SchemaRecord::parse(&columns)?;
             match schema.type_ {
                 b"table" => {
                     if schema.name != schema.table_name {
