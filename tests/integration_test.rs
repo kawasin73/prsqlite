@@ -413,6 +413,54 @@ fn test_select_expression() {
 }
 
 #[test]
+fn test_select_expression_operators() {
+    let file = create_sqlite_database(&[
+        "CREATE TABLE example(col1);",
+        "INSERT INTO example(col1) VALUES (1);",
+    ]);
+
+    let test_conn = rusqlite::Connection::open(file.path()).unwrap();
+    let mut conn = Connection::open(file.path()).unwrap();
+
+    for (expected, expr) in [
+        (Value::Integer(1), "'a' = 'a' = 1"),
+        (Value::Integer(0), "1 = 'a' = 'a'"),
+        (Value::Integer(1), "1 < 2 = 1"),
+        (Value::Integer(0), "1 = 2 <= 1"),
+    ] {
+        let query = format!("SELECT {} FROM example;", expr);
+        let mut stmt = test_conn.prepare(&query).unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        let row = rows.next().unwrap().unwrap();
+        match &expected {
+            Value::Integer(v) => assert_eq!(row.get::<_, i64>(0).unwrap(), *v, "query: {}", query),
+            Value::Real(v) => assert_eq!(row.get::<_, f64>(0).unwrap(), *v, "query: {}", query),
+            Value::Text(v) => assert_eq!(
+                row.get::<_, String>(0).unwrap().as_bytes(),
+                &**v,
+                "query: {}",
+                query
+            ),
+            Value::Blob(v) => {
+                assert_eq!(
+                    row.get::<_, Vec<u8>>(0).unwrap().as_slice(),
+                    &**v,
+                    "query: {}",
+                    query
+                )
+            }
+            Value::Null => unimplemented!("null values not supported yet"),
+        }
+
+        let mut stmt = conn.prepare(&query).unwrap();
+        let mut rows = stmt.execute().unwrap();
+        let row = rows.next_row().unwrap().unwrap();
+        let columns = row.parse().unwrap();
+        assert_eq!(columns.get(0), &expected, "query: {}", query);
+    }
+}
+
+#[test]
 fn test_select_primary_key() {
     let file = create_sqlite_database(&[
         "CREATE TABLE example(id integer primary key, col text);",
