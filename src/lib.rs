@@ -31,8 +31,6 @@ use std::path::Path;
 use anyhow::bail;
 use anyhow::Context;
 
-// TODO: This is to suppress the unused warning.
-// pub use crate::btree::*;
 use crate::btree::BtreeContext;
 use crate::cursor::BtreeCursor;
 use crate::cursor::BtreePayload;
@@ -165,8 +163,8 @@ impl Connection {
             }
         }
 
-        let selection = select
-            .selection
+        let filter = select
+            .filter
             .map(|expr| Expression::from(expr, table))
             .transpose()?;
 
@@ -174,7 +172,7 @@ impl Connection {
             operator: BinaryOperator::Eq,
             left,
             right,
-        }) = &selection
+        }) = &filter
         {
             if let Expression::Column((column_number, type_affinity)) = left.as_ref() {
                 if let Expression::Const(const_value) = right.as_ref() {
@@ -221,11 +219,11 @@ impl Connection {
                 self,
                 table_page_id,
                 columns,
-                selection,
+                filter,
                 index,
             ))
         } else {
-            Ok(Statement::new(self, table_page_id, columns, selection))
+            Ok(Statement::new(self, table_page_id, columns, filter))
         }
     }
 }
@@ -412,7 +410,7 @@ pub struct Statement<'conn> {
     conn: &'conn mut Connection,
     table_page_id: PageId,
     columns: Vec<Expression>,
-    selection: Option<Expression>,
+    filter: Option<Expression>,
     rowid: Option<i64>,
     index: Option<IndexInfo>,
 }
@@ -422,9 +420,9 @@ impl<'conn> Statement<'conn> {
         conn: &'conn mut Connection,
         table_page_id: PageId,
         columns: Vec<Expression>,
-        selection: Option<Expression>,
+        filter: Option<Expression>,
     ) -> Self {
-        let rowid = match &selection {
+        let rowid = match &filter {
             Some(Expression::BinaryOperator {
                 operator: BinaryOperator::Eq,
                 left,
@@ -446,7 +444,7 @@ impl<'conn> Statement<'conn> {
             conn,
             table_page_id,
             columns,
-            selection,
+            filter,
             rowid,
             index: None,
         }
@@ -456,14 +454,14 @@ impl<'conn> Statement<'conn> {
         conn: &'conn mut Connection,
         table_page_id: PageId,
         columns: Vec<Expression>,
-        selection: Option<Expression>,
+        filter: Option<Expression>,
         index: Option<IndexInfo>,
     ) -> Self {
         Self {
             conn,
             table_page_id,
             columns,
-            selection,
+            filter,
             rowid: None,
             index,
         }
@@ -553,7 +551,7 @@ impl<'conn> Rows<'conn> {
                 }
             };
 
-            if let Some(selection) = &self.stmt.selection {
+            if let Some(filter) = &self.stmt.filter {
                 let data = RowData {
                     rowid,
                     payload,
@@ -562,7 +560,7 @@ impl<'conn> Rows<'conn> {
                     use_local_buffer,
                     content_offset,
                 };
-                let skip = matches!(selection.execute(&data)?.0, Value::Null | Value::Integer(0));
+                let skip = matches!(filter.execute(&data)?.0, Value::Null | Value::Integer(0));
                 RowData {
                     rowid: _,
                     payload: _,

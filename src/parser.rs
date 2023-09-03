@@ -272,7 +272,7 @@ pub fn parse_create_index(input: &[u8]) -> Result<(usize, CreateIndex)> {
 pub struct Select<'a> {
     pub table_name: MaybeQuotedBytes<'a>,
     pub columns: Vec<ResultColumn<'a>>,
-    pub selection: Option<Expr<'a>>,
+    pub filter: Option<Expr<'a>>,
 }
 
 // Parse SELECT statement.
@@ -310,7 +310,7 @@ pub fn parse_select(input: &[u8]) -> Result<(usize, Select)> {
     };
     input = &input[n..];
 
-    let selection = if let Some((n, Token::Where)) = get_token_no_space(input) {
+    let filter = if let Some((n, Token::Where)) = get_token_no_space(input) {
         input = &input[n..];
         let (n, expr) = parse_expr(input)?;
         input = &input[n..];
@@ -324,7 +324,7 @@ pub fn parse_select(input: &[u8]) -> Result<(usize, Select)> {
         Select {
             table_name,
             columns,
-            selection,
+            filter,
         },
     ))
 }
@@ -767,9 +767,9 @@ mod tests {
         assert_eq!(n, input.len());
         assert_eq!(select.table_name, b"foo".as_slice().into());
         assert_eq!(select.columns, vec![ResultColumn::All,]);
-        assert!(select.selection.is_some());
+        assert!(select.filter.is_some());
         assert_eq!(
-            select.selection.unwrap(),
+            select.filter.unwrap(),
             Expr::BinaryOperator {
                 operator: BinaryOperator::Eq,
                 left: Box::new(Expr::Column(b"id".as_slice().into())),
