@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::token::get_token_no_space;
+use crate::token::get_token;
 use crate::token::Token;
 use crate::utils::parse_float;
 use crate::utils::parse_integer;
@@ -28,6 +28,38 @@ static NULL_BYTES: &[u8] = b"null";
 #[inline(always)]
 fn adjust_error_cursor<T>(result: Result<T>, n: usize) -> Result<T> {
     result.map_err(|(nn, msg)| (n + nn, msg))
+}
+
+/// Get next [Token] skipping spaces.
+fn next_token(input: &[u8]) -> Option<(usize, Token)> {
+    match get_token(input) {
+        Some((len_space, Token::Space)) => {
+            let (len, token) = get_token(&input[len_space..])?;
+            Some((len + len_space, token))
+        }
+        result => result,
+    }
+}
+
+/// Assert that the next token is a semicolon.
+pub fn expect_semicolon(input: &[u8]) -> Result<usize> {
+    match next_token(input) {
+        Some((n, Token::Semicolon)) => Ok(n),
+        Some((n, _)) => Err((n, "no semicolon")),
+        None => Err((0, "no semicolon")),
+    }
+}
+
+/// Assert that there is no token except spaces.
+pub fn expect_no_more_token(input: &[u8]) -> Result<()> {
+    match get_token(input) {
+        Some((n, Token::Space)) => match get_token(&input[n..]) {
+            Some(_) => Err((n, "unexpected token")),
+            None => Ok(()),
+        },
+        Some(_) => Err((0, "unexpected token")),
+        None => Ok(()),
+    }
 }
 
 /// CREATE TABLE statement.
@@ -47,11 +79,10 @@ pub struct ColumnDef<'a> {
 
 /// https://www.sqlite.org/syntax/signed-number.html
 fn skip_signed_number(input: &[u8]) -> Result<usize> {
-    let (mut nn, mut token) =
-        get_token_no_space(input).ok_or((0, "no signed number: first token"))?;
+    let (mut nn, mut token) = next_token(input).ok_or((0, "no signed number: first token"))?;
     let mut n = nn;
     if matches!(token, Token::Plus | Token::Minus) {
-        (nn, token) = get_token_no_space(&input[n..]).ok_or((n, "no signed number: number"))?;
+        (nn, token) = next_token(&input[n..]).ok_or((n, "no signed number: number"))?;
         n += nn;
     }
     if !matches!(token, Token::Integer(_) | Token::Float(_)) {
@@ -66,7 +97,7 @@ fn parse_type_name(input: &[u8]) -> Result<(usize, Vec<MaybeQuotedBytes<'_>>)> {
     // Vec. Use iterator instead.
     let mut type_name = Vec::new();
 
-    let mut n = match get_token_no_space(input) {
+    let mut n = match next_token(input) {
         Some((n, Token::Null)) => {
             type_name.push(NULL_BYTES.into());
             n
@@ -79,7 +110,7 @@ fn parse_type_name(input: &[u8]) -> Result<(usize, Vec<MaybeQuotedBytes<'_>>)> {
     };
 
     loop {
-        match get_token_no_space(&input[n..]) {
+        match next_token(&input[n..]) {
             Some((nn, Token::Null)) => {
                 type_name.push(NULL_BYTES.into());
                 n += nn;
@@ -97,12 +128,12 @@ fn parse_type_name(input: &[u8]) -> Result<(usize, Vec<MaybeQuotedBytes<'_>>)> {
                 // Parse signed numbers.
                 n += skip_signed_number(&input[n..])?;
                 let (mut nn, mut token) =
-                    get_token_no_space(&input[n..]).ok_or((n, "no signed number last token"))?;
+                    next_token(&input[n..]).ok_or((n, "no signed number last token"))?;
                 n += nn;
                 if token == Token::Comma {
                     n += skip_signed_number(&input[n..])?;
-                    (nn, token) = get_token_no_space(&input[n..])
-                        .ok_or((n, "no signed number last token"))?;
+                    (nn, token) =
+                        next_token(&input[n..]).ok_or((n, "no signed number last token"))?;
                     n += nn;
                 }
                 if token != Token::RightParen {
@@ -123,22 +154,22 @@ fn parse_type_name(input: &[u8]) -> Result<(usize, Vec<MaybeQuotedBytes<'_>>)> {
 pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
     let mut n = 0;
 
-    let Some((nn, Token::Create)) = get_token_no_space(input) else {
+    let Some((nn, Token::Create)) = next_token(input) else {
         return Err((n, "no create"));
     };
     n += nn;
 
-    let Some((nn, Token::Table)) = get_token_no_space(&input[n..]) else {
+    let Some((nn, Token::Table)) = next_token(&input[n..]) else {
         return Err((n, "no table"));
     };
     n += nn;
 
-    let Some((nn, Token::Identifier(table_name))) = get_token_no_space(&input[n..]) else {
+    let Some((nn, Token::Identifier(table_name))) = next_token(&input[n..]) else {
         return Err((n, "no table_name"));
     };
     n += nn;
 
-    let Some((nn, Token::LeftParen)) = get_token_no_space(&input[n..]) else {
+    let Some((nn, Token::LeftParen)) = next_token(&input[n..]) else {
         return Err((n, "no left paren"));
     };
     n += nn;
@@ -146,7 +177,7 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
     let mut columns = Vec::new();
     loop {
         // Parse ColumnDef.
-        let Some((nn, Token::Identifier(name))) = get_token_no_space(&input[n..]) else {
+        let Some((nn, Token::Identifier(name))) = next_token(&input[n..]) else {
             return Err((n, "no column name"));
         };
         n += nn;
@@ -154,17 +185,17 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
         let (nn, type_name) = adjust_error_cursor(parse_type_name(&input[n..]), n)?;
         n += nn;
 
-        let (mut nn, mut token) = get_token_no_space(&input[n..]).ok_or((n, "no right paren"))?;
+        let (mut nn, mut token) = next_token(&input[n..]).ok_or((n, "no right paren"))?;
         n += nn;
 
         let primary_key = if token == Token::Primary {
-            match get_token_no_space(&input[n..]) {
+            match next_token(&input[n..]) {
                 Some((nn, Token::Key)) => {
                     n += nn;
                 }
                 _ => return Err((n, "no key")),
             }
-            (nn, token) = get_token_no_space(&input[n..]).ok_or((n, "no right paren"))?;
+            (nn, token) = next_token(&input[n..]).ok_or((n, "no right paren"))?;
             n += nn;
 
             true
@@ -214,44 +245,44 @@ pub struct IndexedColumn<'a> {
 pub fn parse_create_index(input: &[u8]) -> Result<(usize, CreateIndex)> {
     let mut n = 0;
 
-    let Some((nn, Token::Create)) = get_token_no_space(input) else {
+    let Some((nn, Token::Create)) = next_token(input) else {
         return Err((n, "no create"));
     };
     n += nn;
 
-    let Some((nn, Token::Index)) = get_token_no_space(&input[n..]) else {
+    let Some((nn, Token::Index)) = next_token(&input[n..]) else {
         return Err((n, "no index"));
     };
     n += nn;
 
-    let Some((nn, Token::Identifier(index_name))) = get_token_no_space(&input[n..]) else {
+    let Some((nn, Token::Identifier(index_name))) = next_token(&input[n..]) else {
         return Err((n, "no index_name"));
     };
     n += nn;
 
-    let Some((nn, Token::On)) = get_token_no_space(&input[n..]) else {
+    let Some((nn, Token::On)) = next_token(&input[n..]) else {
         return Err((n, "no on"));
     };
     n += nn;
 
-    let Some((nn, Token::Identifier(table_name))) = get_token_no_space(&input[n..]) else {
+    let Some((nn, Token::Identifier(table_name))) = next_token(&input[n..]) else {
         return Err((n, "no table_name"));
     };
     n += nn;
 
-    let Some((nn, Token::LeftParen)) = get_token_no_space(&input[n..]) else {
+    let Some((nn, Token::LeftParen)) = next_token(&input[n..]) else {
         return Err((n, "no left paren"));
     };
     n += nn;
 
     let mut columns = Vec::new();
     loop {
-        let Some((nn, Token::Identifier(name))) = get_token_no_space(&input[n..]) else {
+        let Some((nn, Token::Identifier(name))) = next_token(&input[n..]) else {
             return Err((n, "no column name"));
         };
         n += nn;
 
-        let (nn, token) = get_token_no_space(&input[n..]).ok_or((n, "no right paren"))?;
+        let (nn, token) = next_token(&input[n..]).ok_or((n, "no right paren"))?;
         n += nn;
 
         columns.push(IndexedColumn { name });
@@ -286,7 +317,7 @@ pub struct Select<'a> {
 pub fn parse_select(input: &[u8]) -> Result<(usize, Select)> {
     let mut n = 0;
 
-    let Some((nn, Token::Select)) = get_token_no_space(input) else {
+    let Some((nn, Token::Select)) = next_token(input) else {
         return Err((n, "no select"));
     };
     n += nn;
@@ -295,7 +326,7 @@ pub fn parse_select(input: &[u8]) -> Result<(usize, Select)> {
     n += nn;
     let mut columns = vec![result_column];
     loop {
-        match get_token_no_space(&input[n..]) {
+        match next_token(&input[n..]) {
             Some((nn, Token::Comma)) => {
                 n += nn;
                 let (nn, result_column) = adjust_error_cursor(parse_result_column(&input[n..]), n)?;
@@ -309,12 +340,12 @@ pub fn parse_select(input: &[u8]) -> Result<(usize, Select)> {
             _ => return Err((n, "no from")),
         }
     }
-    let Some((nn, Token::Identifier(table_name))) = get_token_no_space(&input[n..]) else {
+    let Some((nn, Token::Identifier(table_name))) = next_token(&input[n..]) else {
         return Err((n, "no table_name"));
     };
     n += nn;
 
-    let filter = if let Some((nn, Token::Where)) = get_token_no_space(&input[n..]) {
+    let filter = if let Some((nn, Token::Where)) = next_token(&input[n..]) {
         n += nn;
         let (nn, expr) = adjust_error_cursor(parse_expr(&input[n..]), n)?;
         n += nn;
@@ -344,10 +375,10 @@ pub enum ResultColumn<'a> {
 ///
 /// https://www.sqlite.org/syntax/result-column.html
 fn parse_result_column(input: &[u8]) -> Result<(usize, ResultColumn)> {
-    match get_token_no_space(input) {
+    match next_token(input) {
         Some((n, Token::Identifier(table_name))) => {
-            if let Some((nn, Token::Dot)) = get_token_no_space(&input[n..]) {
-                if let Some((nnn, Token::Asterisk)) = get_token_no_space(&input[n + nn..]) {
+            if let Some((nn, Token::Dot)) = next_token(&input[n..]) {
+                if let Some((nnn, Token::Asterisk)) = next_token(&input[n + nn..]) {
                     return Ok((n + nn + nnn, ResultColumn::AllOfTable(table_name)));
                 }
             }
@@ -356,13 +387,13 @@ fn parse_result_column(input: &[u8]) -> Result<(usize, ResultColumn)> {
         _ => {}
     }
     let (n, expr) = parse_expr(input)?;
-    match get_token_no_space(&input[n..]) {
+    match next_token(&input[n..]) {
         Some((nn, Token::Identifier(alias))) => {
             Ok((n + nn, ResultColumn::Expr((expr, Some(alias)))))
         }
         Some((nn, Token::As)) => {
             let n = n + nn;
-            let Some((nn, Token::Identifier(alias))) = get_token_no_space(&input[n..]) else {
+            let Some((nn, Token::Identifier(alias))) = next_token(&input[n..]) else {
                 return Err((n, "no alias"));
             };
             Ok((n + nn, ResultColumn::Expr((expr, Some(alias)))))
@@ -411,7 +442,7 @@ pub enum Expr<'a> {
 ///
 /// https://www.sqlite.org/syntax/expr.html
 fn parse_expr(input: &[u8]) -> Result<(usize, Expr)> {
-    let Some((n, token)) = get_token_no_space(input) else {
+    let Some((n, token)) = next_token(input) else {
         return Err((0, "no expr"));
     };
     let (nn, expr) = adjust_error_cursor(parse_expr_eq(token, &input[n..]), n)?;
@@ -421,13 +452,13 @@ fn parse_expr(input: &[u8]) -> Result<(usize, Expr)> {
 fn parse_expr_eq<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'a>)> {
     let (mut n, mut expr) = parse_expr_compare(token, input)?;
     loop {
-        let (nn, operator) = match get_token_no_space(&input[n..]) {
+        let (nn, operator) = match next_token(&input[n..]) {
             Some((n, Token::Eq)) => (n, BinaryOperator::Eq),
             Some((n, Token::Ne)) => (n, BinaryOperator::Ne),
             _ => break,
         };
         n += nn;
-        let Some((nn, token)) = get_token_no_space(&input[n..]) else {
+        let Some((nn, token)) = next_token(&input[n..]) else {
             return Err((n, "no expr after eq/ne"));
         };
         n += nn;
@@ -445,7 +476,7 @@ fn parse_expr_eq<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'
 fn parse_expr_compare<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'a>)> {
     let (mut n, mut expr) = parse_expr_unary(token, input)?;
     loop {
-        let (nn, operator) = match get_token_no_space(&input[n..]) {
+        let (nn, operator) = match next_token(&input[n..]) {
             Some((n, Token::Gt)) => (n, BinaryOperator::Gt),
             Some((n, Token::Ge)) => (n, BinaryOperator::Ge),
             Some((n, Token::Lt)) => (n, BinaryOperator::Lt),
@@ -453,7 +484,7 @@ fn parse_expr_compare<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, E
             _ => break,
         };
         n += nn;
-        let Some((nn, token)) = get_token_no_space(&input[n..]) else {
+        let Some((nn, token)) = next_token(&input[n..]) else {
             return Err((n, "no expr after compare"));
         };
         n += nn;
@@ -471,14 +502,14 @@ fn parse_expr_compare<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, E
 fn parse_expr_unary<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'a>)> {
     match token {
         Token::Plus => {
-            let Some((n, token)) = get_token_no_space(input) else {
+            let Some((n, token)) = next_token(input) else {
                 return Err((0, "no expr after +"));
             };
             // Unary operator + is a no-op.
             let (nn, expr) = adjust_error_cursor(parse_expr_unary(token, &input[n..]), n)?;
             Ok((n + nn, expr))
         }
-        Token::Minus => match get_token_no_space(input) {
+        Token::Minus => match next_token(input) {
             Some((n, Token::Integer(buf))) => {
                 let (valid, parsed_int) = parse_integer(buf);
                 assert!(valid);
@@ -516,14 +547,14 @@ fn parse_expr_primitive<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize,
     match token {
         Token::Identifier(id) => Ok((0, Expr::Column(id))),
         Token::Cast => {
-            let Some((mut n, Token::LeftParen)) = get_token_no_space(input) else {
+            let Some((mut n, Token::LeftParen)) = next_token(input) else {
                 return Err((0, "no cast left paren"));
             };
 
             let (nn, expr) = adjust_error_cursor(parse_expr(&input[n..]), n)?;
             n += nn;
 
-            let Some((nn, Token::As)) = get_token_no_space(&input[n..]) else {
+            let Some((nn, Token::As)) = next_token(&input[n..]) else {
                 return Err((n, "no cast as"));
             };
             n += nn;
@@ -531,7 +562,7 @@ fn parse_expr_primitive<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize,
             let (nn, type_name) = adjust_error_cursor(parse_type_name(&input[n..]), n)?;
             n += nn;
 
-            let Some((nn, Token::RightParen)) = get_token_no_space(&input[n..]) else {
+            let Some((nn, Token::RightParen)) = next_token(&input[n..]) else {
                 return Err((n, "no cast right paren"));
             };
             n += nn;
@@ -576,6 +607,38 @@ fn parse_expr_primitive<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_next_token() {
+        assert_eq!(next_token(b"(  "), Some((1, Token::LeftParen)));
+        assert_eq!(next_token(b"   (  "), Some((4, Token::LeftParen)));
+        assert_eq!(next_token(b"     "), None);
+        assert_eq!(next_token(b""), None);
+    }
+
+    #[test]
+    fn test_expect_semicolon() {
+        assert_eq!(expect_semicolon(b";  "), Ok(1));
+        assert_eq!(expect_semicolon(b"   ;  "), Ok(4));
+
+        let r = expect_semicolon(b"     ");
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().0, 0);
+
+        let r = expect_semicolon(b"");
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().0, 0);
+    }
+
+    #[test]
+    fn test_expect_no_more_token() {
+        assert!(expect_no_more_token(b"").is_ok());
+        assert!(expect_no_more_token(b"    ").is_ok());
+
+        let r = expect_no_more_token(b"    ;  ");
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().0, 4);
+    }
 
     #[test]
     fn test_parse_create_table() {

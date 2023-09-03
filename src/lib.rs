@@ -37,6 +37,8 @@ use crate::cursor::BtreeCursor;
 use crate::cursor::BtreePayload;
 use crate::pager::PageId;
 use crate::pager::Pager;
+use crate::parser::expect_no_more_token;
+use crate::parser::expect_semicolon;
 use crate::parser::parse_select;
 use crate::parser::BinaryOperator;
 use crate::parser::Expr;
@@ -48,8 +50,6 @@ use crate::schema::calc_type_affinity;
 use crate::schema::ColumnNumber;
 use crate::schema::Schema;
 use crate::schema::Table;
-use crate::token::get_token_no_space;
-use crate::token::Token;
 use crate::value::TypeAffinity;
 pub use crate::value::Value;
 
@@ -171,17 +171,16 @@ impl Connection {
     pub fn prepare<'a>(&mut self, sql: &'a str) -> Result<'a, Statement> {
         let input = sql.as_bytes();
         let parsed_sql = match parse_select(input) {
-            Ok((n, select)) => {
-                if let Some((nn, Token::Semicolon)) = get_token_no_space(&input[n..]) {
-                    if n + nn != input.len() {
-                        Err((n + nn, "extra characters after semicolon"))
-                    } else {
-                        Ok(select)
+            Ok((n, select)) => match expect_semicolon(&input[n..]) {
+                Ok(nn) => {
+                    let n = n + nn;
+                    match expect_no_more_token(&input[n..]) {
+                        Ok(()) => Ok(select),
+                        Err((nn, msg)) => Err((n + nn, msg)),
                     }
-                } else {
-                    Err((n, "no semicolon"))
                 }
-            }
+                Err((nn, msg)) => Err((n + nn, msg)),
+            },
             Err(e) => Err(e),
         };
         let select = parsed_sql.map_err(|(cursor, message)| Error::SqlParse {

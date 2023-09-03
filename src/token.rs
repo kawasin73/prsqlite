@@ -105,16 +105,6 @@ pub enum Token<'a> {
     Illegal,
 }
 
-pub fn get_token_no_space(input: &[u8]) -> Option<(usize, Token)> {
-    match get_token(input) {
-        Some((len_space, Token::Space)) => {
-            let (len, token) = get_token(&input[len_space..])?;
-            Some((len + len_space, token))
-        }
-        result => result,
-    }
-}
-
 pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
     if input.is_empty() {
         return None;
@@ -795,11 +785,6 @@ mod tests {
                 input
             );
         }
-    }
-
-    #[test]
-    fn test_get_token_no_space() {
-        assert_eq!(get_token_no_space(b"   (  "), Some((4, Token::LeftParen)));
     }
 
     #[test]
