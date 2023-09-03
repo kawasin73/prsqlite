@@ -20,10 +20,15 @@ use crate::utils::HexedBytes;
 use crate::utils::MaybeQuotedBytes;
 use crate::utils::ParseIntegerResult;
 
-pub type Error = &'static str;
+pub type Error = (usize, &'static str);
 pub type Result<T> = std::result::Result<T, Error>;
 
 static NULL_BYTES: &[u8] = b"null";
+
+#[inline(always)]
+fn adjust_error_cursor<T>(result: Result<T>, n: usize) -> Result<T> {
+    result.map_err(|(nn, msg)| (n + nn, msg))
+}
 
 /// CREATE TABLE statement.
 #[derive(Debug, PartialEq, Eq)]
@@ -42,14 +47,15 @@ pub struct ColumnDef<'a> {
 
 /// https://www.sqlite.org/syntax/signed-number.html
 fn skip_signed_number(input: &[u8]) -> Result<usize> {
-    let (mut nn, mut token) = get_token_no_space(input).ok_or("no signed number: first token")?;
+    let (mut nn, mut token) =
+        get_token_no_space(input).ok_or((0, "no signed number: first token"))?;
     let mut n = nn;
     if matches!(token, Token::Plus | Token::Minus) {
-        (nn, token) = get_token_no_space(&input[n..]).ok_or("no signed number: number")?;
+        (nn, token) = get_token_no_space(&input[n..]).ok_or((n, "no signed number: number"))?;
         n += nn;
     }
     if !matches!(token, Token::Integer(_) | Token::Float(_)) {
-        return Err("no signed number is not numeric");
+        return Err((n, "no signed number is not numeric"));
     }
     Ok(n)
 }
@@ -91,16 +97,16 @@ fn parse_type_name(input: &[u8]) -> Result<(usize, Vec<MaybeQuotedBytes<'_>>)> {
                 // Parse signed numbers.
                 n += skip_signed_number(&input[n..])?;
                 let (mut nn, mut token) =
-                    get_token_no_space(&input[n..]).ok_or("no signed number last token")?;
+                    get_token_no_space(&input[n..]).ok_or((n, "no signed number last token"))?;
                 n += nn;
                 if token == Token::Comma {
                     n += skip_signed_number(&input[n..])?;
-                    (nn, token) =
-                        get_token_no_space(&input[n..]).ok_or("no signed number last token")?;
+                    (nn, token) = get_token_no_space(&input[n..])
+                        .ok_or((n, "no signed number last token"))?;
                     n += nn;
                 }
                 if token != Token::RightParen {
-                    return Err("no right paren");
+                    return Err((n, "no right paren"));
                 }
                 break;
             }
@@ -115,52 +121,51 @@ fn parse_type_name(input: &[u8]) -> Result<(usize, Vec<MaybeQuotedBytes<'_>>)> {
 ///
 /// https://www.sqlite.org/lang_createtable.html
 pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
-    let mut input = input;
-    let len_input = input.len();
+    let mut n = 0;
 
-    let Some((n, Token::Create)) = get_token_no_space(input) else {
-        return Err("no create");
+    let Some((nn, Token::Create)) = get_token_no_space(input) else {
+        return Err((n, "no create"));
     };
-    input = &input[n..];
+    n += nn;
 
-    let Some((n, Token::Table)) = get_token_no_space(input) else {
-        return Err("no table");
+    let Some((nn, Token::Table)) = get_token_no_space(&input[n..]) else {
+        return Err((n, "no table"));
     };
-    input = &input[n..];
+    n += nn;
 
-    let Some((n, Token::Identifier(table_name))) = get_token_no_space(input) else {
-        return Err("no table_name");
+    let Some((nn, Token::Identifier(table_name))) = get_token_no_space(&input[n..]) else {
+        return Err((n, "no table_name"));
     };
-    input = &input[n..];
+    n += nn;
 
-    let Some((n, Token::LeftParen)) = get_token_no_space(input) else {
-        return Err("no left paren");
+    let Some((nn, Token::LeftParen)) = get_token_no_space(&input[n..]) else {
+        return Err((n, "no left paren"));
     };
-    input = &input[n..];
+    n += nn;
 
     let mut columns = Vec::new();
     loop {
         // Parse ColumnDef.
-        let Some((n, Token::Identifier(name))) = get_token_no_space(input) else {
-            return Err("no column name");
+        let Some((nn, Token::Identifier(name))) = get_token_no_space(&input[n..]) else {
+            return Err((n, "no column name"));
         };
-        input = &input[n..];
+        n += nn;
 
-        let (n, type_name) = parse_type_name(input)?;
-        input = &input[n..];
+        let (nn, type_name) = adjust_error_cursor(parse_type_name(&input[n..]), n)?;
+        n += nn;
 
-        let (mut n, mut token) = get_token_no_space(input).ok_or("no right paren")?;
-        input = &input[n..];
+        let (mut nn, mut token) = get_token_no_space(&input[n..]).ok_or((n, "no right paren"))?;
+        n += nn;
 
         let primary_key = if token == Token::Primary {
-            match get_token_no_space(input) {
-                Some((n, Token::Key)) => {
-                    input = &input[n..];
+            match get_token_no_space(&input[n..]) {
+                Some((nn, Token::Key)) => {
+                    n += nn;
                 }
-                _ => return Err("no key"),
+                _ => return Err((n, "no key")),
             }
-            (n, token) = get_token_no_space(input).ok_or("no right paren")?;
-            input = &input[n..];
+            (nn, token) = get_token_no_space(&input[n..]).ok_or((n, "no right paren"))?;
+            n += nn;
 
             true
         } else {
@@ -176,12 +181,12 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
         match token {
             Token::Comma => continue,
             Token::RightParen => break,
-            _ => return Err("no right paren"),
+            _ => return Err((n, "no right paren")),
         }
     }
 
     Ok((
-        len_input - input.len(),
+        n,
         CreateTable {
             table_name,
             columns,
@@ -207,60 +212,59 @@ pub struct IndexedColumn<'a> {
 ///
 /// https://www.sqlite.org/lang_createindex.html
 pub fn parse_create_index(input: &[u8]) -> Result<(usize, CreateIndex)> {
-    let mut input = input;
-    let len_input = input.len();
+    let mut n = 0;
 
-    let Some((n, Token::Create)) = get_token_no_space(input) else {
-        return Err("no create");
+    let Some((nn, Token::Create)) = get_token_no_space(input) else {
+        return Err((n, "no create"));
     };
-    input = &input[n..];
+    n += nn;
 
-    let Some((n, Token::Index)) = get_token_no_space(input) else {
-        return Err("no index");
+    let Some((nn, Token::Index)) = get_token_no_space(&input[n..]) else {
+        return Err((n, "no index"));
     };
-    input = &input[n..];
+    n += nn;
 
-    let Some((n, Token::Identifier(index_name))) = get_token_no_space(input) else {
-        return Err("no index_name");
+    let Some((nn, Token::Identifier(index_name))) = get_token_no_space(&input[n..]) else {
+        return Err((n, "no index_name"));
     };
-    input = &input[n..];
+    n += nn;
 
-    let Some((n, Token::On)) = get_token_no_space(input) else {
-        return Err("no on");
+    let Some((nn, Token::On)) = get_token_no_space(&input[n..]) else {
+        return Err((n, "no on"));
     };
-    input = &input[n..];
+    n += nn;
 
-    let Some((n, Token::Identifier(table_name))) = get_token_no_space(input) else {
-        return Err("no table_name");
+    let Some((nn, Token::Identifier(table_name))) = get_token_no_space(&input[n..]) else {
+        return Err((n, "no table_name"));
     };
-    input = &input[n..];
+    n += nn;
 
-    let Some((n, Token::LeftParen)) = get_token_no_space(input) else {
-        return Err("no left paren");
+    let Some((nn, Token::LeftParen)) = get_token_no_space(&input[n..]) else {
+        return Err((n, "no left paren"));
     };
-    input = &input[n..];
+    n += nn;
 
     let mut columns = Vec::new();
     loop {
-        let Some((n, Token::Identifier(name))) = get_token_no_space(input) else {
-            return Err("no column name");
+        let Some((nn, Token::Identifier(name))) = get_token_no_space(&input[n..]) else {
+            return Err((n, "no column name"));
         };
-        input = &input[n..];
+        n += nn;
 
-        let (n, token) = get_token_no_space(input).ok_or("no right paren")?;
-        input = &input[n..];
+        let (nn, token) = get_token_no_space(&input[n..]).ok_or((n, "no right paren"))?;
+        n += nn;
 
         columns.push(IndexedColumn { name });
 
         match token {
             Token::Comma => continue,
             Token::RightParen => break,
-            _ => return Err("no right paren"),
+            _ => return Err((n, "no right paren")),
         }
     }
 
     Ok((
-        len_input - input.len(),
+        n,
         CreateIndex {
             index_name,
             table_name,
@@ -269,6 +273,7 @@ pub fn parse_create_index(input: &[u8]) -> Result<(usize, CreateIndex)> {
     ))
 }
 
+#[derive(Debug)]
 pub struct Select<'a> {
     pub table_name: MaybeQuotedBytes<'a>,
     pub columns: Vec<ResultColumn<'a>>,
@@ -279,48 +284,47 @@ pub struct Select<'a> {
 //
 // https://www.sqlite.org/lang_select.html
 pub fn parse_select(input: &[u8]) -> Result<(usize, Select)> {
-    let mut input = input;
-    let len_input = input.len();
+    let mut n = 0;
 
-    let Some((n, Token::Select)) = get_token_no_space(input) else {
-        return Err("no select");
+    let Some((nn, Token::Select)) = get_token_no_space(input) else {
+        return Err((n, "no select"));
     };
-    input = &input[n..];
+    n += nn;
 
-    let (n, result_column) = parse_result_column(input)?;
-    input = &input[n..];
+    let (nn, result_column) = adjust_error_cursor(parse_result_column(&input[n..]), n)?;
+    n += nn;
     let mut columns = vec![result_column];
     loop {
-        match get_token_no_space(input) {
-            Some((n, Token::Comma)) => {
-                input = &input[n..];
-                let (n, result_column) = parse_result_column(input)?;
-                input = &input[n..];
+        match get_token_no_space(&input[n..]) {
+            Some((nn, Token::Comma)) => {
+                n += nn;
+                let (nn, result_column) = adjust_error_cursor(parse_result_column(&input[n..]), n)?;
+                n += nn;
                 columns.push(result_column);
             }
-            Some((n, Token::From)) => {
-                input = &input[n..];
+            Some((nn, Token::From)) => {
+                n += nn;
                 break;
             }
-            _ => return Err("no from"),
+            _ => return Err((n, "no from")),
         }
     }
-    let Some((n, Token::Identifier(table_name))) = get_token_no_space(input) else {
-        return Err("no table_name");
+    let Some((nn, Token::Identifier(table_name))) = get_token_no_space(&input[n..]) else {
+        return Err((n, "no table_name"));
     };
-    input = &input[n..];
+    n += nn;
 
-    let filter = if let Some((n, Token::Where)) = get_token_no_space(input) {
-        input = &input[n..];
-        let (n, expr) = parse_expr(input)?;
-        input = &input[n..];
+    let filter = if let Some((nn, Token::Where)) = get_token_no_space(&input[n..]) {
+        n += nn;
+        let (nn, expr) = adjust_error_cursor(parse_expr(&input[n..]), n)?;
+        n += nn;
         Some(expr)
     } else {
         None
     };
 
     Ok((
-        len_input - input.len(),
+        n,
         Select {
             table_name,
             columns,
@@ -357,10 +361,11 @@ fn parse_result_column(input: &[u8]) -> Result<(usize, ResultColumn)> {
             Ok((n + nn, ResultColumn::Expr((expr, Some(alias)))))
         }
         Some((nn, Token::As)) => {
-            let Some((nnn, Token::Identifier(alias))) = get_token_no_space(&input[n + nn..]) else {
-                return Err("no alias");
+            let n = n + nn;
+            let Some((nn, Token::Identifier(alias))) = get_token_no_space(&input[n..]) else {
+                return Err((n, "no alias"));
             };
-            Ok((n + nn + nnn, ResultColumn::Expr((expr, Some(alias)))))
+            Ok((n + nn, ResultColumn::Expr((expr, Some(alias)))))
         }
         _ => Ok((n, ResultColumn::Expr((expr, None)))),
     }
@@ -407,9 +412,9 @@ pub enum Expr<'a> {
 /// https://www.sqlite.org/syntax/expr.html
 fn parse_expr(input: &[u8]) -> Result<(usize, Expr)> {
     let Some((n, token)) = get_token_no_space(input) else {
-        return Err("no expr");
+        return Err((0, "no expr"));
     };
-    let (nn, expr) = parse_expr_eq(token, &input[n..])?;
+    let (nn, expr) = adjust_error_cursor(parse_expr_eq(token, &input[n..]), n)?;
     Ok((n + nn, expr))
 }
 
@@ -423,10 +428,10 @@ fn parse_expr_eq<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'
         };
         n += nn;
         let Some((nn, token)) = get_token_no_space(&input[n..]) else {
-            return Err("no expr after eq/ne");
+            return Err((n, "no expr after eq/ne"));
         };
         n += nn;
-        let (nn, right) = parse_expr_compare(token, &input[n..])?;
+        let (nn, right) = adjust_error_cursor(parse_expr_compare(token, &input[n..]), n)?;
         n += nn;
         expr = Expr::BinaryOperator {
             operator,
@@ -449,10 +454,10 @@ fn parse_expr_compare<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, E
         };
         n += nn;
         let Some((nn, token)) = get_token_no_space(&input[n..]) else {
-            return Err("no expr after eq/ne");
+            return Err((n, "no expr after compare"));
         };
         n += nn;
-        let (nn, right) = parse_expr_unary(token, &input[n..])?;
+        let (nn, right) = adjust_error_cursor(parse_expr_unary(token, &input[n..]), n)?;
         n += nn;
         expr = Expr::BinaryOperator {
             operator,
@@ -467,10 +472,10 @@ fn parse_expr_unary<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Exp
     match token {
         Token::Plus => {
             let Some((n, token)) = get_token_no_space(input) else {
-                return Err("no expr after +");
+                return Err((0, "no expr after +"));
             };
             // Unary operator + is a no-op.
-            let (nn, expr) = parse_expr_unary(token, &input[n..])?;
+            let (nn, expr) = adjust_error_cursor(parse_expr_unary(token, &input[n..]), n)?;
             Ok((n + nn, expr))
         }
         Token::Minus => match get_token_no_space(input) {
@@ -498,10 +503,10 @@ fn parse_expr_unary<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Exp
                 Ok((n, Expr::Real(-d)))
             }
             Some((n, token)) => {
-                let (nn, expr) = parse_expr_unary(token, &input[n..])?;
+                let (nn, expr) = adjust_error_cursor(parse_expr_unary(token, &input[n..]), n)?;
                 Ok((n + nn, Expr::UnaryMinus(Box::new(expr))))
             }
-            _ => Err("no expr"),
+            _ => Err((0, "no expr after -")),
         },
         _ => parse_expr_primitive(token, input),
     }
@@ -512,22 +517,22 @@ fn parse_expr_primitive<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize,
         Token::Identifier(id) => Ok((0, Expr::Column(id))),
         Token::Cast => {
             let Some((mut n, Token::LeftParen)) = get_token_no_space(input) else {
-                return Err("no cast left paren");
+                return Err((0, "no cast left paren"));
             };
 
-            let (nn, expr) = parse_expr(&input[n..])?;
+            let (nn, expr) = adjust_error_cursor(parse_expr(&input[n..]), n)?;
             n += nn;
 
             let Some((nn, Token::As)) = get_token_no_space(&input[n..]) else {
-                return Err("no cast as");
+                return Err((n, "no cast as"));
             };
             n += nn;
 
-            let (nn, type_name) = parse_type_name(&input[n..])?;
+            let (nn, type_name) = adjust_error_cursor(parse_type_name(&input[n..]), n)?;
             n += nn;
 
             let Some((nn, Token::RightParen)) = get_token_no_space(&input[n..]) else {
-                return Err("no cast right paren");
+                return Err((n, "no cast right paren"));
             };
             n += nn;
 
@@ -564,7 +569,7 @@ fn parse_expr_primitive<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize,
         }
         Token::String(text) => Ok((0, Expr::Text(text))),
         Token::Blob(hex) => Ok((0, Expr::Blob(hex))),
-        _ => Err("no expr"),
+        _ => Err((0, "no expr")),
     }
 }
 
@@ -614,6 +619,7 @@ mod tests {
             ]
         );
     }
+
     #[test]
     fn test_parse_create_table_type_name() {
         let input = b"create table foo (col1 type type primary key, col2 Varint(10), col3 [Float](+10), col4 \"test\"(-10.0), col5 null(0), col6 `blob```(1,+2))";
@@ -672,12 +678,22 @@ mod tests {
 
     #[test]
     fn test_parse_create_table_fail() {
+        // no column def.
+        let r = parse_create_table(b"create table foo ()");
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().0, 18);
         // no right paren.
-        assert!(parse_create_table(b"create table foo (id, name ").is_err());
+        let r = parse_create_table(b"create table foo (id, name ");
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().0, 26);
         // primary without key.
-        assert!(parse_create_table(b"create table foo (id primary, name)").is_err());
+        let r = parse_create_table(b"create table foo (id primary, name)");
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().0, 28);
         // key without primary.
-        assert!(parse_create_table(b"create table foo (id key, name)").is_err());
+        let r = parse_create_table(b"create table foo (id key, name)");
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().0, 24);
     }
 
     #[test]
@@ -726,7 +742,9 @@ mod tests {
     #[test]
     fn test_parse_create_index_fail() {
         // no right paren.
-        assert!(parse_create_index(b"create index foo on bar (id, name ").is_err());
+        let r = parse_create_index(b"create index foo on bar (id, name ");
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().0, 33);
     }
 
     #[test]
@@ -815,9 +833,14 @@ mod tests {
 
     #[test]
     fn test_parse_select_fail() {
+        // no expr after comma.
+        let r = parse_select(b"select col, from foo");
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().0, 16);
         // no table name.
-        let input = b"select col from ";
-        assert!(parse_create_table(input).is_err());
+        let r = parse_select(b"select col from ");
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().0, 15);
     }
 
     #[test]

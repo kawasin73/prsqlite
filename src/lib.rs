@@ -24,6 +24,7 @@ mod token;
 mod utils;
 mod value;
 
+use std::fmt::Display;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
@@ -55,6 +56,55 @@ pub use crate::value::Value;
 const SQLITE_MAX_PAGE_SIZE: u32 = 65536;
 pub const DATABASE_HEADER_SIZE: usize = 100;
 const MAGIC_HEADER: &[u8; 16] = b"SQLite format 3\0";
+
+#[derive(Debug)]
+pub enum Error<'a> {
+    SqlParse {
+        sql: &'a str,
+        cursor: usize,
+        message: &'static str,
+    },
+    Other(anyhow::Error),
+}
+
+impl From<anyhow::Error> for Error<'_> {
+    fn from(e: anyhow::Error) -> Self {
+        Self::Other(e)
+    }
+}
+
+impl Display for Error<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::SqlParse {
+                sql,
+                cursor,
+                message,
+            } => {
+                // TODO: Adjust character width
+                let mut n_chars = 0;
+                let mut rest_bytes = *cursor;
+                for c in sql.chars() {
+                    if c.len_utf8() > rest_bytes {
+                        break;
+                    }
+                    rest_bytes -= c.len_utf8();
+                    n_chars += 1;
+                }
+                write!(
+                    f,
+                    "Error parsing SQL: {}\n{}\n{}^",
+                    message,
+                    sql,
+                    " ".repeat(n_chars)
+                )
+            }
+            Error::Other(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+pub type Result<'a, T> = std::result::Result<T, Error<'a>>;
 
 pub struct DatabaseHeader<'a>(&'a [u8; DATABASE_HEADER_SIZE]);
 
@@ -118,16 +168,27 @@ impl Connection {
         })
     }
 
-    pub fn prepare(&mut self, sql: &str) -> anyhow::Result<Statement> {
+    pub fn prepare<'a>(&mut self, sql: &'a str) -> Result<'a, Statement> {
         let input = sql.as_bytes();
-        let (n, select) =
-            parse_select(input).map_err(|e| anyhow::anyhow!("parse select: {}", e))?;
-        let Some((nn, Token::Semicolon)) = get_token_no_space(&input[n..]) else {
-            bail!("no semicolon");
+        let parsed_sql = match parse_select(input) {
+            Ok((n, select)) => {
+                if let Some((nn, Token::Semicolon)) = get_token_no_space(&input[n..]) {
+                    if n + nn != input.len() {
+                        Err((n + nn, "extra characters after semicolon"))
+                    } else {
+                        Ok(select)
+                    }
+                } else {
+                    Err((n, "no semicolon"))
+                }
+            }
+            Err(e) => Err(e),
         };
-        if nn + n != input.len() {
-            bail!("extra characters after semicolon");
-        }
+        let select = parsed_sql.map_err(|(cursor, message)| Error::SqlParse {
+            sql,
+            cursor,
+            message,
+        })?;
 
         if self.schema.is_none() {
             let schema_table = Schema::schema_table();
