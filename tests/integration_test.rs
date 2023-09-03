@@ -297,6 +297,13 @@ fn test_select_expression() {
         (Value::Integer(-123), "-+-+-123"),
         (Value::Integer(123), "++++123"),
         (Value::Integer(123), "-+-+123"),
+        (Value::Integer(-2), "~col1"),
+        (Value::Integer(1), "~~col1"),
+        (Value::Integer(-3), "~2.3"),
+        (Value::Integer(-124), "~'123'"),
+        (Value::Integer(-1), "~'abc'"),
+        (Value::Integer(-124), "~x'313233'"),
+        (Value::Null, "~NULL"),
         // Comparison operators
         (Value::Integer(1), "10 > col1"),
         (Value::Integer(0), "10 < col1"),

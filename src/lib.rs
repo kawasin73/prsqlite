@@ -321,6 +321,9 @@ impl ConstantValue {
 
 enum Expression {
     Column((ColumnNumber, TypeAffinity)),
+    BitNot {
+        expr: Box<Expression>,
+    },
     UnaryMinus {
         expr: Box<Expression>,
     },
@@ -345,6 +348,9 @@ impl Expression {
             Expr::Real(f) => Ok(Self::Const(ConstantValue::Real(f))),
             Expr::Text(text) => Ok(Self::Const(ConstantValue::Text(text.dequote()))),
             Expr::Blob(hex) => Ok(Self::Const(ConstantValue::Blob(hex.decode()))),
+            Expr::BitNot(expr) => Ok(Self::BitNot {
+                expr: Box::new(Self::from(*expr, table)?),
+            }),
             Expr::UnaryMinus(expr) => Ok(Self::UnaryMinus {
                 expr: Box::new(Self::from(*expr, table)?),
             }),
@@ -380,6 +386,15 @@ impl Expression {
     ) -> anyhow::Result<(Value<'a>, Option<TypeAffinity>)> {
         match self {
             Self::Column((idx, affinity)) => Ok((row.get_column_value(idx)?, Some(*affinity))),
+            Self::BitNot { expr } => {
+                let (value, _) = expr.execute(row)?;
+                let value = if let Some(i) = value.as_integer() {
+                    Value::Integer(!i)
+                } else {
+                    Value::Null
+                };
+                Ok((value, None))
+            }
             Self::UnaryMinus { expr } => {
                 let (value, _) = expr.execute(row)?;
                 let value = match value {

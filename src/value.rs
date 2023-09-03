@@ -148,6 +148,29 @@ impl<'a> Value<'a> {
         }
     }
 
+    /// Convert the value to an integer value if it is well-formed. otherwise,
+    /// convert it to 0.
+    ///
+    /// [Value::Null] is converted to [None].
+    pub fn as_integer(&self) -> Option<i64> {
+        match self {
+            Value::Null => None,
+            Value::Integer(i) => Some(*i),
+            Value::Real(d) => Some(real_to_int(*d)),
+            Value::Text(buf) | Value::Blob(buf) => {
+                let (_, parsed_int) = parse_integer(buf);
+                match parsed_int {
+                    ParseIntegerResult::Integer(i) => Some(i),
+                    ParseIntegerResult::Empty => Some(0),
+                    ParseIntegerResult::MaxPlusOne | ParseIntegerResult::TooBig(true) => {
+                        Some(i64::MAX)
+                    }
+                    ParseIntegerResult::TooBig(false) => Some(i64::MIN),
+                }
+            }
+        }
+    }
+
     /// Convert the value to text and return the [Buffer].
     ///
     /// This does not support [Value::Null] values.
@@ -204,22 +227,13 @@ impl<'a> Value<'a> {
                     v
                 }
             },
-            TypeAffinity::Integer => match self {
-                Value::Null => Value::Null,
-                Value::Integer(i) => Value::Integer(i),
-                Value::Real(d) => Value::Integer(real_to_int(d)),
-                Value::Text(buf) | Value::Blob(buf) => {
-                    let (_, parsed_int) = parse_integer(&buf);
-                    match parsed_int {
-                        ParseIntegerResult::Integer(i) => Value::Integer(i),
-                        ParseIntegerResult::Empty => Value::Integer(0),
-                        ParseIntegerResult::MaxPlusOne | ParseIntegerResult::TooBig(true) => {
-                            Value::Integer(i64::MAX)
-                        }
-                        ParseIntegerResult::TooBig(false) => Value::Integer(i64::MIN),
-                    }
+            TypeAffinity::Integer => {
+                if let Some(i) = self.as_integer() {
+                    Value::Integer(i)
+                } else {
+                    Value::Null
                 }
-            },
+            }
             TypeAffinity::Real => match self {
                 Value::Null => Value::Null,
                 Value::Integer(i) => Value::Real(i as f64),

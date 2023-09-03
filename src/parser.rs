@@ -428,6 +428,7 @@ pub enum CompareOp {
 #[derive(Debug, PartialEq)]
 pub enum Expr<'a> {
     Column(MaybeQuotedBytes<'a>),
+    BitNot(Box<Expr<'a>>),
     UnaryMinus(Box<Expr<'a>>),
     BinaryOperator {
         operator: BinaryOp,
@@ -533,6 +534,13 @@ fn parse_expr_concat<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Ex
 
 fn parse_expr_unary<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'a>)> {
     match token {
+        Token::Tilda => {
+            let Some((n, token)) = next_token(input) else {
+                return Err((0, "no expr after ~"));
+            };
+            let (nn, expr) = adjust_error_cursor(parse_expr_unary(token, &input[n..]), n)?;
+            Ok((n + nn, Expr::BitNot(Box::new(expr))))
+        }
         Token::Plus => {
             let Some((n, token)) = next_token(input) else {
                 return Err((0, "no expr after +"));
@@ -1070,6 +1078,22 @@ mod tests {
             )
         );
         assert_eq!(
+            parse_expr(b"~foo").unwrap(),
+            (
+                4,
+                Expr::BitNot(Box::new(Expr::Column(b"foo".as_slice().into())))
+            )
+        );
+        assert_eq!(
+            parse_expr(b"~~foo").unwrap(),
+            (
+                5,
+                Expr::BitNot(Box::new(Expr::BitNot(Box::new(Expr::Column(
+                    b"foo".as_slice().into()
+                )))))
+            )
+        );
+        assert_eq!(
             parse_expr(b"-+-+-foo").unwrap(),
             (
                 8,
@@ -1112,6 +1136,15 @@ mod tests {
             (
                 4,
                 Expr::UnaryMinus(Box::new(Expr::Column(b"abc".as_slice().into())))
+            )
+        );
+        assert_eq!(
+            parse_expr(b"~-abc").unwrap(),
+            (
+                5,
+                Expr::BitNot(Box::new(Expr::UnaryMinus(Box::new(Expr::Column(
+                    b"abc".as_slice().into()
+                )))))
             )
         );
     }
