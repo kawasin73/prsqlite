@@ -127,10 +127,7 @@ impl<'a> Value<'a> {
     /// converts the value to a text value.
     ///
     /// This does not support [Value::Null] values.
-    pub fn apply_text_affinity<'b>(self) -> Value<'b>
-    where
-        'a: 'b,
-    {
+    pub fn apply_text_affinity(self) -> Value<'a> {
         assert_ne!(self, Value::Null);
         match self {
             Value::Null => unreachable!(),
@@ -148,6 +145,30 @@ impl<'a> Value<'a> {
             }
             Value::Text(t) => Value::Text(t),
             Value::Blob(b) => Value::Blob(b),
+        }
+    }
+
+    /// Convert the value to text and return the [Buffer].
+    ///
+    /// This does not support [Value::Null] values.
+    pub fn force_text_buffer(self) -> Buffer<'a> {
+        assert_ne!(self, Value::Null);
+        match self {
+            Value::Null => unreachable!(),
+            Value::Integer(i) => {
+                // i64 is at most 19 digits. 1 byte is for sign (-).
+                let mut text_buf = Vec::with_capacity(20);
+                write!(text_buf, "{}", i).unwrap();
+                Buffer::Owned(text_buf)
+            }
+            Value::Real(d) => {
+                // TODO: Use the same format as SQLite "%!.15g".
+                let mut text_buf = Vec::new();
+                write!(text_buf, "{}", d).unwrap();
+                Buffer::Owned(text_buf)
+            }
+            Value::Text(buf) => buf,
+            Value::Blob(buf) => buf,
         }
     }
 
@@ -216,20 +237,7 @@ impl<'a> Value<'a> {
                 };
                 match self {
                     Value::Null => Value::Null,
-                    Value::Integer(i) => {
-                        // i64 is at most 19 digits. 1 byte is for sign (-).
-                        let mut text_buf = Vec::with_capacity(20);
-                        write!(text_buf, "{}", i).unwrap();
-                        value_type(Buffer::Owned(text_buf))
-                    }
-                    Value::Real(d) => {
-                        // TODO: Use the same format as SQLite "%!.15g".
-                        let mut text_buf = Vec::new();
-                        write!(text_buf, "{}", d).unwrap();
-                        value_type(Buffer::Owned(text_buf))
-                    }
-                    Value::Text(buf) => value_type(buf),
-                    Value::Blob(buf) => value_type(buf),
+                    non_null_value => value_type(non_null_value.force_text_buffer()),
                 }
             }
         }

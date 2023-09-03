@@ -403,7 +403,14 @@ fn parse_result_column(input: &[u8]) -> Result<(usize, ResultColumn)> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum BinaryOperator {
+pub enum BinaryOp {
+    Compare(CompareOp),
+    Concat,
+    // TODO: BitOr
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum CompareOp {
     /// Equal to
     Eq,
     /// Not equal to
@@ -423,7 +430,7 @@ pub enum Expr<'a> {
     Column(MaybeQuotedBytes<'a>),
     UnaryMinus(Box<Expr<'a>>),
     BinaryOperator {
-        operator: BinaryOperator,
+        operator: BinaryOp,
         left: Box<Expr<'a>>,
         right: Box<Expr<'a>>,
     },
@@ -453,8 +460,8 @@ fn parse_expr_eq<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'
     let (mut n, mut expr) = parse_expr_compare(token, input)?;
     loop {
         let (nn, operator) = match next_token(&input[n..]) {
-            Some((n, Token::Eq)) => (n, BinaryOperator::Eq),
-            Some((n, Token::Ne)) => (n, BinaryOperator::Ne),
+            Some((n, Token::Eq)) => (n, BinaryOp::Compare(CompareOp::Eq)),
+            Some((n, Token::Ne)) => (n, BinaryOp::Compare(CompareOp::Ne)),
             _ => break,
         };
         n += nn;
@@ -474,18 +481,43 @@ fn parse_expr_eq<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'
 }
 
 fn parse_expr_compare<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'a>)> {
-    let (mut n, mut expr) = parse_expr_unary(token, input)?;
+    let (mut n, mut expr) = parse_expr_concat(token, input)?;
     loop {
         let (nn, operator) = match next_token(&input[n..]) {
-            Some((n, Token::Gt)) => (n, BinaryOperator::Gt),
-            Some((n, Token::Ge)) => (n, BinaryOperator::Ge),
-            Some((n, Token::Lt)) => (n, BinaryOperator::Lt),
-            Some((n, Token::Le)) => (n, BinaryOperator::Le),
+            Some((n, Token::Gt)) => (n, BinaryOp::Compare(CompareOp::Gt)),
+            Some((n, Token::Ge)) => (n, BinaryOp::Compare(CompareOp::Ge)),
+            Some((n, Token::Lt)) => (n, BinaryOp::Compare(CompareOp::Lt)),
+            Some((n, Token::Le)) => (n, BinaryOp::Compare(CompareOp::Le)),
             _ => break,
         };
         n += nn;
         let Some((nn, token)) = next_token(&input[n..]) else {
             return Err((n, "no expr after compare"));
+        };
+        n += nn;
+        let (nn, right) = adjust_error_cursor(parse_expr_concat(token, &input[n..]), n)?;
+        n += nn;
+        expr = Expr::BinaryOperator {
+            operator,
+            left: Box::new(expr),
+            right: Box::new(right),
+        };
+    }
+    Ok((n, expr))
+}
+
+fn parse_expr_concat<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'a>)> {
+    let (mut n, mut expr) = parse_expr_unary(token, input)?;
+    // TODO: -> ->> will be added in the future.
+    #[allow(clippy::while_let_loop)]
+    loop {
+        let (nn, operator) = match next_token(&input[n..]) {
+            Some((n, Token::Concat)) => (n, BinaryOp::Concat),
+            _ => break,
+        };
+        n += nn;
+        let Some((nn, token)) = next_token(&input[n..]) else {
+            return Err((n, "no expr after concat"));
         };
         n += nn;
         let (nn, right) = adjust_error_cursor(parse_expr_unary(token, &input[n..]), n)?;
@@ -846,7 +878,7 @@ mod tests {
                 )),
                 ResultColumn::Expr((
                     Expr::BinaryOperator {
-                        operator: BinaryOperator::Eq,
+                        operator: BinaryOp::Compare(CompareOp::Eq),
                         left: Box::new(Expr::Column(b"col".as_slice().into())),
                         right: Box::new(Expr::Integer(11)),
                     },
@@ -854,7 +886,7 @@ mod tests {
                 )),
                 ResultColumn::Expr((
                     Expr::BinaryOperator {
-                        operator: BinaryOperator::Lt,
+                        operator: BinaryOp::Compare(CompareOp::Lt),
                         left: Box::new(Expr::Column(b"col2".as_slice().into())),
                         right: Box::new(Expr::Column(b"col3".as_slice().into())),
                     },
@@ -887,7 +919,7 @@ mod tests {
         assert_eq!(
             select.filter.unwrap(),
             Expr::BinaryOperator {
-                operator: BinaryOperator::Eq,
+                operator: BinaryOp::Compare(CompareOp::Eq),
                 left: Box::new(Expr::Column(b"id".as_slice().into())),
                 right: Box::new(Expr::Integer(5)),
             }
@@ -1014,7 +1046,7 @@ mod tests {
                 27,
                 Expr::Cast {
                     expr: Box::new(Expr::BinaryOperator {
-                        operator: BinaryOperator::Eq,
+                        operator: BinaryOp::Compare(CompareOp::Eq),
                         left: Box::new(Expr::Column(b"col".as_slice().into())),
                         right: Box::new(Expr::Integer(100))
                     }),
@@ -1085,13 +1117,45 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_expr_concat() {
+        assert_eq!(
+            parse_expr(b"'abc' || 2").unwrap(),
+            (
+                10,
+                Expr::BinaryOperator {
+                    operator: BinaryOp::Concat,
+                    left: Box::new(Expr::Text(b"'abc'".as_slice().into())),
+                    right: Box::new(Expr::Integer(2)),
+                }
+            )
+        );
+        assert_eq!(
+            parse_expr(b"-1 || 2 || -abc").unwrap(),
+            (
+                15,
+                Expr::BinaryOperator {
+                    operator: BinaryOp::Concat,
+                    left: Box::new(Expr::BinaryOperator {
+                        operator: BinaryOp::Concat,
+                        left: Box::new(Expr::Integer(-1)),
+                        right: Box::new(Expr::Integer(2)),
+                    }),
+                    right: Box::new(Expr::UnaryMinus(Box::new(Expr::Column(
+                        b"abc".as_slice().into()
+                    )))),
+                }
+            )
+        );
+    }
+
+    #[test]
     fn test_parse_expr_compare() {
         assert_eq!(
             parse_expr(b"-1 < 2").unwrap(),
             (
                 6,
                 Expr::BinaryOperator {
-                    operator: BinaryOperator::Lt,
+                    operator: BinaryOp::Compare(CompareOp::Lt),
                     left: Box::new(Expr::Integer(-1)),
                     right: Box::new(Expr::Integer(2)),
                 }
@@ -1102,7 +1166,7 @@ mod tests {
             (
                 7,
                 Expr::BinaryOperator {
-                    operator: BinaryOperator::Le,
+                    operator: BinaryOp::Compare(CompareOp::Le),
                     left: Box::new(Expr::Integer(-1)),
                     right: Box::new(Expr::Integer(2)),
                 }
@@ -1113,7 +1177,7 @@ mod tests {
             (
                 6,
                 Expr::BinaryOperator {
-                    operator: BinaryOperator::Gt,
+                    operator: BinaryOp::Compare(CompareOp::Gt),
                     left: Box::new(Expr::Integer(-1)),
                     right: Box::new(Expr::Integer(2)),
                 }
@@ -1124,7 +1188,7 @@ mod tests {
             (
                 7,
                 Expr::BinaryOperator {
-                    operator: BinaryOperator::Ge,
+                    operator: BinaryOp::Compare(CompareOp::Ge),
                     left: Box::new(Expr::Integer(-1)),
                     right: Box::new(Expr::Integer(2)),
                 }
@@ -1135,9 +1199,9 @@ mod tests {
             (
                 15,
                 Expr::BinaryOperator {
-                    operator: BinaryOperator::Ge,
+                    operator: BinaryOp::Compare(CompareOp::Ge),
                     left: Box::new(Expr::BinaryOperator {
-                        operator: BinaryOperator::Ge,
+                        operator: BinaryOp::Compare(CompareOp::Ge),
                         left: Box::new(Expr::Integer(-1)),
                         right: Box::new(Expr::Integer(2)),
                     }),
@@ -1156,7 +1220,7 @@ mod tests {
             (
                 6,
                 Expr::BinaryOperator {
-                    operator: BinaryOperator::Eq,
+                    operator: BinaryOp::Compare(CompareOp::Eq),
                     left: Box::new(Expr::Integer(-1)),
                     right: Box::new(Expr::Integer(2)),
                 }
@@ -1167,7 +1231,7 @@ mod tests {
             (
                 7,
                 Expr::BinaryOperator {
-                    operator: BinaryOperator::Eq,
+                    operator: BinaryOp::Compare(CompareOp::Eq),
                     left: Box::new(Expr::Integer(-1)),
                     right: Box::new(Expr::Integer(2)),
                 }
@@ -1178,7 +1242,7 @@ mod tests {
             (
                 7,
                 Expr::BinaryOperator {
-                    operator: BinaryOperator::Ne,
+                    operator: BinaryOp::Compare(CompareOp::Ne),
                     left: Box::new(Expr::Integer(-1)),
                     right: Box::new(Expr::Integer(2)),
                 }
@@ -1189,7 +1253,7 @@ mod tests {
             (
                 7,
                 Expr::BinaryOperator {
-                    operator: BinaryOperator::Ne,
+                    operator: BinaryOp::Compare(CompareOp::Ne),
                     left: Box::new(Expr::Integer(-1)),
                     right: Box::new(Expr::Integer(2)),
                 }
@@ -1200,13 +1264,36 @@ mod tests {
             (
                 9,
                 Expr::BinaryOperator {
-                    operator: BinaryOperator::Eq,
+                    operator: BinaryOp::Compare(CompareOp::Eq),
                     left: Box::new(Expr::BinaryOperator {
-                        operator: BinaryOperator::Eq,
+                        operator: BinaryOp::Compare(CompareOp::Eq),
                         left: Box::new(Expr::Integer(1)),
                         right: Box::new(Expr::Integer(2)),
                     }),
                     right: Box::new(Expr::Integer(3)),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_expr_operators() {
+        assert_eq!(
+            parse_expr(b"1 || 2 < 3 || 4").unwrap(),
+            (
+                15,
+                Expr::BinaryOperator {
+                    operator: BinaryOp::Compare(CompareOp::Lt),
+                    left: Box::new(Expr::BinaryOperator {
+                        operator: BinaryOp::Concat,
+                        left: Box::new(Expr::Integer(1)),
+                        right: Box::new(Expr::Integer(2)),
+                    }),
+                    right: Box::new(Expr::BinaryOperator {
+                        operator: BinaryOp::Concat,
+                        left: Box::new(Expr::Integer(3)),
+                        right: Box::new(Expr::Integer(4)),
+                    }),
                 }
             )
         );
@@ -1215,14 +1302,14 @@ mod tests {
             (
                 13,
                 Expr::BinaryOperator {
-                    operator: BinaryOperator::Eq,
+                    operator: BinaryOp::Compare(CompareOp::Eq),
                     left: Box::new(Expr::BinaryOperator {
-                        operator: BinaryOperator::Lt,
+                        operator: BinaryOp::Compare(CompareOp::Lt),
                         left: Box::new(Expr::Integer(1)),
                         right: Box::new(Expr::Integer(2)),
                     }),
                     right: Box::new(Expr::BinaryOperator {
-                        operator: BinaryOperator::Lt,
+                        operator: BinaryOp::Compare(CompareOp::Lt),
                         left: Box::new(Expr::Integer(3)),
                         right: Box::new(Expr::Integer(4)),
                     }),
@@ -1234,16 +1321,16 @@ mod tests {
             (
                 17,
                 Expr::BinaryOperator {
-                    operator: BinaryOperator::Eq,
+                    operator: BinaryOp::Compare(CompareOp::Eq),
                     left: Box::new(Expr::BinaryOperator {
-                        operator: BinaryOperator::Eq,
+                        operator: BinaryOp::Compare(CompareOp::Eq),
                         left: Box::new(Expr::BinaryOperator {
-                            operator: BinaryOperator::Lt,
+                            operator: BinaryOp::Compare(CompareOp::Lt),
                             left: Box::new(Expr::Integer(1)),
                             right: Box::new(Expr::Integer(2)),
                         }),
                         right: Box::new(Expr::BinaryOperator {
-                            operator: BinaryOperator::Lt,
+                            operator: BinaryOp::Compare(CompareOp::Lt),
                             left: Box::new(Expr::Integer(3)),
                             right: Box::new(Expr::Integer(4)),
                         }),

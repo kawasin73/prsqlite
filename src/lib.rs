@@ -40,7 +40,8 @@ use crate::pager::Pager;
 use crate::parser::expect_no_more_token;
 use crate::parser::expect_semicolon;
 use crate::parser::parse_select;
-use crate::parser::BinaryOperator;
+use crate::parser::BinaryOp;
+use crate::parser::CompareOp;
 use crate::parser::Expr;
 use crate::parser::ResultColumn;
 use crate::record::parse_record_header;
@@ -50,6 +51,7 @@ use crate::schema::calc_type_affinity;
 use crate::schema::ColumnNumber;
 use crate::schema::Schema;
 use crate::schema::Table;
+pub use crate::value::Buffer;
 use crate::value::TypeAffinity;
 pub use crate::value::Value;
 
@@ -229,7 +231,7 @@ impl Connection {
             .transpose()?;
 
         let index = if let Some(Expression::BinaryOperator {
-            operator: BinaryOperator::Eq,
+            operator: BinaryOp::Compare(CompareOp::Eq),
             left,
             right,
         }) = &filter
@@ -323,7 +325,7 @@ enum Expression {
         expr: Box<Expression>,
     },
     BinaryOperator {
-        operator: BinaryOperator,
+        operator: BinaryOp,
         left: Box<Expression>,
         right: Box<Expression>,
     },
@@ -402,45 +404,65 @@ impl Expression {
                     _ => {}
                 }
 
-                // Type Conversions Prior To Comparison
-                match (left_affinity, right_affinity) {
-                    (
-                        Some(TypeAffinity::Integer)
-                        | Some(TypeAffinity::Real)
-                        | Some(TypeAffinity::Numeric),
-                        Some(TypeAffinity::Text) | Some(TypeAffinity::Blob) | None,
-                    ) => {
-                        right_value = right_value.apply_numeric_affinity();
-                    }
-                    (
-                        Some(TypeAffinity::Text) | Some(TypeAffinity::Blob) | None,
-                        Some(TypeAffinity::Integer)
-                        | Some(TypeAffinity::Real)
-                        | Some(TypeAffinity::Numeric),
-                    ) => {
-                        left_value = left_value.apply_numeric_affinity();
-                    }
-                    (Some(TypeAffinity::Text), None) => {
-                        right_value = right_value.apply_text_affinity();
-                    }
-                    (None, Some(TypeAffinity::Text)) => {
-                        left_value = left_value.apply_text_affinity();
-                    }
-                    _ => {}
-                }
+                match operator {
+                    BinaryOp::Compare(compare_op) => {
+                        // Type Conversions Prior To Comparison
+                        match (left_affinity, right_affinity) {
+                            (
+                                Some(TypeAffinity::Integer)
+                                | Some(TypeAffinity::Real)
+                                | Some(TypeAffinity::Numeric),
+                                Some(TypeAffinity::Text) | Some(TypeAffinity::Blob) | None,
+                            ) => {
+                                right_value = right_value.apply_numeric_affinity();
+                            }
+                            (
+                                Some(TypeAffinity::Text) | Some(TypeAffinity::Blob) | None,
+                                Some(TypeAffinity::Integer)
+                                | Some(TypeAffinity::Real)
+                                | Some(TypeAffinity::Numeric),
+                            ) => {
+                                left_value = left_value.apply_numeric_affinity();
+                            }
+                            (Some(TypeAffinity::Text), None) => {
+                                right_value = right_value.apply_text_affinity();
+                            }
+                            (None, Some(TypeAffinity::Text)) => {
+                                left_value = left_value.apply_text_affinity();
+                            }
+                            _ => {}
+                        }
 
-                let result = match operator {
-                    BinaryOperator::Eq => left_value == right_value,
-                    BinaryOperator::Ne => left_value != right_value,
-                    BinaryOperator::Lt => left_value < right_value,
-                    BinaryOperator::Le => left_value <= right_value,
-                    BinaryOperator::Gt => left_value > right_value,
-                    BinaryOperator::Ge => left_value >= right_value,
-                };
-                if result {
-                    Ok((Value::Integer(1), None))
-                } else {
-                    Ok((Value::Integer(0), None))
+                        let result = match compare_op {
+                            CompareOp::Eq => left_value == right_value,
+                            CompareOp::Ne => left_value != right_value,
+                            CompareOp::Lt => left_value < right_value,
+                            CompareOp::Le => left_value <= right_value,
+                            CompareOp::Gt => left_value > right_value,
+                            CompareOp::Ge => left_value >= right_value,
+                        };
+                        if result {
+                            Ok((Value::Integer(1), None))
+                        } else {
+                            Ok((Value::Integer(0), None))
+                        }
+                    }
+                    BinaryOp::Concat => {
+                        // Both operands are forcibly converted to text before concatination. Both
+                        // are not null.
+                        let left = left_value.force_text_buffer();
+                        let right = right_value.force_text_buffer();
+                        let mut buffer = match left {
+                            Buffer::Owned(buf) => buf,
+                            Buffer::Ref(buf) => {
+                                let mut buffer = Vec::with_capacity(buf.len() + right.len());
+                                buffer.extend(buf);
+                                buffer
+                            }
+                        };
+                        buffer.extend(right.iter());
+                        Ok((Value::Text(Buffer::Owned(buffer)), None))
+                    }
                 }
             }
             Self::Cast {
@@ -484,7 +506,7 @@ impl<'conn> Statement<'conn> {
     ) -> Self {
         let rowid = match &filter {
             Some(Expression::BinaryOperator {
-                operator: BinaryOperator::Eq,
+                operator: BinaryOp::Compare(CompareOp::Eq),
                 left,
                 right,
             }) => match (left.as_ref(), right.as_ref()) {

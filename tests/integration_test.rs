@@ -42,6 +42,35 @@ fn load_rowids(conn: &mut Connection, query: &str) -> Vec<i64> {
     results
 }
 
+fn assert_same_results(
+    expected: &[Value],
+    query: &str,
+    test_conn: &rusqlite::Connection,
+    conn: &mut Connection,
+) {
+    let mut stmt = test_conn.prepare(query).unwrap();
+    let mut rows = stmt.query([]).unwrap();
+    let row = rows.next().unwrap().unwrap();
+    for (i, e) in expected.iter().enumerate() {
+        let v = match row.get::<_, rusqlite::types::Value>(i).unwrap() {
+            rusqlite::types::Value::Null => Value::Null,
+            rusqlite::types::Value::Integer(v) => Value::Integer(v),
+            rusqlite::types::Value::Real(v) => Value::Real(v),
+            rusqlite::types::Value::Text(v) => Value::Text(v.into_bytes().into()),
+            rusqlite::types::Value::Blob(v) => Value::Blob(v.into()),
+        };
+        assert_eq!(&v, e, "i: {}, query: {}", i, query);
+    }
+
+    let mut stmt = conn.prepare(query).unwrap();
+    let mut rows = stmt.execute().unwrap();
+    let row = rows.next_row().unwrap().unwrap();
+    let columns = row.parse().unwrap();
+    for (i, e) in expected.iter().enumerate() {
+        assert_eq!(columns.get(i), e, "i: {}, query: {}", i, query);
+    }
+}
+
 #[test]
 fn test_select_all_from_table() {
     let mut queries = vec![
@@ -242,174 +271,104 @@ fn test_select_expression() {
         "INSERT INTO example(col1, col2, col3, col4) VALUES (1, 2, -3, 4.5);",
     ]);
 
+    let test_conn = rusqlite::Connection::open(file.path()).unwrap();
     let mut conn = Connection::open(file.path()).unwrap();
 
-    // Literals
-    let mut stmt = conn
-        .prepare("SELECT col1, 10, 10., 'text', x'0123456789abcdef' FROM example;")
-        .unwrap();
-    let mut rows = stmt.execute().unwrap();
-    let row = rows.next_row().unwrap().unwrap();
-    let columns = row.parse().unwrap();
-    assert_eq!(columns.len(), 5);
-    assert_eq!(columns.get(0), &Value::Integer(1));
-    assert_eq!(columns.get(1), &Value::Integer(10));
-    assert_eq!(columns.get(2), &Value::Real(10.0));
-    assert_eq!(columns.get(3), &Value::Text(b"text".as_slice().into()));
-    assert_eq!(
-        columns.get(4),
-        &Value::Blob(b"\x01\x23\x45\x67\x89\xab\xcd\xef".as_slice().into())
-    );
-    drop(row);
-    assert!(rows.next_row().unwrap().is_none());
-
-    let mut stmt = conn
-        .prepare("SELECT 9223372036854775807, 9223372036854775808, 9223372036854775809, -9223372036854775808, -123 FROM example;")
-        .unwrap();
-    let mut rows = stmt.execute().unwrap();
-    let row = rows.next_row().unwrap().unwrap();
-    let columns = row.parse().unwrap();
-    assert_eq!(columns.len(), 5);
-    assert_eq!(columns.get(0), &Value::Integer(9223372036854775807));
-    assert_eq!(columns.get(1), &Value::Real(9223372036854775808.0));
-    assert_eq!(columns.get(2), &Value::Real(9223372036854775809.0));
-    assert_eq!(columns.get(3), &Value::Integer(-9223372036854775808));
-    assert_eq!(columns.get(4), &Value::Integer(-123));
-    drop(row);
-    assert!(rows.next_row().unwrap().is_none());
-
-    // Unary operators
-    let mut stmt = conn
-        .prepare("SELECT -col1, -col2, -col3, -+-+-col2, -+-+-123, ++++123, -+-+123 FROM example;")
-        .unwrap();
-    let mut rows = stmt.execute().unwrap();
-    let row = rows.next_row().unwrap().unwrap();
-    let columns = row.parse().unwrap();
-    assert_eq!(columns.len(), 7);
-    assert_eq!(columns.get(0), &Value::Integer(-1));
-    assert_eq!(columns.get(1), &Value::Integer(-2));
-    assert_eq!(columns.get(2), &Value::Integer(3));
-    assert_eq!(columns.get(3), &Value::Integer(-2));
-    assert_eq!(columns.get(4), &Value::Integer(-123));
-    assert_eq!(columns.get(5), &Value::Integer(123));
-    assert_eq!(columns.get(6), &Value::Integer(123));
-    drop(row);
-    assert!(rows.next_row().unwrap().is_none());
-
-    // Comparison operators
-    let mut stmt = conn
-        .prepare(
-            "SELECT col1, 10 > col1, 10 < col1, col1 < col2, col1 > col2, 10 == 10 FROM example;",
-        )
-        .unwrap();
-    let mut rows = stmt.execute().unwrap();
-    let row = rows.next_row().unwrap().unwrap();
-    let columns = row.parse().unwrap();
-    assert_eq!(columns.len(), 6);
-    assert_eq!(columns.get(0), &Value::Integer(1));
-    assert_eq!(columns.get(1), &Value::Integer(1));
-    assert_eq!(columns.get(2), &Value::Integer(0));
-    assert_eq!(columns.get(3), &Value::Integer(1));
-    assert_eq!(columns.get(4), &Value::Integer(0));
-    assert_eq!(columns.get(5), &Value::Integer(1));
-    drop(row);
-    assert!(rows.next_row().unwrap().is_none());
-
-    // Cast to numeric
-    let mut stmt = conn
-        .prepare(
-            "SELECT CAST(col1 AS NUMERIC), CAST(col4 AS NUMERIC), CAST(' 10 ' AS NUMERIC), CAST('10a' AS NUMERIC), CAST('10e.1' AS NUMERIC), CAST('a3' AS NUMERIC), CAST('10.12e1' AS NUMERIC) FROM example;",
-        )
-        .unwrap();
-    let mut rows = stmt.execute().unwrap();
-    let row = rows.next_row().unwrap().unwrap();
-    let columns = row.parse().unwrap();
-    assert_eq!(columns.len(), 7);
-    assert_eq!(columns.get(0), &Value::Integer(1));
-    assert_eq!(columns.get(1), &Value::Real(4.5));
-    assert_eq!(columns.get(2), &Value::Integer(10));
-    assert_eq!(columns.get(3), &Value::Integer(10));
-    assert_eq!(columns.get(4), &Value::Integer(10));
-    assert_eq!(columns.get(5), &Value::Integer(0));
-    assert_eq!(columns.get(6), &Value::Real(101.2));
-    drop(row);
-    assert!(rows.next_row().unwrap().is_none());
-
-    // Cast to integer
-    let mut stmt = conn
-        .prepare(
-            "SELECT CAST(col1 AS INTEGER), CAST(col4 AS INTEGER), CAST(' 10 ' AS INTEGER), CAST('10a' AS INTEGER), CAST('10e.1' AS INTEGER), CAST('a3' AS INTEGER), CAST('10.12e1' AS INTEGER) FROM example;",
-        )
-        .unwrap();
-    let mut rows = stmt.execute().unwrap();
-    let row = rows.next_row().unwrap().unwrap();
-    let columns = row.parse().unwrap();
-    assert_eq!(columns.len(), 7);
-    assert_eq!(columns.get(0), &Value::Integer(1));
-    assert_eq!(columns.get(1), &Value::Integer(4));
-    assert_eq!(columns.get(2), &Value::Integer(10));
-    assert_eq!(columns.get(3), &Value::Integer(10));
-    assert_eq!(columns.get(4), &Value::Integer(10));
-    assert_eq!(columns.get(5), &Value::Integer(0));
-    assert_eq!(columns.get(6), &Value::Integer(10));
-    drop(row);
-    assert!(rows.next_row().unwrap().is_none());
-
-    // Cast to float
-    let mut stmt = conn
-        .prepare(
-            "SELECT CAST(col1 AS FLOAT), CAST(col4 AS FLOAT), CAST(' 10 ' AS FLOAT), CAST('10a' AS FLOAT), CAST('10e.1' AS FLOAT), CAST('a3' AS FLOAT), CAST('10.12e1' AS FLOAT) FROM example;",
-        )
-        .unwrap();
-    let mut rows = stmt.execute().unwrap();
-    let row = rows.next_row().unwrap().unwrap();
-    let columns = row.parse().unwrap();
-    assert_eq!(columns.len(), 7);
-    assert_eq!(columns.get(0), &Value::Real(1.0));
-    assert_eq!(columns.get(1), &Value::Real(4.5));
-    assert_eq!(columns.get(2), &Value::Real(10.0));
-    assert_eq!(columns.get(3), &Value::Real(10.0));
-    assert_eq!(columns.get(4), &Value::Real(10.0));
-    assert_eq!(columns.get(5), &Value::Real(0.0));
-    assert_eq!(columns.get(6), &Value::Real(101.2));
-    drop(row);
-    assert!(rows.next_row().unwrap().is_none());
-
-    // Cast to text
-    let mut stmt = conn
-        .prepare(
-            "SELECT CAST(col1 AS TEXT), CAST(col3 AS TEXT), CAST(col4 AS TEXT), CAST(' 10 ' AS TEXT), CAST(x'3132333435' AS TEXT) FROM example;",
-        )
-        .unwrap();
-    let mut rows = stmt.execute().unwrap();
-    let row = rows.next_row().unwrap().unwrap();
-    let columns = row.parse().unwrap();
-    assert_eq!(columns.len(), 5);
-    assert_eq!(columns.get(0), &Value::Text(b"1".to_vec().into()));
-    assert_eq!(columns.get(1), &Value::Text(b"-3".to_vec().into()));
-    assert_eq!(columns.get(2), &Value::Text(b"4.5".to_vec().into()));
-    assert_eq!(columns.get(3), &Value::Text(b" 10 ".as_slice().into()));
-    assert_eq!(columns.get(4), &Value::Text(b"12345".as_slice().into()));
-    drop(row);
-    assert!(rows.next_row().unwrap().is_none());
-
-    // Cast to blob
-    let mut stmt = conn
-        .prepare(
-            "SELECT CAST(col1 AS BLOB), CAST(col3 AS BLOB), CAST(col4 AS BLOB), CAST(' 10 ' AS BLOB), CAST(x'3132333435' AS BLOB) FROM example;",
-        )
-        .unwrap();
-    let mut rows = stmt.execute().unwrap();
-    let row = rows.next_row().unwrap().unwrap();
-    let columns = row.parse().unwrap();
-    assert_eq!(columns.len(), 5);
-    assert_eq!(columns.get(0), &Value::Blob(b"1".to_vec().into()));
-    assert_eq!(columns.get(1), &Value::Blob(b"-3".to_vec().into()));
-    assert_eq!(columns.get(2), &Value::Blob(b"4.5".to_vec().into()));
-    assert_eq!(columns.get(3), &Value::Blob(b" 10 ".as_slice().into()));
-    assert_eq!(columns.get(4), &Value::Blob(b"12345".as_slice().into()));
-    drop(row);
-    assert!(rows.next_row().unwrap().is_none());
+    for (expected, expr) in [
+        // Literals
+        (Value::Integer(1), "col1"),
+        (Value::Integer(10), "10"),
+        (Value::Real(10.0), "10."),
+        (Value::Text(b"text".as_slice().into()), "'text'"),
+        (
+            Value::Blob(b"\x01\x23\x45\x67\x89\xab\xcd\xef".as_slice().into()),
+            "x'0123456789abcdef'",
+        ),
+        (Value::Integer(9223372036854775807), "9223372036854775807"),
+        (Value::Real(9223372036854775808.0), "9223372036854775808"),
+        (Value::Real(9223372036854775809.0), "9223372036854775809"),
+        (Value::Integer(-9223372036854775808), "-9223372036854775808"),
+        (Value::Integer(-123), "-123"),
+        // Unary operators
+        (Value::Integer(-1), "-col1"),
+        (Value::Integer(-2), "-col2"),
+        (Value::Integer(3), "-col3"),
+        (Value::Integer(-2), "-+-+-col2"),
+        (Value::Integer(-123), "-+-+-123"),
+        (Value::Integer(123), "++++123"),
+        (Value::Integer(123), "-+-+123"),
+        // Comparison operators
+        (Value::Integer(1), "10 > col1"),
+        (Value::Integer(0), "10 < col1"),
+        (Value::Integer(1), "col1 < col2"),
+        (Value::Integer(0), "col1 > col2"),
+        (Value::Integer(1), "10 == 10"),
+        // Cast to numeric
+        (Value::Integer(1), "CAST(col1 AS NUMERIC)"),
+        (Value::Real(4.5), "CAST(col4 AS NUMERIC)"),
+        (Value::Integer(10), "CAST(' 10 ' AS NUMERIC)"),
+        (Value::Integer(10), "CAST('10a' AS NUMERIC)"),
+        (Value::Integer(10), "CAST('10e.1' AS NUMERIC)"),
+        (Value::Integer(0), "CAST('a3' AS NUMERIC)"),
+        (Value::Real(101.2), "CAST('10.12e1' AS NUMERIC)"),
+        // Cast to integer
+        (Value::Integer(1), "CAST(col1 AS INTEGER)"),
+        (Value::Integer(4), "CAST(col4 AS INTEGER)"),
+        (Value::Integer(10), "CAST(' 10 ' AS INTEGER)"),
+        (Value::Integer(10), "CAST('10a' AS INTEGER)"),
+        (Value::Integer(10), "CAST('10e.1' AS INTEGER)"),
+        (Value::Integer(0), "CAST('a3' AS INTEGER)"),
+        (Value::Integer(10), "CAST('10.12e1' AS INTEGER)"),
+        // Cast to float
+        (Value::Real(1.0), "CAST(col1 AS FLOAT)"),
+        (Value::Real(4.5), "CAST(col4 AS FLOAT)"),
+        (Value::Real(10.0), "CAST(' 10 ' AS FLOAT)"),
+        (Value::Real(10.0), "CAST('10a' AS FLOAT)"),
+        (Value::Real(10.0), "CAST('10e.1' AS FLOAT)"),
+        (Value::Real(0.0), "CAST('a3' AS FLOAT)"),
+        (Value::Real(101.2), "CAST('10.12e1' AS FLOAT)"),
+        // Cast to text
+        (Value::Text(b"1".to_vec().into()), "CAST(col1 AS TEXT)"),
+        (Value::Text(b"-3".to_vec().into()), "CAST(col3 AS TEXT)"),
+        (Value::Text(b"4.5".to_vec().into()), "CAST(col4 AS TEXT)"),
+        (
+            Value::Text(b" 10 ".as_slice().into()),
+            "CAST(' 10 ' AS TEXT)",
+        ),
+        (
+            Value::Text(b"12345".as_slice().into()),
+            "CAST(x'3132333435' AS TEXT)",
+        ),
+        // Cast to blob
+        (Value::Blob(b"1".to_vec().into()), "CAST(col1 AS BLOB)"),
+        (Value::Blob(b"-3".to_vec().into()), "CAST(col3 AS BLOB)"),
+        (Value::Blob(b"4.5".to_vec().into()), "CAST(col4 AS BLOB)"),
+        (
+            Value::Blob(b" 10 ".as_slice().into()),
+            "CAST(' 10 ' AS BLOB)",
+        ),
+        (
+            Value::Blob(b"12345".as_slice().into()),
+            "CAST(x'3132333435' AS BLOB)",
+        ),
+        // Concat
+        (Value::Text(b"foobar".to_vec().into()), "'foo' || 'bar'"),
+        (
+            Value::Text(b"foobarbaz".to_vec().into()),
+            "'foo' || 'bar' || 'baz'",
+        ),
+        (
+            Value::Text(b"12345678.9".to_vec().into()),
+            "123 || 456 || 78.9",
+        ),
+        (
+            Value::Text(b"123456789".to_vec().into()),
+            "123 || x'343536' || '789'",
+        ),
+    ] {
+        let query = format!("SELECT {} FROM example;", expr);
+        assert_same_results(&[expected], &query, &test_conn, &mut conn);
+    }
 }
 
 #[test]
@@ -429,34 +388,7 @@ fn test_select_expression_operators() {
         (Value::Integer(0), "1 = 2 <= 1"),
     ] {
         let query = format!("SELECT {} FROM example;", expr);
-        let mut stmt = test_conn.prepare(&query).unwrap();
-        let mut rows = stmt.query([]).unwrap();
-        let row = rows.next().unwrap().unwrap();
-        match &expected {
-            Value::Integer(v) => assert_eq!(row.get::<_, i64>(0).unwrap(), *v, "query: {}", query),
-            Value::Real(v) => assert_eq!(row.get::<_, f64>(0).unwrap(), *v, "query: {}", query),
-            Value::Text(v) => assert_eq!(
-                row.get::<_, String>(0).unwrap().as_bytes(),
-                &**v,
-                "query: {}",
-                query
-            ),
-            Value::Blob(v) => {
-                assert_eq!(
-                    row.get::<_, Vec<u8>>(0).unwrap().as_slice(),
-                    &**v,
-                    "query: {}",
-                    query
-                )
-            }
-            Value::Null => unimplemented!("null values not supported yet"),
-        }
-
-        let mut stmt = conn.prepare(&query).unwrap();
-        let mut rows = stmt.execute().unwrap();
-        let row = rows.next_row().unwrap().unwrap();
-        let columns = row.parse().unwrap();
-        assert_eq!(columns.get(0), &expected, "query: {}", query);
+        assert_same_results(&[expected], &query, &test_conn, &mut conn);
     }
 }
 
@@ -549,6 +481,11 @@ fn test_select_type_conversions_prior_to_comparison() {
         (
             vec![1, 1, 1],
             "SELECT e < CAST('40' AS TEXT), e < CAST('60' AS TEXT), e < CAST('600' AS TEXT) FROM t1;",
+        ),
+        // Concat has no affinity
+        (
+            vec![1, 1],
+            "SELECT 123 < '12' || 3, 123 < CAST('12' AS TEXT) || CAST('3' AS TEXT) FROM t1;",
         ),
     ] {
         let mut stmt = test_conn.prepare(query).unwrap();

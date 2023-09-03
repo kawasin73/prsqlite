@@ -42,7 +42,7 @@ static CHAR_LOOKUP_TABLE: [u8; 256] = [
     0x05, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, // 0x60 - 0x67
     0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, // 0x68 - 0x6F
     0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, // 0x70 - 0x77
-    0x00, 0x01, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0x78 - 0x7F
+    0x00, 0x01, 0x01, 0xFF, b'|', 0xFF, 0xFF, 0xFF, // 0x78 - 0x7F
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0x80 - 0x87
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0x88 - 0x8F
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0x90 - 0x97
@@ -63,6 +63,7 @@ static CHAR_LOOKUP_TABLE: [u8; 256] = [
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Token<'a> {
+    // Keywords
     Select,
     As,
     From,
@@ -75,6 +76,8 @@ pub enum Token<'a> {
     On,
     Null,
     Cast,
+
+    // Symbols
     Space,
     LeftParen,
     RightParen,
@@ -84,6 +87,8 @@ pub enum Token<'a> {
     Minus,
     Dot,
     Semicolon,
+
+    // Operators
     /// Equal to
     Eq,
     /// Not equal to
@@ -96,6 +101,10 @@ pub enum Token<'a> {
     Lt,
     /// Less than or equal to
     Le,
+    BitOr,
+    Concat,
+
+    // Literals
     Identifier(MaybeQuotedBytes<'a>),
     String(MaybeQuotedBytes<'a>),
     Blob(HexedBytes<'a>),
@@ -167,6 +176,13 @@ pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
                 Some((2, Token::Ge))
             } else {
                 Some((1, Token::Gt))
+            }
+        }
+        b'|' => {
+            if input.len() >= 2 && input[1] == b'|' {
+                Some((2, Token::Concat))
+            } else {
+                Some((1, Token::BitOr))
             }
         }
         CHAR_X => {
@@ -769,6 +785,8 @@ mod tests {
             ("==", Token::Eq),
             (">", Token::Gt),
             (">=", Token::Ge),
+            ("|", Token::BitOr),
+            ("||", Token::Concat),
         ] {
             let input = s.to_string();
             assert_eq!(
