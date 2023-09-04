@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::hash::{Hash, Hasher};
+use std::cmp::Ordering;
+use std::hash::Hash;
+use std::hash::Hasher;
 
 const VARINT_FLAG_MASK: u8 = 0b1000_0000;
 const VARINT_VAR_MASK: u8 = !VARINT_FLAG_MASK;
@@ -458,6 +460,24 @@ impl PartialEq for CaseInsensitiveBytes<'_> {
             }
         }
         true
+    }
+}
+
+impl PartialOrd for CaseInsensitiveBytes<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CaseInsensitiveBytes<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        for (a, b) in std::iter::zip(self.0, other.0) {
+            let cmp = UPPER_TO_LOWER[*a as usize].cmp(&UPPER_TO_LOWER[*b as usize]);
+            if cmp != Ordering::Equal {
+                return cmp;
+            }
+        }
+        self.0.len().cmp(&other.0.len())
     }
 }
 
@@ -941,6 +961,65 @@ mod tests {
         );
         assert!(
             !CaseInsensitiveBytes::from("aaaa".as_bytes()).contains_lower_bytes("abc".as_bytes())
+        );
+    }
+
+    #[test]
+    fn test_case_insensitive_bytes_cmp() {
+        assert_eq!(
+            CaseInsensitiveBytes::from(b"".as_slice())
+                .cmp(&CaseInsensitiveBytes::from(b"".as_slice())),
+            Ordering::Equal
+        );
+        assert_eq!(
+            CaseInsensitiveBytes::from(b"abc".as_slice())
+                .cmp(&CaseInsensitiveBytes::from(b"abc".as_slice())),
+            Ordering::Equal
+        );
+        assert_eq!(
+            CaseInsensitiveBytes::from(b"123.4".as_slice())
+                .cmp(&CaseInsensitiveBytes::from(b"123.4".as_slice())),
+            Ordering::Equal
+        );
+        assert_eq!(
+            CaseInsensitiveBytes::from(b"abc".as_slice())
+                .cmp(&CaseInsensitiveBytes::from(b"ABC".as_slice())),
+            Ordering::Equal
+        );
+        assert_eq!(
+            CaseInsensitiveBytes::from(b"abc".as_slice())
+                .cmp(&CaseInsensitiveBytes::from(b"B".as_slice())),
+            Ordering::Less
+        );
+        assert_eq!(
+            CaseInsensitiveBytes::from(b"abc".as_slice())
+                .cmp(&CaseInsensitiveBytes::from(b"B".as_slice())),
+            Ordering::Less
+        );
+        assert_eq!(
+            CaseInsensitiveBytes::from(b"bc".as_slice())
+                .cmp(&CaseInsensitiveBytes::from(b"AB".as_slice())),
+            Ordering::Greater
+        );
+        assert_eq!(
+            CaseInsensitiveBytes::from(b"abcd".as_slice())
+                .cmp(&CaseInsensitiveBytes::from(b"abc".as_slice())),
+            Ordering::Greater
+        );
+        assert_eq!(
+            CaseInsensitiveBytes::from(b"abcd".as_slice())
+                .cmp(&CaseInsensitiveBytes::from(b"ABC".as_slice())),
+            Ordering::Greater
+        );
+        assert_eq!(
+            CaseInsensitiveBytes::from(b"abc".as_slice())
+                .cmp(&CaseInsensitiveBytes::from(b"abcd".as_slice())),
+            Ordering::Less
+        );
+        assert_eq!(
+            CaseInsensitiveBytes::from(b"abc".as_slice())
+                .cmp(&CaseInsensitiveBytes::from(b"ABCD".as_slice())),
+            Ordering::Less
         );
     }
 

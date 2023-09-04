@@ -24,12 +24,15 @@ use crate::pager::PageId;
 use crate::pager::ROOT_PAGE_ID;
 use crate::parser::parse_create_index;
 use crate::parser::parse_create_table;
+use crate::parser::ColumnConstraint;
 use crate::utils::upper_to_lower;
 use crate::utils::CaseInsensitiveBytes;
 use crate::utils::MaybeQuotedBytes;
 use crate::utils::UPPER_TO_LOWER;
+use crate::value::Collation;
 use crate::value::TypeAffinity;
 use crate::value::Value;
+use crate::value::DEFAULT_COLLATION;
 use crate::Columns;
 use crate::Statement;
 
@@ -91,26 +94,31 @@ impl Schema {
                     name: b"type".to_vec(),
                     type_affinity: TypeAffinity::Text,
                     primary_key: false,
+                    collation: Collation::Binary,
                 },
                 Column {
                     name: b"name".to_vec(),
                     type_affinity: TypeAffinity::Text,
                     primary_key: false,
+                    collation: Collation::Binary,
                 },
                 Column {
                     name: b"tbl_name".to_vec(),
                     type_affinity: TypeAffinity::Text,
                     primary_key: false,
+                    collation: Collation::Binary,
                 },
                 Column {
                     name: b"rootpage".to_vec(),
                     type_affinity: TypeAffinity::Integer,
                     primary_key: false,
+                    collation: Collation::Binary,
                 },
                 Column {
                     name: b"sql".to_vec(),
                     type_affinity: TypeAffinity::Text,
                     primary_key: false,
+                    collation: Collation::Binary,
                 },
             ],
             indexes: None,
@@ -250,7 +258,7 @@ impl Index {
         for column in &create_index.columns {
             // TODO: use the reference of given column name.
             let column_name = column.name.dequote();
-            let Some((column_number, _)) = table.get_column(&column_name) else {
+            let Some((column_number, _, _)) = table.get_column(&column_name) else {
                 bail!(
                     "column {:?} in create index sql is not found in table {:?}",
                     column.name,
@@ -276,6 +284,7 @@ pub struct Column {
     pub name: Vec<u8>,
     pub type_affinity: TypeAffinity,
     pub primary_key: bool,
+    pub collation: Collation,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -337,15 +346,8 @@ impl Table {
         let mut columns: Vec<Column> = Vec::with_capacity(create_table.columns.len());
         let mut has_primary_key = false;
         for column_def in create_table.columns {
-            if column_def.primary_key {
-                if has_primary_key {
-                    bail!("multiple primary key");
-                }
-                has_primary_key = true;
-            }
             let column_name = column_def.name.dequote();
             let case_insensitive_name = CaseInsensitiveBytes::from(&column_name);
-
             // TODO: Optimize validation (e.g. hashset)
             for column in &columns {
                 if CaseInsensitiveBytes::from(&column.name) == case_insensitive_name {
@@ -353,10 +355,40 @@ impl Table {
                 }
             }
 
+            let primary_key = column_def
+                .constraints
+                .contains(&ColumnConstraint::PrinaryKey);
+            if primary_key {
+                if has_primary_key {
+                    bail!("multiple primary key");
+                }
+                has_primary_key = true;
+            }
+
+            let mut collation = DEFAULT_COLLATION.clone();
+            for constraint in &column_def.constraints {
+                if let ColumnConstraint::Collate(collation_name) = constraint {
+                    let collation_name = collation_name.dequote();
+                    let case_insensitive_collation_name =
+                        CaseInsensitiveBytes::from(collation_name.as_slice());
+                    // TODO: Support user defined collating sequence.
+                    collation = if case_insensitive_collation_name.equal_to_lower_bytes(b"binary") {
+                        Collation::Binary
+                    } else if case_insensitive_collation_name.equal_to_lower_bytes(b"nocase") {
+                        Collation::NoCase
+                    } else if case_insensitive_collation_name.equal_to_lower_bytes(b"rtrim") {
+                        Collation::RTrim
+                    } else {
+                        bail!("invalid collation: {:?}", collation_name);
+                    };
+                }
+            }
+
             columns.push(Column {
                 name: column_name,
                 type_affinity: calc_type_affinity(&column_def.type_name),
-                primary_key: column_def.primary_key,
+                primary_key,
+                collation,
             });
         }
         Ok((
@@ -369,7 +401,7 @@ impl Table {
         ))
     }
 
-    pub fn get_column(&self, name: &[u8]) -> Option<(ColumnNumber, TypeAffinity)> {
+    pub fn get_column(&self, name: &[u8]) -> Option<(ColumnNumber, TypeAffinity, Collation)> {
         let column = CaseInsensitiveBytes::from(name);
         if let Some((i, column)) = self
             .columns
@@ -383,20 +415,38 @@ impl Table {
                 } else {
                     ColumnNumber::Column(i)
                 };
-            Some((column_number, column.type_affinity))
-        } else if column.equal_to_lower_bytes(&b"rowid"[..]) {
-            Some((ColumnNumber::RowId, TypeAffinity::Integer))
+            Some((
+                column_number,
+                column.type_affinity,
+                column.collation.clone(),
+            ))
+        } else if column.equal_to_lower_bytes(b"rowid".as_slice()) {
+            Some((
+                ColumnNumber::RowId,
+                TypeAffinity::Integer,
+                DEFAULT_COLLATION.clone(),
+            ))
         } else {
             None
         }
     }
 
-    pub fn get_all_columns(&self) -> impl Iterator<Item = (ColumnNumber, TypeAffinity)> + '_ {
+    pub fn get_all_columns(
+        &self,
+    ) -> impl Iterator<Item = (ColumnNumber, TypeAffinity, Collation)> + '_ {
         self.columns.iter().enumerate().map(|(i, column)| {
             if column.primary_key && column.type_affinity == TypeAffinity::Integer {
-                (ColumnNumber::RowId, TypeAffinity::Integer)
+                (
+                    ColumnNumber::RowId,
+                    TypeAffinity::Integer,
+                    column.collation.clone(),
+                )
             } else {
-                (ColumnNumber::Column(i), column.type_affinity)
+                (
+                    ColumnNumber::Column(i),
+                    column.type_affinity,
+                    column.collation.clone(),
+                )
             }
         })
     }
@@ -516,31 +566,37 @@ mod tests {
                         name: b"col".to_vec(),
                         type_affinity: TypeAffinity::Blob,
                         primary_key: false,
+                        collation: Collation::Binary,
                     },
                     Column {
                         name: b"col1".to_vec(),
                         type_affinity: TypeAffinity::Integer,
                         primary_key: true,
+                        collation: Collation::Binary,
                     },
                     Column {
                         name: b"col2".to_vec(),
                         type_affinity: TypeAffinity::Text,
                         primary_key: false,
+                        collation: Collation::Binary,
                     },
                     Column {
                         name: b"co`l3".to_vec(),
                         type_affinity: TypeAffinity::Blob,
                         primary_key: false,
+                        collation: Collation::Binary,
                     },
                     Column {
                         name: b"col4".to_vec(),
                         type_affinity: TypeAffinity::Real,
                         primary_key: false,
+                        collation: Collation::Binary,
                     },
                     Column {
                         name: b"col5".to_vec(),
                         type_affinity: TypeAffinity::Numeric,
                         primary_key: false,
+                        collation: Collation::Binary,
                     },
                 ],
                 indexes: None,
@@ -558,13 +614,47 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_table_collation() {
+        let (_, table) = Table::parse(
+            b"create table example(col, col1 collate binary primary key, col2 collate nocase, col3 text collate rtrim, col4 collate binary collate nocase collate rtrim)",
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(table.columns[0].collation, Collation::Binary);
+        assert_eq!(table.columns[1].collation, Collation::Binary);
+        assert_eq!(table.columns[2].collation, Collation::NoCase);
+        assert_eq!(table.columns[3].collation, Collation::RTrim);
+        assert_eq!(table.columns[4].collation, Collation::RTrim);
+
+        let (_, table) = Table::parse(
+            b"create table example(col1 collate BINARY primary key, col2 collate NOCASE, col3 text collate RTRIM, col4 collate NoCase, col5 collate \"NoCase\")",
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(table.columns[0].collation, Collation::Binary);
+        assert_eq!(table.columns[1].collation, Collation::NoCase);
+        assert_eq!(table.columns[2].collation, Collation::RTrim);
+        assert_eq!(table.columns[3].collation, Collation::NoCase);
+        assert_eq!(table.columns[4].collation, Collation::NoCase);
+
+        // unknown collation
+        assert!(Table::parse(
+            b"create table example(col collate invalid collate binary)",
+            1,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn get_table() {
         let file = create_sqlite_database(&[
             "CREATE TABLE example(col);",
             "CREATE TABLE \"example2\"(col1 null, col2 integer);",
             "CREATE TABLE `exam``ple3`(COL1 real, Col2 text primary key, cOL3 blob, _);",
             "CREATE TABLE [example4](id integer primary key, col);",
-            "create table example5(col, col1 integer primary key, \"col2\" text, `co``l3` blob, [col4] real, col5 other)",
+            "create table example5(col, col1 integer primary key collate binary, \"col2\" text collate nocase, `co``l3` blob collate rtrim, [col4] real, col5 other)",
         ]);
         let schema = generate_schema(file.path());
 
@@ -576,6 +666,7 @@ mod tests {
                     name: b"col".to_vec(),
                     type_affinity: TypeAffinity::Blob,
                     primary_key: false,
+                    collation: Collation::Binary,
                 }],
                 indexes: None,
             }
@@ -587,11 +678,13 @@ mod tests {
                     name: b"col1".to_vec(),
                     type_affinity: TypeAffinity::Numeric,
                     primary_key: false,
+                    collation: Collation::Binary,
                 },
                 Column {
                     name: b"col2".to_vec(),
                     type_affinity: TypeAffinity::Integer,
                     primary_key: false,
+                    collation: Collation::Binary,
                 }
             ]
         );
@@ -602,21 +695,25 @@ mod tests {
                     name: b"COL1".to_vec(),
                     type_affinity: TypeAffinity::Real,
                     primary_key: false,
+                    collation: Collation::Binary,
                 },
                 Column {
                     name: b"Col2".to_vec(),
                     type_affinity: TypeAffinity::Text,
                     primary_key: true,
+                    collation: Collation::Binary,
                 },
                 Column {
                     name: b"cOL3".to_vec(),
                     type_affinity: TypeAffinity::Blob,
                     primary_key: false,
+                    collation: Collation::Binary,
                 },
                 Column {
                     name: b"_".to_vec(),
                     type_affinity: TypeAffinity::Blob,
                     primary_key: false,
+                    collation: Collation::Binary,
                 }
             ]
         );
@@ -628,31 +725,37 @@ mod tests {
                     name: b"col".to_vec(),
                     type_affinity: TypeAffinity::Blob,
                     primary_key: false,
+                    collation: Collation::Binary,
                 },
                 Column {
                     name: b"col1".to_vec(),
                     type_affinity: TypeAffinity::Integer,
                     primary_key: true,
+                    collation: Collation::Binary,
                 },
                 Column {
                     name: b"col2".to_vec(),
                     type_affinity: TypeAffinity::Text,
                     primary_key: false,
+                    collation: Collation::NoCase,
                 },
                 Column {
                     name: b"co`l3".to_vec(),
                     type_affinity: TypeAffinity::Blob,
                     primary_key: false,
+                    collation: Collation::RTrim,
                 },
                 Column {
                     name: b"col4".to_vec(),
                     type_affinity: TypeAffinity::Real,
                     primary_key: false,
+                    collation: Collation::Binary,
                 },
                 Column {
                     name: b"col5".to_vec(),
                     type_affinity: TypeAffinity::Numeric,
                     primary_key: false,
+                    collation: Collation::Binary,
                 },
             ]
         );
@@ -771,8 +874,8 @@ mod tests {
         let file = create_sqlite_database(&[
             "CREATE TABLE example(col);",
             "CREATE TABLE example2(col1, col2, rowid);",
-            "CREATE TABLE example3(col1, id integer primary key, col2);",
-            "CREATE TABLE example4(col1, id text primary key, col2);",
+            "CREATE TABLE example3(col1, id integer primary key, col2 collate nocase);",
+            "CREATE TABLE example4(col1, id text primary key collate rtrim, col2);",
         ]);
         let schema = generate_schema(file.path());
 
@@ -780,7 +883,11 @@ mod tests {
         let mut iter = table.get_all_columns();
         assert_eq!(
             iter.next(),
-            Some((ColumnNumber::Column(0), TypeAffinity::Blob))
+            Some((
+                ColumnNumber::Column(0),
+                TypeAffinity::Blob,
+                Collation::Binary
+            ))
         );
         assert_eq!(iter.next(), None);
 
@@ -788,15 +895,27 @@ mod tests {
         let mut iter = table.get_all_columns();
         assert_eq!(
             iter.next(),
-            Some((ColumnNumber::Column(0), TypeAffinity::Blob))
+            Some((
+                ColumnNumber::Column(0),
+                TypeAffinity::Blob,
+                Collation::Binary
+            ))
         );
         assert_eq!(
             iter.next(),
-            Some((ColumnNumber::Column(1), TypeAffinity::Blob))
+            Some((
+                ColumnNumber::Column(1),
+                TypeAffinity::Blob,
+                Collation::Binary
+            ))
         );
         assert_eq!(
             iter.next(),
-            Some((ColumnNumber::Column(2), TypeAffinity::Blob))
+            Some((
+                ColumnNumber::Column(2),
+                TypeAffinity::Blob,
+                Collation::Binary
+            ))
         );
         assert_eq!(iter.next(), None);
 
@@ -804,15 +923,27 @@ mod tests {
         let mut iter = table.get_all_columns();
         assert_eq!(
             iter.next(),
-            Some((ColumnNumber::Column(0), TypeAffinity::Blob))
+            Some((
+                ColumnNumber::Column(0),
+                TypeAffinity::Blob,
+                Collation::Binary
+            ))
         );
         assert_eq!(
             iter.next(),
-            Some((ColumnNumber::RowId, TypeAffinity::Integer))
+            Some((
+                ColumnNumber::RowId,
+                TypeAffinity::Integer,
+                Collation::Binary
+            ))
         );
         assert_eq!(
             iter.next(),
-            Some((ColumnNumber::Column(2), TypeAffinity::Blob))
+            Some((
+                ColumnNumber::Column(2),
+                TypeAffinity::Blob,
+                Collation::NoCase
+            ))
         );
         assert_eq!(iter.next(), None);
 
@@ -820,15 +951,27 @@ mod tests {
         let mut iter = table.get_all_columns();
         assert_eq!(
             iter.next(),
-            Some((ColumnNumber::Column(0), TypeAffinity::Blob))
+            Some((
+                ColumnNumber::Column(0),
+                TypeAffinity::Blob,
+                Collation::Binary
+            ))
         );
         assert_eq!(
             iter.next(),
-            Some((ColumnNumber::Column(1), TypeAffinity::Text))
+            Some((
+                ColumnNumber::Column(1),
+                TypeAffinity::Text,
+                Collation::RTrim
+            ))
         );
         assert_eq!(
             iter.next(),
-            Some((ColumnNumber::Column(2), TypeAffinity::Blob))
+            Some((
+                ColumnNumber::Column(2),
+                TypeAffinity::Blob,
+                Collation::Binary
+            ))
         );
         assert_eq!(iter.next(), None);
     }

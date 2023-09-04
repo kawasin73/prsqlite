@@ -21,15 +21,16 @@ use crate::cursor::BtreePayload;
 use crate::utils::parse_varint;
 use crate::value::Buffer;
 use crate::value::Value;
+use crate::value::ValueCmp;
 
-pub fn compare_record(keys: &[Value], payload: &BtreePayload) -> anyhow::Result<Ordering> {
+pub fn compare_record(keys: &[ValueCmp<'_>], payload: &BtreePayload) -> anyhow::Result<Ordering> {
     let mut record = Record::parse(payload)?;
     if record.len() < keys.len() {
         bail!("keys is more than index columns");
     }
     for (i, key) in keys.iter().enumerate() {
         let index_value = record.get(i)?;
-        match key.cmp(&index_value) {
+        match key.compare(&index_value) {
             Ordering::Equal => continue,
             o => return Ok(o),
         }

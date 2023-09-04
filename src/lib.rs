@@ -24,6 +24,7 @@ mod token;
 mod utils;
 mod value;
 
+use std::cmp::Ordering;
 use std::fmt::Display;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
@@ -52,8 +53,11 @@ use crate::schema::ColumnNumber;
 use crate::schema::Schema;
 use crate::schema::Table;
 pub use crate::value::Buffer;
+use crate::value::Collation;
 use crate::value::TypeAffinity;
 pub use crate::value::Value;
+use crate::value::ValueCmp;
+use crate::value::DEFAULT_COLLATION;
 
 const SQLITE_MAX_PAGE_SIZE: u32 = 65536;
 pub const DATABASE_HEADER_SIZE: usize = 100;
@@ -236,7 +240,7 @@ impl Connection {
             right,
         }) = &filter
         {
-            if let Expression::Column((column_number, type_affinity)) = left.as_ref() {
+            if let Expression::Column((column_number, type_affinity, collation)) = left.as_ref() {
                 if let Expression::Const(const_value) = right.as_ref() {
                     let mut next_index = table.indexes.as_ref();
                     while let Some(index) = next_index {
@@ -249,17 +253,18 @@ impl Connection {
                         let value = match type_affinity {
                             TypeAffinity::Integer | TypeAffinity::Real | TypeAffinity::Numeric => {
                                 ConstantValue::copy_from(
-                                    const_value.as_ref().apply_numeric_affinity(),
+                                    const_value.as_value().apply_numeric_affinity(),
                                 )
                             }
-                            TypeAffinity::Text => {
-                                ConstantValue::copy_from(const_value.as_ref().apply_text_affinity())
-                            }
-                            TypeAffinity::Blob => ConstantValue::copy_from(const_value.as_ref()),
+                            TypeAffinity::Text => ConstantValue::copy_from(
+                                const_value.as_value().apply_text_affinity(),
+                            ),
+                            TypeAffinity::Blob => ConstantValue::copy_from(const_value.as_value()),
                         };
+                        // TODO: Consider collation of constant value.
                         Some(IndexInfo {
                             page_id: index.root_page_id,
-                            keys: vec![value],
+                            keys: vec![(value, collation.clone())],
                             n_extra: index.columns.len() - 1,
                         })
                     } else {
@@ -299,7 +304,7 @@ enum ConstantValue {
 
 impl ConstantValue {
     fn copy_from(value: Value) -> Self {
-        assert_ne!(value, Value::Null);
+        assert!(value != Value::Null);
         match value {
             Value::Null => unreachable!("null value"),
             Value::Integer(i) => Self::Integer(i),
@@ -309,7 +314,7 @@ impl ConstantValue {
         }
     }
 
-    fn as_ref(&self) -> Value {
+    fn as_value(&self) -> Value {
         match self {
             Self::Integer(i) => Value::Integer(*i),
             Self::Real(f) => Value::Real(*f),
@@ -320,7 +325,7 @@ impl ConstantValue {
 }
 
 enum Expression {
-    Column((ColumnNumber, TypeAffinity)),
+    Column((ColumnNumber, TypeAffinity, Collation)),
     BitNot {
         expr: Box<Expression>,
     },
@@ -383,39 +388,42 @@ impl Expression {
     fn execute<'a>(
         &'a self,
         row: &'a RowData,
-    ) -> anyhow::Result<(Value<'a>, Option<TypeAffinity>)> {
+    ) -> anyhow::Result<(Value<'a>, Option<TypeAffinity>, Option<&'a Collation>)> {
         match self {
-            Self::Column((idx, affinity)) => Ok((row.get_column_value(idx)?, Some(*affinity))),
+            Self::Column((idx, affinity, collation)) => {
+                Ok((row.get_column_value(idx)?, Some(*affinity), Some(collation)))
+            }
             Self::BitNot { expr } => {
-                let (value, _) = expr.execute(row)?;
+                let (value, _, _) = expr.execute(row)?;
                 let value = if let Some(i) = value.as_integer() {
                     Value::Integer(!i)
                 } else {
                     Value::Null
                 };
-                Ok((value, None))
+                Ok((value, None, None))
             }
             Self::UnaryMinus { expr } => {
-                let (value, _) = expr.execute(row)?;
+                let (value, _, _) = expr.execute(row)?;
                 let value = match value {
                     Value::Null => Value::Null,
                     Value::Integer(i) => Value::Integer(-i),
                     Value::Real(d) => Value::Real(-d),
                     Value::Text(_) | Value::Blob(_) => Value::Integer(0),
                 };
-                Ok((value, None))
+                Ok((value, None, None))
             }
             Self::BinaryOperator {
                 operator,
                 left,
                 right,
             } => {
-                let (mut left_value, left_affinity) = left.execute(row)?;
-                let (mut right_value, right_affinity) = right.execute(row)?;
+                let (mut left_value, left_affinity, left_collation) = left.execute(row)?;
+                let (mut right_value, right_affinity, right_collation) = right.execute(row)?;
 
+                // TODO: Confirm whether collation is preserved after NULL.
                 match (&left_value, &right_value) {
-                    (Value::Null, _) => return Ok((Value::Null, None)),
-                    (_, Value::Null) => return Ok((Value::Null, None)),
+                    (Value::Null, _) => return Ok((Value::Null, None, None)),
+                    (_, Value::Null) => return Ok((Value::Null, None, None)),
                     _ => {}
                 }
 
@@ -448,18 +456,28 @@ impl Expression {
                             _ => {}
                         }
 
+                        let collation = if left_collation.is_none() {
+                            right_collation
+                        } else {
+                            left_collation
+                        };
+
+                        let cmp =
+                            ValueCmp::new(&left_value, collation.unwrap_or(&DEFAULT_COLLATION))
+                                .compare(&right_value);
+
                         let result = match compare_op {
-                            CompareOp::Eq => left_value == right_value,
-                            CompareOp::Ne => left_value != right_value,
-                            CompareOp::Lt => left_value < right_value,
-                            CompareOp::Le => left_value <= right_value,
-                            CompareOp::Gt => left_value > right_value,
-                            CompareOp::Ge => left_value >= right_value,
+                            CompareOp::Eq => cmp == Ordering::Equal,
+                            CompareOp::Ne => cmp != Ordering::Equal,
+                            CompareOp::Lt => cmp == Ordering::Less,
+                            CompareOp::Le => cmp != Ordering::Greater,
+                            CompareOp::Gt => cmp == Ordering::Greater,
+                            CompareOp::Ge => cmp != Ordering::Less,
                         };
                         if result {
-                            Ok((Value::Integer(1), None))
+                            Ok((Value::Integer(1), None, None))
                         } else {
-                            Ok((Value::Integer(0), None))
+                            Ok((Value::Integer(0), None, None))
                         }
                     }
                     BinaryOp::Concat => {
@@ -476,7 +494,7 @@ impl Expression {
                             }
                         };
                         buffer.extend(right.iter());
-                        Ok((Value::Text(Buffer::Owned(buffer)), None))
+                        Ok((Value::Text(Buffer::Owned(buffer)), None, None))
                     }
                 }
             }
@@ -484,21 +502,22 @@ impl Expression {
                 expr,
                 type_affinity,
             } => {
-                let (value, _affinity) = expr.execute(row)?;
+                let (value, _affinity, collation) = expr.execute(row)?;
                 Ok((
                     value.force_apply_type_affinity(*type_affinity),
                     Some(*type_affinity),
+                    collation,
                 ))
             }
-            Self::Null => Ok((Value::Null, None)),
-            Self::Const(value) => Ok((value.as_ref(), None)),
+            Self::Null => Ok((Value::Null, None, None)),
+            Self::Const(value) => Ok((value.as_value(), None, None)),
         }
     }
 }
 
 struct IndexInfo {
     page_id: PageId,
-    keys: Vec<ConstantValue>,
+    keys: Vec<(ConstantValue, Collation)>,
     n_extra: usize,
 }
 
@@ -526,12 +545,12 @@ impl<'conn> Statement<'conn> {
                 right,
             }) => match (left.as_ref(), right.as_ref()) {
                 (
-                    Expression::Column((ColumnNumber::RowId, _)),
+                    Expression::Column((ColumnNumber::RowId, _, _)),
                     Expression::Const(ConstantValue::Integer(value)),
                 ) => Some(*value),
                 (
                     Expression::Const(ConstantValue::Integer(value)),
-                    Expression::Column((ColumnNumber::RowId, _)),
+                    Expression::Column((ColumnNumber::RowId, _, _)),
                 ) => Some(*value),
                 _ => None,
             },
@@ -574,10 +593,18 @@ impl<'conn> Statement<'conn> {
         } else if let Some(index) = &self.index {
             let mut index_cursor =
                 BtreeCursor::new(index.page_id, &self.conn.pager, &self.conn.btree_ctx)?;
+            // TODO: IndexInfo should hold ValueCmp instead of ConstantValue.
+            let tmp_keys = index
+                .keys
+                .iter()
+                .map(|(v, c)| (v.as_value(), c))
+                .collect::<Vec<_>>();
             let mut keys = Vec::with_capacity(index.keys.len() + index.n_extra + 1);
-            keys.extend(index.keys.iter().map(|v| v.as_ref()));
+            keys.extend(tmp_keys.iter().map(|(v, c)| ValueCmp::new(v, c)));
             // +1 for rowid
-            keys.extend((0..index.n_extra + 1).map(|_| Value::Null));
+            keys.extend(
+                (0..index.n_extra + 1).map(|_| ValueCmp::new(&Value::Null, &DEFAULT_COLLATION)),
+            );
             index_cursor.index_move_to(&keys)?;
             Some(index_cursor)
         } else {
@@ -714,8 +741,10 @@ impl<'conn> Rows<'conn> {
             if record.len() < keys.len() {
                 bail!("index payload is too short");
             }
-            for (i, key) in keys.iter().enumerate() {
-                if record.get(i)? != key.as_ref() {
+            for (i, (key, collation)) in keys.iter().enumerate() {
+                if ValueCmp::new(&key.as_value(), collation).compare(&record.get(i)?)
+                    != Ordering::Equal
+                {
                     return Ok(false);
                 }
             }
@@ -770,7 +799,7 @@ impl<'a> Row<'a> {
     pub fn parse(&self) -> anyhow::Result<Columns<'_>> {
         let mut columns = Vec::with_capacity(self.stmt.columns.len());
         for expr in self.stmt.columns.iter() {
-            let (value, _) = expr.execute(&self.data)?;
+            let (value, _, _) = expr.execute(&self.data)?;
             columns.push(value);
         }
         Ok(Columns(columns))

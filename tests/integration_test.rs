@@ -42,6 +42,16 @@ fn load_rowids(conn: &mut Connection, query: &str) -> Vec<i64> {
     results
 }
 
+fn load_test_rowids(conn: &rusqlite::Connection, query: &str) -> Vec<i64> {
+    let mut stmt = conn.prepare(query).unwrap();
+    let mut rows = stmt.query([]).unwrap();
+    let mut results = Vec::new();
+    while let Some(row) = rows.next().unwrap() {
+        results.push(row.get::<_, i64>(0).unwrap());
+    }
+    results
+}
+
 fn assert_same_results(
     expected: &[Value],
     query: &str,
@@ -521,6 +531,105 @@ fn test_select_type_conversions_prior_to_comparison() {
             })
             .collect::<Vec<_>>();
         assert_eq!(columns, expected, "query: {}", query);
+    }
+}
+
+#[test]
+fn test_select_collation_sequence() {
+    // Test case from https://www.sqlite.org/datatype3.html#collation_sequence_examples
+    let file = create_sqlite_database(&[
+        "CREATE TABLE t1(x INTEGER PRIMARY KEY, a, b COLLATE BINARY, c COLLATE RTRIM, d COLLATE NOCASE);",
+        "INSERT INTO t1 VALUES(1,'abc','abc', 'abc  ','abc');",
+        "INSERT INTO t1 VALUES(2,'abc','abc', 'abc',  'ABC');",
+        "INSERT INTO t1 VALUES(3,'abc','abc', 'abc ', 'Abc');",
+        "INSERT INTO t1 VALUES(4,'abc','abc ','ABC',  'abc');",
+    ]);
+
+    let test_conn = rusqlite::Connection::open(file.path()).unwrap();
+    let mut conn = Connection::open(file.path()).unwrap();
+
+    for (expected, query) in [
+        // Text comparison a=b is performed using the BINARY collating sequence.
+        (vec![1, 2, 3], "SELECT x FROM t1 WHERE a = b;"),
+        // Text comparison a=b is performed using the RTRIM collating sequence.
+        // (vec![1, 2, 3, 4], "SELECT x FROM t1 WHERE a = b COLLATE RTRIM;"),
+        // Text comparison d=a is performed using the NOCASE collating sequence.
+        (vec![1, 2, 3, 4], "SELECT x FROM t1 WHERE d = a;"),
+        // Text comparison a=d is performed using the BINARY collating sequence.
+        (vec![1, 4], "SELECT x FROM t1 WHERE a = d;"),
+        // Text comparison 'abc'=c is performed using the RTRIM collating sequence.
+        (vec![1, 2, 3], "SELECT x FROM t1 WHERE 'abc' = c;"),
+        // Text comparison c='abc' is performed using the RTRIM collating sequence.
+        (vec![1, 2, 3], "SELECT x FROM t1 WHERE c = 'abc';"),
+        // TODO: Grouping is performed using the NOCASE collating sequence (Values 'abc', 'ABC',
+        // and 'Abc' are placed in the same group).
+        // (vec![4], "SELECT count(*) FROM t1 GROUP BY d ORDER BY 1;"),
+        // TODO: Grouping is performed using the BINARY collating sequence.  'abc' and 'ABC' and
+        // 'Abc' form different groups
+        // (
+        //     vec![1, 1, 2],
+        //     "SELECT count(*) FROM t1 GROUP BY (d || '') ORDER BY 1;",
+        // ),
+        // TODO: Sorting or column c is performed using the RTRIM collating sequence.
+        // (vec![4, 1, 2, 3], "SELECT x FROM t1 ORDER BY c, x;"),
+        // TODO: Sorting of (c||'') is performed using the BINARY collating sequence.
+        // (vec![4, 2, 3, 1], "SELECT x FROM t1 ORDER BY (c||''), x;"),
+        // TODO: Sorting of column c is performed using the NOCASE collating sequence.
+        // (
+        //     vec![2, 4, 3, 1],
+        //     "SELECT x FROM t1 ORDER BY c COLLATE NOCASE, x;",
+        // ),
+    ] {
+        let results = load_test_rowids(&test_conn, query);
+        assert_eq!(results, expected, "query: {}", query);
+
+        let results = load_rowids(&mut conn, query);
+        assert_eq!(results, expected, "query: {}", query);
+    }
+}
+
+#[test]
+fn test_select_preserved_collation_sequence() {
+    let file = create_sqlite_database(&[
+        "CREATE TABLE t1(x INTEGER PRIMARY KEY, a, b COLLATE BINARY, c COLLATE RTRIM, d COLLATE NOCASE);",
+        "INSERT INTO t1 VALUES(1,'abc','abc', 'abc  ','abc');",
+        "INSERT INTO t1 VALUES(2,'abc','abc', 'abc',  'ABC');",
+        "INSERT INTO t1 VALUES(3,'abc','abc', 'abc ', 'Abc');",
+        "INSERT INTO t1 VALUES(4,'abc','abc ','ABC',  'abc');",
+        "INSERT INTO t1 VALUES(5,'','a','0 ',  'b');",
+        "INSERT INTO t1 VALUES(6,'','a','-1 ',  'b');",
+    ]);
+
+    let test_conn = rusqlite::Connection::open(file.path()).unwrap();
+    let mut conn = Connection::open(file.path()).unwrap();
+
+    for (expected, query) in [
+        // Collation is preserved by CAST.
+        (
+            vec![1, 2, 3, 4],
+            "SELECT x FROM t1 WHERE CAST(d AS TEXT) = CAST(a AS TEXT);",
+        ),
+        (vec![1, 4], "SELECT x FROM t1 WHERE CAST(a AS TEXT) = d;"),
+        // Collation is not preserved by concatinating.
+        (vec![1, 4], "SELECT x FROM t1 WHERE d || 'd' = a || 'd';"),
+        (vec![1, 2, 3, 4], "SELECT x FROM t1 WHERE a || '' = d;"),
+        // Collation is not preserved by concatinating even if both operand are the same collation.
+        (vec![2], "SELECT x FROM t1 WHERE 'ABCABC' = d || d;"),
+        // Collation is not preserved by unary -. `-a` is 0 and converted to '0' by right operand
+        // CAST.
+        (vec![5], "SELECT x FROM t1 WHERE -a = CAST(c AS TEXT);"),
+        // Collation is not preserved by unary ~. `-a` is -1 and converted to '-1' by right
+        // operand CAST.
+        (vec![6], "SELECT x FROM t1 WHERE ~a = CAST(c AS TEXT);"),
+        // Collation is not preserved by binary operator. `a = 'a'` is 0 and converted to '0' by
+        // right operand CAST.
+        (vec![5], "SELECT x FROM t1 WHERE a = 'a' = CAST(c AS TEXT);"),
+    ] {
+        let results = load_test_rowids(&test_conn, query);
+        assert_eq!(results, expected, "query: {}", query);
+
+        let results = load_rowids(&mut conn, query);
+        assert_eq!(results, expected, "query: {}", query);
     }
 }
 

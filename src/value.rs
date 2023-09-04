@@ -18,6 +18,7 @@ use std::ops::Deref;
 
 use crate::utils::parse_float;
 use crate::utils::parse_integer;
+use crate::utils::CaseInsensitiveBytes;
 use crate::utils::ParseIntegerResult;
 
 /// Data type affinity.
@@ -30,6 +31,19 @@ pub enum TypeAffinity {
     Blob,
     Real,
     Numeric,
+}
+
+/// The default collation sequence is "binary".
+pub static DEFAULT_COLLATION: Collation = Collation::Binary;
+
+/// Collation sequence.
+///
+/// TODO: Support user defined collation sequences.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum Collation {
+    Binary,
+    NoCase,
+    RTrim,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +72,12 @@ impl<'a> Deref for Buffer<'a> {
     }
 }
 
+impl PartialEq for Buffer<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.deref() == other.deref()
+    }
+}
+
 impl<'a> From<&'a [u8]> for Buffer<'a> {
     fn from(buf: &'a [u8]) -> Self {
         Self::Ref(buf)
@@ -70,7 +90,7 @@ impl From<Vec<u8>> for Buffer<'_> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Value<'a> {
     Null,
     Integer(i64),
@@ -277,25 +297,21 @@ fn real_to_int(d: f64) -> i64 {
     }
 }
 
-impl PartialEq for Value<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
+#[derive(Debug)]
+pub struct ValueCmp<'a>((&'a Value<'a>, &'a Collation));
+
+impl<'a> ValueCmp<'a> {
+    pub fn new(value: &'a Value<'a>, collation: &'a Collation) -> Self {
+        Self((value, collation))
     }
-}
 
-/// SQLite does not handle NaN and it converts NaN to NULL.
-impl Eq for Value<'_> {}
-
-impl PartialOrd for Value<'_> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-/// https://www.sqlite.org/datatype3.html#comparison_expressions
-impl Ord for Value<'_> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match (self, other) {
+    /// Compare two values.
+    ///
+    /// https://www.sqlite.org/datatype3.html#comparison_expressions
+    /// https://www.sqlite.org/datatype3.html#collating_sequences
+    pub fn compare(&self, value: &Value) -> Ordering {
+        let (left, collation) = self.0;
+        match (left, value) {
             (Value::Null, Value::Null) => Ordering::Equal,
             (Value::Null, _) => Ordering::Less,
             (_, Value::Null) => Ordering::Greater,
@@ -308,8 +324,29 @@ impl Ord for Value<'_> {
             (_, Value::Integer(_)) => Ordering::Greater,
             (Value::Real(_), _) => Ordering::Less,
             (_, Value::Real(_)) => Ordering::Greater,
-            // TODO: Use collation.
-            (Value::Text(t1), Value::Text(t2)) => t1.cmp(t2),
+            (Value::Text(t1), Value::Text(t2)) => match collation {
+                Collation::Binary => t1.cmp(t2),
+                Collation::NoCase => {
+                    CaseInsensitiveBytes::from(&**t1).cmp(&CaseInsensitiveBytes::from(&**t2))
+                }
+                Collation::RTrim => {
+                    let mut tail_t1 = 0;
+                    for (i, b) in t1.iter().enumerate().rev() {
+                        if *b != b' ' {
+                            tail_t1 = i + 1;
+                            break;
+                        }
+                    }
+                    let mut tail_t2 = 0;
+                    for (i, b) in t2.iter().enumerate().rev() {
+                        if *b != b' ' {
+                            tail_t2 = i + 1;
+                            break;
+                        }
+                    }
+                    t1[..tail_t1].cmp(&t2[..tail_t2])
+                }
+            },
             (Value::Text(_), Value::Blob(_)) => Ordering::Less,
             (Value::Blob(_), Value::Text(_)) => Ordering::Greater,
             (Value::Blob(b1), Value::Blob(b2)) => b1.cmp(b2),
@@ -348,153 +385,258 @@ mod tests {
 
     #[test]
     fn test_value_compare() {
-        assert_eq!(Value::Null.cmp(&Value::Null), Ordering::Equal);
-        assert_eq!(Value::Null.cmp(&Value::Integer(0)), Ordering::Less);
-        assert_eq!(Value::Null.cmp(&Value::Real(0.0)), Ordering::Less);
         assert_eq!(
-            Value::Null.cmp(&Value::Text(b"".as_slice().into())),
-            Ordering::Less
-        );
-        assert_eq!(
-            Value::Null.cmp(&Value::Blob(b"".as_slice().into())),
-            Ordering::Less
-        );
-        assert_eq!(Value::Integer(0).cmp(&Value::Null), Ordering::Greater);
-        assert_eq!(
-            Value::Integer(12345).cmp(&Value::Integer(12345)),
+            ValueCmp::new(&Value::Null, &Collation::Binary).compare(&Value::Null),
             Ordering::Equal
         );
         assert_eq!(
-            Value::Integer(12345).cmp(&Value::Integer(12346)),
+            ValueCmp::new(&Value::Null, &Collation::Binary).compare(&Value::Integer(0)),
             Ordering::Less
         );
         assert_eq!(
-            Value::Integer(12345).cmp(&Value::Real(12345.0)),
+            ValueCmp::new(&Value::Null, &Collation::Binary).compare(&Value::Real(0.0)),
+            Ordering::Less
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Null, &Collation::Binary)
+                .compare(&Value::Text(b"".as_slice().into())),
+            Ordering::Less
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Null, &Collation::Binary)
+                .compare(&Value::Blob(b"".as_slice().into())),
+            Ordering::Less
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Integer(0), &Collation::Binary).compare(&Value::Null),
+            Ordering::Greater
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Integer(12345), &Collation::Binary)
+                .compare(&Value::Integer(12345)),
             Ordering::Equal
         );
         assert_eq!(
-            Value::Integer(12345).cmp(&Value::Real(12345.1)),
+            ValueCmp::new(&Value::Integer(12345), &Collation::Binary)
+                .compare(&Value::Integer(12346)),
             Ordering::Less
         );
         assert_eq!(
-            Value::Integer(-9223372036854775808).cmp(&Value::Real(-9223372036854775808.0)),
+            ValueCmp::new(&Value::Integer(12345), &Collation::Binary)
+                .compare(&Value::Real(12345.0)),
             Ordering::Equal
         );
         assert_eq!(
-            Value::Integer(-9223372036854775808).cmp(&Value::Real(-9223372036854775807.0)),
+            ValueCmp::new(&Value::Integer(12345), &Collation::Binary)
+                .compare(&Value::Real(12345.1)),
+            Ordering::Less
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Integer(-9223372036854775808), &Collation::Binary)
+                .compare(&Value::Real(-9223372036854775808.0)),
             Ordering::Equal
         );
         assert_eq!(
-            Value::Integer(9223372036854775807).cmp(&Value::Real(9223372036854775807.0)),
-            Ordering::Less
-        );
-        assert_eq!(
-            Value::Integer(9223372036854775807).cmp(&Value::Real(9223372036854775806.0)),
-            Ordering::Less
-        );
-        assert_eq!(
-            Value::Integer(12345).cmp(&Value::Text(b"12345".as_slice().into())),
-            Ordering::Less
-        );
-        assert_eq!(
-            Value::Integer(12345).cmp(&Value::Text(b"".as_slice().into())),
-            Ordering::Less
-        );
-        assert_eq!(
-            Value::Integer(12345).cmp(&Value::Blob(b"".as_slice().into())),
-            Ordering::Less
-        );
-        assert_eq!(Value::Real(1234.5).cmp(&Value::Null), Ordering::Greater);
-        assert_eq!(
-            Value::Real(12345.0).cmp(&Value::Integer(12345)),
+            ValueCmp::new(&Value::Integer(-9223372036854775808), &Collation::Binary)
+                .compare(&Value::Real(-9223372036854775807.0)),
             Ordering::Equal
         );
         assert_eq!(
-            Value::Real(12345.0).cmp(&Value::Integer(12346)),
+            ValueCmp::new(&Value::Integer(9223372036854775807), &Collation::Binary)
+                .compare(&Value::Real(9223372036854775807.0)),
             Ordering::Less
         );
         assert_eq!(
-            Value::Real(1234.5).cmp(&Value::Real(1234.5)),
+            ValueCmp::new(&Value::Integer(9223372036854775807), &Collation::Binary)
+                .compare(&Value::Real(9223372036854775806.0)),
+            Ordering::Less
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Integer(12345), &Collation::Binary)
+                .compare(&Value::Text(b"12345".as_slice().into())),
+            Ordering::Less
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Integer(12345), &Collation::Binary)
+                .compare(&Value::Text(b"".as_slice().into())),
+            Ordering::Less
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Integer(12345), &Collation::Binary)
+                .compare(&Value::Blob(b"".as_slice().into())),
+            Ordering::Less
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Real(1234.5), &Collation::Binary).compare(&Value::Null),
+            Ordering::Greater
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Real(12345.0), &Collation::Binary)
+                .compare(&Value::Integer(12345)),
             Ordering::Equal
         );
         assert_eq!(
-            Value::Real(1234.5).cmp(&Value::Real(1234.6)),
+            ValueCmp::new(&Value::Real(12345.0), &Collation::Binary)
+                .compare(&Value::Integer(12346)),
             Ordering::Less
         );
         assert_eq!(
-            Value::Real(1234.5).cmp(&Value::Text(b"".as_slice().into())),
-            Ordering::Less
-        );
-        assert_eq!(
-            Value::Real(1234.5).cmp(&Value::Blob(b"".as_slice().into())),
-            Ordering::Less
-        );
-        assert_eq!(
-            Value::Text(b"abcde".as_slice().into()).cmp(&Value::Null),
-            Ordering::Greater
-        );
-        assert_eq!(
-            Value::Text(b"".as_slice().into()).cmp(&Value::Integer(i64::MAX)),
-            Ordering::Greater
-        );
-        assert_eq!(
-            Value::Text(b"".as_slice().into()).cmp(&Value::Real(f64::MAX)),
-            Ordering::Greater
-        );
-        assert_eq!(
-            Value::Text(b"abcde".as_slice().into()).cmp(&Value::Text(b"abcde".as_slice().into())),
+            ValueCmp::new(&Value::Real(1234.5), &Collation::Binary).compare(&Value::Real(1234.5)),
             Ordering::Equal
         );
         assert_eq!(
-            Value::Text(b"abcde".as_slice().into()).cmp(&Value::Text(b"abcdf".as_slice().into())),
+            ValueCmp::new(&Value::Real(1234.5), &Collation::Binary).compare(&Value::Real(1234.6)),
             Ordering::Less
         );
         assert_eq!(
-            Value::Text(b"abcde".as_slice().into()).cmp(&Value::Text(b"abcde0".as_slice().into())),
+            ValueCmp::new(&Value::Real(1234.5), &Collation::Binary)
+                .compare(&Value::Text(b"".as_slice().into())),
             Ordering::Less
         );
         assert_eq!(
-            Value::Text(b"abcde".as_slice().into()).cmp(&Value::Text(b"abcdd".as_slice().into())),
-            Ordering::Greater
-        );
-        assert_eq!(
-            Value::Text(b"abcde".as_slice().into()).cmp(&Value::Blob(b"abcde".as_slice().into())),
+            ValueCmp::new(&Value::Real(1234.5), &Collation::Binary)
+                .compare(&Value::Blob(b"".as_slice().into())),
             Ordering::Less
         );
         assert_eq!(
-            Value::Text(b"abcde".as_slice().into()).cmp(&Value::Blob(b"".as_slice().into())),
-            Ordering::Less
-        );
-        assert_eq!(
-            Value::Blob(b"".as_slice().into()).cmp(&Value::Null),
+            ValueCmp::new(&Value::Text(b"abcde".as_slice().into()), &Collation::Binary)
+                .compare(&Value::Null),
             Ordering::Greater
         );
         assert_eq!(
-            Value::Blob(b"".as_slice().into()).cmp(&Value::Integer(i64::MAX)),
+            ValueCmp::new(&Value::Text(b"".as_slice().into()), &Collation::Binary)
+                .compare(&Value::Integer(i64::MAX)),
             Ordering::Greater
         );
         assert_eq!(
-            Value::Blob(b"".as_slice().into()).cmp(&Value::Real(f64::MAX)),
+            ValueCmp::new(&Value::Text(b"".as_slice().into()), &Collation::Binary)
+                .compare(&Value::Real(f64::MAX)),
             Ordering::Greater
         );
         assert_eq!(
-            Value::Blob(b"abcde".as_slice().into()).cmp(&Value::Text(b"abcde".as_slice().into())),
-            Ordering::Greater
-        );
-        assert_eq!(
-            Value::Blob(b"abcde".as_slice().into()).cmp(&Value::Blob(b"abcde".as_slice().into())),
+            ValueCmp::new(&Value::Text(b"".as_slice().into()), &Collation::Binary)
+                .compare(&Value::Text(b"".as_slice().into())),
             Ordering::Equal
         );
         assert_eq!(
-            Value::Blob(b"abcde".as_slice().into()).cmp(&Value::Blob(b"abcdf".as_slice().into())),
+            ValueCmp::new(&Value::Text(b"abcde".as_slice().into()), &Collation::Binary)
+                .compare(&Value::Text(b"abcde".as_slice().into())),
+            Ordering::Equal
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Text(b"abcde".as_slice().into()), &Collation::Binary)
+                .compare(&Value::Text(b"abcdf".as_slice().into())),
             Ordering::Less
         );
         assert_eq!(
-            Value::Blob(b"abcde".as_slice().into()).cmp(&Value::Blob(b"abcde0".as_slice().into())),
+            ValueCmp::new(&Value::Text(b"abcde".as_slice().into()), &Collation::Binary)
+                .compare(&Value::Text(b"abcde0".as_slice().into())),
             Ordering::Less
         );
         assert_eq!(
-            Value::Blob(b"abcde".as_slice().into()).cmp(&Value::Blob(b"abcdd".as_slice().into())),
+            ValueCmp::new(&Value::Text(b"abcde".as_slice().into()), &Collation::Binary)
+                .compare(&Value::Text(b"abcdd".as_slice().into())),
+            Ordering::Greater
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Text(b"abcde".as_slice().into()), &Collation::Binary)
+                .compare(&Value::Blob(b"abcde".as_slice().into())),
+            Ordering::Less
+        );
+        assert_eq!(
+            ValueCmp::new(
+                &Value::Text(b"abcdefghijklmnopqrstuvwxyz".as_slice().into()),
+                &Collation::Binary
+            )
+            .compare(&Value::Text(
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZ".as_slice().into()
+            )),
+            Ordering::Greater
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Text(b"abcde".as_slice().into()), &Collation::Binary)
+                .compare(&Value::Text(b"abcde   ".as_slice().into())),
+            Ordering::Less
+        );
+        assert_eq!(
+            ValueCmp::new(
+                &Value::Text(b"abcdefghijklmnopqrstuvwxyz".as_slice().into()),
+                &Collation::NoCase
+            )
+            .compare(&Value::Text(
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZ".as_slice().into()
+            )),
+            Ordering::Equal
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Text(b"abcde".as_slice().into()), &Collation::NoCase)
+                .compare(&Value::Text(b"abcde   ".as_slice().into())),
+            Ordering::Less
+        );
+        assert_eq!(
+            ValueCmp::new(
+                &Value::Text(b"abcdefghijklmnopqrstuvwxyz".as_slice().into()),
+                &Collation::RTrim
+            )
+            .compare(&Value::Text(
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZ".as_slice().into()
+            )),
+            Ordering::Greater
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Text(b"abcde".as_slice().into()), &Collation::RTrim)
+                .compare(&Value::Text(b"abcde   ".as_slice().into())),
+            Ordering::Equal
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Text(b"abcde".as_slice().into()), &Collation::Binary)
+                .compare(&Value::Blob(b"".as_slice().into())),
+            Ordering::Less
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Blob(b"".as_slice().into()), &Collation::Binary)
+                .compare(&Value::Null),
+            Ordering::Greater
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Blob(b"".as_slice().into()), &Collation::Binary)
+                .compare(&Value::Integer(i64::MAX)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Blob(b"".as_slice().into()), &Collation::Binary)
+                .compare(&Value::Real(f64::MAX)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Blob(b"abcde".as_slice().into()), &Collation::Binary)
+                .compare(&Value::Text(b"abcde".as_slice().into())),
+            Ordering::Greater
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Blob(b"abcde".as_slice().into()), &Collation::Binary)
+                .compare(&Value::Blob(b"abcde".as_slice().into())),
+            Ordering::Equal
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Blob(b"abcde".as_slice().into()), &Collation::Binary)
+                .compare(&Value::Blob(b"abcdf".as_slice().into())),
+            Ordering::Less
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Blob(b"abcde".as_slice().into()), &Collation::Binary)
+                .compare(&Value::Blob(b"abcde0".as_slice().into())),
+            Ordering::Less
+        );
+        assert_eq!(
+            ValueCmp::new(&Value::Blob(b"abcde".as_slice().into()), &Collation::Binary)
+                .compare(&Value::Blob(b"abcdd".as_slice().into())),
+            Ordering::Greater
+        );
+        // Blob does not respect the collation.
+        assert_eq!(
+            ValueCmp::new(&Value::Blob(b"abcde".as_slice().into()), &Collation::NoCase)
+                .compare(&Value::Blob(b"ABCDE".as_slice().into())),
             Ordering::Greater
         );
     }
@@ -547,15 +689,19 @@ mod tests {
         );
         assert_eq!(
             Value::Text(b"12345.6e+10".as_slice().into()).apply_numeric_affinity(),
-            Value::Real(12345.6e10)
+            Value::Integer(123456000000000)
         );
         assert_eq!(
             Value::Text(b"12345e-1".as_slice().into()).apply_numeric_affinity(),
             Value::Real(1234.5)
         );
         assert_eq!(
+            Value::Text(b"2251799813685247.0".as_slice().into()).apply_numeric_affinity(),
+            Value::Integer(2251799813685247)
+        );
+        assert_eq!(
             Value::Text(b"2251799813685248.0".as_slice().into()).apply_numeric_affinity(),
-            Value::Integer(2251799813685248)
+            Value::Real(2251799813685248.0)
         );
         assert_eq!(
             Value::Text(b"-2251799813685248.0".as_slice().into()).apply_numeric_affinity(),
@@ -691,7 +837,7 @@ mod tests {
         assert_eq!(
             Value::Text(b"12345.6e+10".as_slice().into())
                 .force_apply_type_affinity(TypeAffinity::Numeric),
-            Value::Real(12345.6e10)
+            Value::Integer(123456000000000)
         );
         assert_eq!(
             Value::Text(b"12345e-1".as_slice().into())
@@ -699,9 +845,14 @@ mod tests {
             Value::Real(1234.5)
         );
         assert_eq!(
+            Value::Text(b"2251799813685247.0".as_slice().into())
+                .force_apply_type_affinity(TypeAffinity::Numeric),
+            Value::Integer(2251799813685247)
+        );
+        assert_eq!(
             Value::Text(b"2251799813685248.0".as_slice().into())
                 .force_apply_type_affinity(TypeAffinity::Numeric),
-            Value::Integer(2251799813685248)
+            Value::Real(2251799813685248.0)
         );
         assert_eq!(
             Value::Text(b"-2251799813685248.0".as_slice().into())

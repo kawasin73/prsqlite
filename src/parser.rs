@@ -69,12 +69,41 @@ pub struct CreateTable<'a> {
     pub columns: Vec<ColumnDef<'a>>,
 }
 
+/// Constraint of a column in a table.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ColumnConstraint<'a> {
+    Collate(MaybeQuotedBytes<'a>),
+    PrinaryKey,
+}
+
+/// https://www.sqlite.org/syntax/column-constraint.html
+fn parse_column_constraint<'a>(
+    token: Token<'a>,
+    input: &'a [u8],
+) -> Result<Option<(usize, ColumnConstraint<'a>)>> {
+    match token {
+        Token::Collate => {
+            let Some((n, Token::Identifier(collation))) = next_token(input) else {
+                return Err((0, "no collation"));
+            };
+            Ok(Some((n, ColumnConstraint::Collate(collation))))
+        }
+        Token::Primary => {
+            let Some((n, Token::Key)) = next_token(input) else {
+                return Err((0, "no key after primary"));
+            };
+            Ok(Some((n, ColumnConstraint::PrinaryKey)))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Definition of a column in a table.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ColumnDef<'a> {
     pub name: MaybeQuotedBytes<'a>,
     pub type_name: Vec<MaybeQuotedBytes<'a>>,
-    pub primary_key: bool,
+    pub constraints: Vec<ColumnConstraint<'a>>,
 }
 
 /// https://www.sqlite.org/syntax/signed-number.html
@@ -185,28 +214,23 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
         let (nn, type_name) = adjust_error_cursor(parse_type_name(&input[n..]), n)?;
         n += nn;
 
-        let (mut nn, mut token) = next_token(&input[n..]).ok_or((n, "no right paren"))?;
+        let (nn, mut token) = next_token(&input[n..]).ok_or((n, "no right paren"))?;
         n += nn;
 
-        let primary_key = if token == Token::Primary {
-            match next_token(&input[n..]) {
-                Some((nn, Token::Key)) => {
-                    n += nn;
-                }
-                _ => return Err((n, "no key")),
-            }
+        let mut constraints = Vec::new();
+        while let Some((mut nn, constraint)) =
+            adjust_error_cursor(parse_column_constraint(token, &input[n..]), n)?
+        {
+            n += nn;
+            constraints.push(constraint);
             (nn, token) = next_token(&input[n..]).ok_or((n, "no right paren"))?;
             n += nn;
-
-            true
-        } else {
-            false
-        };
+        }
 
         columns.push(ColumnDef {
             name,
             type_name,
-            primary_key,
+            constraints,
         });
 
         match token {
@@ -692,32 +716,32 @@ mod tests {
                 ColumnDef {
                     name: b"id".as_slice().into(),
                     type_name: vec![b"integer".as_slice().into()],
-                    primary_key: true,
+                    constraints: vec![ColumnConstraint::PrinaryKey],
                 },
                 ColumnDef {
                     name: b"name".as_slice().into(),
                     type_name: vec![b"text".as_slice().into()],
-                    primary_key: false,
+                    constraints: vec![],
                 },
                 ColumnDef {
                     name: b"real".as_slice().into(),
                     type_name: vec![b"real".as_slice().into()],
-                    primary_key: false,
+                    constraints: vec![],
                 },
                 ColumnDef {
                     name: b"\"blob\"".as_slice().into(),
                     type_name: vec![b"blob".as_slice().into()],
-                    primary_key: false,
+                    constraints: vec![],
                 },
                 ColumnDef {
                     name: b"`empty`".as_slice().into(),
                     type_name: vec![b"null".as_slice().into()],
-                    primary_key: false,
+                    constraints: vec![],
                 },
                 ColumnDef {
                     name: b"no_type".as_slice().into(),
                     type_name: vec![],
-                    primary_key: false,
+                    constraints: vec![],
                 },
             ]
         );
@@ -757,6 +781,29 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_create_table_constraints() {
+        let input = b"create table foo (col1 type type collate binary primary key collate nocase, col2 collate rtrim, col3 collate \"RTRIM\")";
+        let (n, create_table) = parse_create_table(input).unwrap();
+        assert_eq!(n, input.len());
+        assert_eq!(
+            create_table.columns[0].constraints,
+            vec![
+                ColumnConstraint::Collate(b"binary".as_slice().into()),
+                ColumnConstraint::PrinaryKey,
+                ColumnConstraint::Collate(b"nocase".as_slice().into())
+            ]
+        );
+        assert_eq!(
+            create_table.columns[1].constraints,
+            vec![ColumnConstraint::Collate(b"rtrim".as_slice().into()),]
+        );
+        assert_eq!(
+            create_table.columns[2].constraints,
+            vec![ColumnConstraint::Collate(b"\"RTRIM\"".as_slice().into()),]
+        );
+    }
+
+    #[test]
     fn test_parse_create_table_with_extra() {
         let input = b"create table Foo (Id, Name)abc ";
         let (n, create_table) = parse_create_table(input).unwrap();
@@ -768,12 +815,12 @@ mod tests {
                 ColumnDef {
                     name: b"Id".as_slice().into(),
                     type_name: Vec::new(),
-                    primary_key: false,
+                    constraints: vec![],
                 },
                 ColumnDef {
                     name: b"Name".as_slice().into(),
                     type_name: Vec::new(),
-                    primary_key: false,
+                    constraints: vec![],
                 }
             ]
         );

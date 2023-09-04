@@ -64,18 +64,19 @@ static CHAR_LOOKUP_TABLE: [u8; 256] = [
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Token<'a> {
     // Keywords
-    Select,
     As,
-    From,
-    Where,
-    Create,
-    Table,
-    Index,
-    Primary,
-    Key,
-    On,
-    Null,
     Cast,
+    Collate,
+    Create,
+    From,
+    Index,
+    Key,
+    Null,
+    On,
+    Primary,
+    Select,
+    Table,
+    Where,
 
     // Symbols
     Space,
@@ -228,18 +229,19 @@ pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
                     lower_id[i] = UPPER_TO_LOWER[byte as usize];
                 }
                 match &lower_id {
-                    b"select\0" => Some((len, Token::Select)),
                     b"as\0\0\0\0\0" => Some((len, Token::As)),
-                    b"from\0\0\0" => Some((len, Token::From)),
-                    b"where\0\0" => Some((len, Token::Where)),
-                    b"create\0" => Some((len, Token::Create)),
-                    b"table\0\0" => Some((len, Token::Table)),
-                    b"index\0\0" => Some((len, Token::Index)),
-                    b"primary" => Some((len, Token::Primary)),
-                    b"key\0\0\0\0" => Some((len, Token::Key)),
-                    b"on\0\0\0\0\0" => Some((len, Token::On)),
-                    b"null\0\0\0" => Some((len, Token::Null)),
                     b"cast\0\0\0" => Some((len, Token::Cast)),
+                    b"collate" => Some((len, Token::Collate)),
+                    b"create\0" => Some((len, Token::Create)),
+                    b"from\0\0\0" => Some((len, Token::From)),
+                    b"index\0\0" => Some((len, Token::Index)),
+                    b"key\0\0\0\0" => Some((len, Token::Key)),
+                    b"null\0\0\0" => Some((len, Token::Null)),
+                    b"on\0\0\0\0\0" => Some((len, Token::On)),
+                    b"primary" => Some((len, Token::Primary)),
+                    b"select\0" => Some((len, Token::Select)),
+                    b"table\0\0" => Some((len, Token::Table)),
+                    b"where\0\0" => Some((len, Token::Where)),
                     _ => Some((len, Token::Identifier(id.into()))),
                 }
             } else {
@@ -670,18 +672,19 @@ mod tests {
     #[test]
     fn test_keywords() {
         for (keyword, token) in [
-            ("select", Token::Select),
             ("as", Token::As),
-            ("from", Token::From),
-            ("where", Token::Where),
-            ("create", Token::Create),
-            ("table", Token::Table),
-            ("index", Token::Index),
-            ("primary", Token::Primary),
-            ("key", Token::Key),
-            ("on", Token::On),
-            ("null", Token::Null),
             ("cast", Token::Cast),
+            ("collate", Token::Collate),
+            ("create", Token::Create),
+            ("from", Token::From),
+            ("index", Token::Index),
+            ("key", Token::Key),
+            ("null", Token::Null),
+            ("on", Token::On),
+            ("primary", Token::Primary),
+            ("select", Token::Select),
+            ("table", Token::Table),
+            ("where", Token::Where),
         ] {
             assert_eq!(get_token(keyword.as_bytes()), Some((keyword.len(), token)));
             let input = format!("{keyword} ");
