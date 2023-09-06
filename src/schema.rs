@@ -22,9 +22,11 @@ use anyhow::Context;
 pub use crate::btree::*;
 use crate::pager::PageId;
 use crate::pager::ROOT_PAGE_ID;
+use crate::parser::expect_no_more_token;
 use crate::parser::parse_create_index;
 use crate::parser::parse_create_table;
 use crate::parser::ColumnConstraint;
+use crate::parser::Parser;
 use crate::utils::upper_to_lower;
 use crate::utils::CaseInsensitiveBytes;
 use crate::utils::MaybeQuotedBytes;
@@ -246,9 +248,10 @@ impl Index {
         root_page_id: PageId,
         table: &Table,
     ) -> anyhow::Result<(Vec<u8>, MaybeQuotedBytes<'a>, Self)> {
-        let (n, create_index) = parse_create_index(sql)
+        let mut parser = Parser::new(sql);
+        let create_index = parse_create_index(&mut parser)
             .map_err(|e| anyhow::anyhow!("parse create index sql: {:?}", e))?;
-        if n != sql.len() {
+        if expect_no_more_token(&mut parser).is_err() {
             bail!(
                 "create table sql in sqlite_schema contains useless contents at the tail: {:?}",
                 sql
@@ -354,9 +357,10 @@ pub struct Table {
 
 impl Table {
     fn parse(sql: &[u8], root_page_id: PageId) -> anyhow::Result<(Vec<u8>, Self)> {
-        let (n, create_table) = parse_create_table(sql)
+        let mut parser = Parser::new(sql);
+        let create_table = parse_create_table(&mut parser)
             .map_err(|e| anyhow::anyhow!("parse create table sql: {:?}", e))?;
-        if n != sql.len() {
+        if expect_no_more_token(&mut parser).is_err() {
             bail!(
                 "create table sql in sqlite_schema contains useless contents at the tail: {:?}",
                 sql

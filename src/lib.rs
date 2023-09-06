@@ -44,6 +44,7 @@ use crate::parser::parse_select;
 use crate::parser::BinaryOp;
 use crate::parser::CompareOp;
 use crate::parser::Expr;
+use crate::parser::Parser;
 use crate::parser::ResultColumn;
 use crate::parser::UnaryOp;
 use crate::record::parse_record_header;
@@ -178,16 +179,14 @@ impl Connection {
 
     pub fn prepare<'a>(&mut self, sql: &'a str) -> Result<'a, Statement> {
         let input = sql.as_bytes();
-        let parsed_sql = match parse_select(input) {
-            Ok((n, select)) => match expect_semicolon(&input[n..]) {
-                Ok(nn) => {
-                    let n = n + nn;
-                    match expect_no_more_token(&input[n..]) {
-                        Ok(()) => Ok(select),
-                        Err((nn, msg)) => Err((n + nn, msg)),
-                    }
-                }
-                Err((nn, msg)) => Err((n + nn, msg)),
+        let mut parser = Parser::new(input);
+        let parsed_sql = match parse_select(&mut parser) {
+            Ok(select) => match expect_semicolon(&mut parser) {
+                Ok(()) => match expect_no_more_token(&mut parser) {
+                    Ok(()) => Ok(select),
+                    Err((n, msg)) => Err((n, msg)),
+                },
+                Err((n, msg)) => Err((n, msg)),
             },
             Err(e) => Err(e),
         };

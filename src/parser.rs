@@ -25,39 +25,73 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 static NULL_BYTES: &[u8] = b"null";
 
-#[inline(always)]
-fn adjust_error_cursor<T>(result: Result<T>, n: usize) -> Result<T> {
-    result.map_err(|(nn, msg)| (n + nn, msg))
+#[derive(Debug, Clone)]
+pub struct Parser<'a> {
+    input: &'a [u8],
+    cursor: usize,
+    token: Option<Token<'a>>,
+    token_size: usize,
 }
 
-/// Get next [Token] skipping spaces.
-fn next_token(input: &[u8]) -> Option<(usize, Token)> {
-    match get_token(input) {
-        Some((len_space, Token::Space)) => {
-            let (len, token) = get_token(&input[len_space..])?;
-            Some((len + len_space, token))
+impl<'a> Parser<'a> {
+    pub fn new(input: &'a [u8]) -> Self {
+        let mut parser = Self {
+            input,
+            cursor: 0,
+            token: None,
+            token_size: 0,
+        };
+        parser.next();
+        parser
+    }
+
+    /// Return the number of bytes consumed by the parser.
+    ///
+    /// This is used for testing.
+    #[allow(dead_code)]
+    pub fn n_consumed(&self) -> usize {
+        self.cursor
+    }
+
+    fn next<'b>(&'b mut self) -> Option<&'b Token<'a>> {
+        self.cursor += self.token_size;
+        if let Some((n, token)) = get_token(&self.input[self.cursor..]) {
+            self.token_size = n;
+            if token == Token::Space {
+                return self.next();
+            }
+            self.token = Some(token);
+            self.token.as_ref()
+        } else {
+            self.token_size = 0;
+            self.token = None;
+            None
         }
-        result => result,
+    }
+
+    fn peek<'b>(&'b self) -> Option<&'b Token<'a>> {
+        self.token.as_ref()
+    }
+
+    fn error(&self, msg: &'static str) -> Error {
+        (self.cursor, msg)
     }
 }
 
 /// Assert that the next token is a semicolon.
-pub fn expect_semicolon(input: &[u8]) -> Result<usize> {
-    match next_token(input) {
-        Some((n, Token::Semicolon)) => Ok(n),
-        Some((n, _)) => Err((n, "no semicolon")),
-        None => Err((0, "no semicolon")),
+pub fn expect_semicolon(p: &mut Parser) -> Result<()> {
+    match p.peek() {
+        Some(Token::Semicolon) => {}
+        _ => return Err(p.error("no semicolon")),
     }
+    p.next();
+    Ok(())
 }
 
 /// Assert that there is no token except spaces.
-pub fn expect_no_more_token(input: &[u8]) -> Result<()> {
-    match get_token(input) {
-        Some((n, Token::Space)) => match get_token(&input[n..]) {
-            Some(_) => Err((n, "unexpected token")),
-            None => Ok(()),
-        },
-        Some(_) => Err((0, "unexpected token")),
+pub fn expect_no_more_token(p: &mut Parser) -> Result<()> {
+    match p.peek() {
+        Some(_) => Err(p.error("unexpected token")),
         None => Ok(()),
     }
 }
@@ -77,22 +111,22 @@ pub enum ColumnConstraint<'a> {
 }
 
 /// https://www.sqlite.org/syntax/column-constraint.html
-fn parse_column_constraint<'a>(
-    token: Token<'a>,
-    input: &'a [u8],
-) -> Result<Option<(usize, ColumnConstraint<'a>)>> {
-    match token {
-        Token::Collate => {
-            let Some((n, Token::Identifier(collation))) = next_token(input) else {
-                return Err((0, "no collation"));
+fn parse_column_constraint<'a>(p: &mut Parser<'a>) -> Result<Option<ColumnConstraint<'a>>> {
+    match p.peek() {
+        Some(Token::Collate) => {
+            let Some(Token::Identifier(collation)) = p.next() else {
+                return Err(p.error("no collation name"));
             };
-            Ok(Some((n, ColumnConstraint::Collate(collation))))
+            let collation = *collation;
+            p.next();
+            Ok(Some(ColumnConstraint::Collate(collation)))
         }
-        Token::Primary => {
-            let Some((n, Token::Key)) = next_token(input) else {
-                return Err((0, "no key after primary"));
+        Some(Token::Primary) => {
+            let Some(Token::Key) = p.next() else {
+                return Err(p.error("no key after primary"));
             };
-            Ok(Some((n, ColumnConstraint::PrinaryKey)))
+            p.next();
+            Ok(Some(ColumnConstraint::PrinaryKey))
         }
         _ => Ok(None),
     }
@@ -107,124 +141,101 @@ pub struct ColumnDef<'a> {
 }
 
 /// https://www.sqlite.org/syntax/signed-number.html
-fn skip_signed_number(input: &[u8]) -> Result<usize> {
-    let (mut nn, mut token) = next_token(input).ok_or((0, "no signed number: first token"))?;
-    let mut n = nn;
-    if matches!(token, Token::Plus | Token::Minus) {
-        (nn, token) = next_token(&input[n..]).ok_or((n, "no signed number: number"))?;
-        n += nn;
+fn skip_signed_number(p: &mut Parser) -> Result<()> {
+    if matches!(p.peek(), Some(Token::Plus) | Some(Token::Minus)) {
+        p.next();
     }
-    if !matches!(token, Token::Integer(_) | Token::Float(_)) {
-        return Err((n, "no signed number is not numeric"));
+    if !matches!(p.peek(), Some(Token::Integer(_)) | Some(Token::Float(_))) {
+        return Err(p.error("no signed number"));
     }
-    Ok(n)
+    p.next();
+    Ok(())
 }
 
 /// https://www.sqlite.org/syntax/type-name.html
-fn parse_type_name(input: &[u8]) -> Result<(usize, Vec<MaybeQuotedBytes<'_>>)> {
+fn parse_type_name<'a>(p: &mut Parser<'a>) -> Result<Vec<MaybeQuotedBytes<'a>>> {
     // TODO: Parse type_name to type affinity without converting it to the temporary
     // Vec. Use iterator instead.
     let mut type_name = Vec::new();
 
-    let mut n = match next_token(input) {
-        Some((n, Token::Null)) => {
+    match p.peek() {
+        Some(Token::Null) => {
             type_name.push(NULL_BYTES.into());
-            n
         }
-        Some((n, Token::Identifier(id))) => {
-            type_name.push(id);
-            n
+        Some(Token::Identifier(id)) => {
+            type_name.push(*id);
         }
-        _ => return Ok((0, Vec::new())),
+        _ => return Ok(Vec::new()),
     };
 
     loop {
-        match next_token(&input[n..]) {
-            Some((nn, Token::Null)) => {
+        match p.next() {
+            Some(Token::Null) => {
                 type_name.push(NULL_BYTES.into());
-                n += nn;
             }
-            Some((nn, Token::Identifier(id))) => {
-                type_name.push(id);
-                n += nn;
+            Some(Token::Identifier(id)) => {
+                type_name.push(*id);
             }
-            Some((nn, Token::LeftParen)) => {
-                n += nn;
+            Some(Token::LeftParen) => {
+                p.next();
                 // Just check whether signed numbers are valid and move cursor without
                 // parsing the number. Signed numbers in a type name has no meanings to type
                 // affinity.
                 // https://www.sqlite.org/datatype3.html#affinity_name_examples
                 // Parse signed numbers.
-                n += skip_signed_number(&input[n..])?;
-                let (mut nn, mut token) =
-                    next_token(&input[n..]).ok_or((n, "no signed number last token"))?;
-                n += nn;
-                if token == Token::Comma {
-                    n += skip_signed_number(&input[n..])?;
-                    (nn, token) =
-                        next_token(&input[n..]).ok_or((n, "no signed number last token"))?;
-                    n += nn;
+                skip_signed_number(p)?;
+                if p.peek() == Some(&Token::Comma) {
+                    p.next();
+                    skip_signed_number(p)?;
                 }
-                if token != Token::RightParen {
-                    return Err((n, "no right paren"));
+                if p.peek() != Some(&Token::RightParen) {
+                    return Err(p.error("type name: no right paren"));
                 }
+                p.next();
                 break;
             }
             _ => break,
         };
     }
 
-    Ok((n, type_name))
+    Ok(type_name)
 }
 
 /// Parse CREATE TABLE statement.
 ///
 /// https://www.sqlite.org/lang_createtable.html
-pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
-    let mut n = 0;
-
-    let Some((nn, Token::Create)) = next_token(input) else {
-        return Err((n, "no create"));
+pub fn parse_create_table<'a>(p: &mut Parser<'a>) -> Result<CreateTable<'a>> {
+    let Some(Token::Create) = p.peek() else {
+        return Err(p.error("no create"));
     };
-    n += nn;
 
-    let Some((nn, Token::Table)) = next_token(&input[n..]) else {
-        return Err((n, "no table"));
+    let Some(Token::Table) = p.next() else {
+        return Err(p.error("no table"));
     };
-    n += nn;
 
-    let Some((nn, Token::Identifier(table_name))) = next_token(&input[n..]) else {
-        return Err((n, "no table_name"));
+    let Some(Token::Identifier(table_name)) = p.next() else {
+        return Err(p.error("no table_name"));
     };
-    n += nn;
+    let table_name = *table_name;
 
-    let Some((nn, Token::LeftParen)) = next_token(&input[n..]) else {
-        return Err((n, "no left paren"));
+    let Some(Token::LeftParen) = p.next() else {
+        return Err(p.error("no left paren"));
     };
-    n += nn;
 
     let mut columns = Vec::new();
     loop {
         // Parse ColumnDef.
-        let Some((nn, Token::Identifier(name))) = next_token(&input[n..]) else {
-            return Err((n, "no column name"));
+        let Some(Token::Identifier(name)) = p.next() else {
+            return Err(p.error("no column name"));
         };
-        n += nn;
+        let name = *name;
+        p.next();
 
-        let (nn, type_name) = adjust_error_cursor(parse_type_name(&input[n..]), n)?;
-        n += nn;
-
-        let (nn, mut token) = next_token(&input[n..]).ok_or((n, "no right paren"))?;
-        n += nn;
+        let type_name = parse_type_name(p)?;
 
         let mut constraints = Vec::new();
-        while let Some((mut nn, constraint)) =
-            adjust_error_cursor(parse_column_constraint(token, &input[n..]), n)?
-        {
-            n += nn;
+        while let Some(constraint) = parse_column_constraint(p)? {
             constraints.push(constraint);
-            (nn, token) = next_token(&input[n..]).ok_or((n, "no right paren"))?;
-            n += nn;
         }
 
         columns.push(ColumnDef {
@@ -233,20 +244,19 @@ pub fn parse_create_table(input: &[u8]) -> Result<(usize, CreateTable)> {
             constraints,
         });
 
-        match token {
-            Token::Comma => continue,
-            Token::RightParen => break,
-            _ => return Err((n, "no right paren")),
+        // Parser contains a peekable token after parse_column_constraint().
+        match p.peek() {
+            Some(Token::Comma) => continue,
+            Some(Token::RightParen) => break,
+            _ => return Err(p.error("no right paren")),
         }
     }
+    p.next();
 
-    Ok((
-        n,
-        CreateTable {
-            table_name,
-            columns,
-        },
-    ))
+    Ok(CreateTable {
+        table_name,
+        columns,
+    })
 }
 
 /// CREATE INDEX statement.
@@ -266,66 +276,55 @@ pub struct IndexedColumn<'a> {
 /// Parse CREATE INDEX statement.
 ///
 /// https://www.sqlite.org/lang_createindex.html
-pub fn parse_create_index(input: &[u8]) -> Result<(usize, CreateIndex)> {
-    let mut n = 0;
-
-    let Some((nn, Token::Create)) = next_token(input) else {
-        return Err((n, "no create"));
+pub fn parse_create_index<'a>(p: &mut Parser<'a>) -> Result<CreateIndex<'a>> {
+    let Some(Token::Create) = p.peek() else {
+        return Err(p.error("no create"));
     };
-    n += nn;
 
-    let Some((nn, Token::Index)) = next_token(&input[n..]) else {
-        return Err((n, "no index"));
+    let Some(Token::Index) = p.next() else {
+        return Err(p.error("no index"));
     };
-    n += nn;
 
-    let Some((nn, Token::Identifier(index_name))) = next_token(&input[n..]) else {
-        return Err((n, "no index_name"));
+    let Some(Token::Identifier(index_name)) = p.next() else {
+        return Err(p.error("no index_name"));
     };
-    n += nn;
+    let index_name = *index_name;
 
-    let Some((nn, Token::On)) = next_token(&input[n..]) else {
-        return Err((n, "no on"));
+    let Some(Token::On) = p.next() else {
+        return Err(p.error("no on"));
     };
-    n += nn;
 
-    let Some((nn, Token::Identifier(table_name))) = next_token(&input[n..]) else {
-        return Err((n, "no table_name"));
+    let Some(Token::Identifier(table_name)) = p.next() else {
+        return Err(p.error("no table_name"));
     };
-    n += nn;
+    let table_name = *table_name;
 
-    let Some((nn, Token::LeftParen)) = next_token(&input[n..]) else {
-        return Err((n, "no left paren"));
+    let Some(Token::LeftParen) = p.next() else {
+        return Err(p.error("no left paren"));
     };
-    n += nn;
 
     let mut columns = Vec::new();
     loop {
-        let Some((nn, Token::Identifier(name))) = next_token(&input[n..]) else {
-            return Err((n, "no column name"));
+        let Some(Token::Identifier(name)) = p.next() else {
+            return Err(p.error("no column name"));
         };
-        n += nn;
-
-        let (nn, token) = next_token(&input[n..]).ok_or((n, "no right paren"))?;
-        n += nn;
+        let name = *name;
 
         columns.push(IndexedColumn { name });
 
-        match token {
-            Token::Comma => continue,
-            Token::RightParen => break,
-            _ => return Err((n, "no right paren")),
+        match p.next() {
+            Some(Token::Comma) => continue,
+            Some(Token::RightParen) => break,
+            _ => return Err(p.error("no right paren")),
         }
     }
+    p.next();
 
-    Ok((
-        n,
-        CreateIndex {
-            index_name,
-            table_name,
-            columns,
-        },
-    ))
+    Ok(CreateIndex {
+        index_name,
+        table_name,
+        columns,
+    })
 }
 
 #[derive(Debug)]
@@ -338,54 +337,46 @@ pub struct Select<'a> {
 // Parse SELECT statement.
 //
 // https://www.sqlite.org/lang_select.html
-pub fn parse_select(input: &[u8]) -> Result<(usize, Select)> {
-    let mut n = 0;
-
-    let Some((nn, Token::Select)) = next_token(input) else {
-        return Err((n, "no select"));
+pub fn parse_select<'a>(p: &mut Parser<'a>) -> Result<Select<'a>> {
+    let Some(Token::Select) = p.peek() else {
+        return Err(p.error("no select"));
     };
-    n += nn;
+    p.next();
 
-    let (nn, result_column) = adjust_error_cursor(parse_result_column(&input[n..]), n)?;
-    n += nn;
+    let result_column = parse_result_column(p)?;
+
     let mut columns = vec![result_column];
     loop {
-        match next_token(&input[n..]) {
-            Some((nn, Token::Comma)) => {
-                n += nn;
-                let (nn, result_column) = adjust_error_cursor(parse_result_column(&input[n..]), n)?;
-                n += nn;
+        match p.peek() {
+            Some(Token::Comma) => {
+                p.next();
+                let result_column = parse_result_column(p)?;
                 columns.push(result_column);
             }
-            Some((nn, Token::From)) => {
-                n += nn;
+            Some(Token::From) => {
                 break;
             }
-            _ => return Err((n, "no from")),
+            _ => return Err(p.error("no from")),
         }
     }
-    let Some((nn, Token::Identifier(table_name))) = next_token(&input[n..]) else {
-        return Err((n, "no table_name"));
+    let Some(Token::Identifier(table_name)) = p.next() else {
+        return Err(p.error("no table_name"));
     };
-    n += nn;
+    let table_name = *table_name;
 
-    let filter = if let Some((nn, Token::Where)) = next_token(&input[n..]) {
-        n += nn;
-        let (nn, expr) = adjust_error_cursor(parse_expr(&input[n..]), n)?;
-        n += nn;
+    let filter = if let Some(Token::Where) = p.next() {
+        p.next();
+        let expr = parse_expr(p)?;
         Some(expr)
     } else {
         None
     };
 
-    Ok((
-        n,
-        Select {
-            table_name,
-            columns,
-            filter,
-        },
-    ))
+    Ok(Select {
+        table_name,
+        columns,
+        filter,
+    })
 }
 
 #[derive(Debug, PartialEq)]
@@ -398,31 +389,43 @@ pub enum ResultColumn<'a> {
 /// Parse result column.
 ///
 /// https://www.sqlite.org/syntax/result-column.html
-fn parse_result_column(input: &[u8]) -> Result<(usize, ResultColumn)> {
-    match next_token(input) {
-        Some((n, Token::Identifier(table_name))) => {
-            if let Some((nn, Token::Dot)) = next_token(&input[n..]) {
-                if let Some((nnn, Token::Asterisk)) = next_token(&input[n + nn..]) {
-                    return Ok((n + nn + nnn, ResultColumn::AllOfTable(table_name)));
-                }
+fn parse_result_column<'a>(p: &mut Parser<'a>) -> Result<ResultColumn<'a>> {
+    match p.peek() {
+        Some(Token::Identifier(table_name)) => {
+            let table_name = *table_name;
+            let mut cloned_parser = p.clone();
+            if Some(&Token::Dot) == cloned_parser.next()
+                && Some(&Token::Asterisk) == cloned_parser.next()
+            {
+                cloned_parser.next();
+                *p = cloned_parser;
+                return Ok(ResultColumn::AllOfTable(table_name));
             }
+            // Maybe schema_name.table_name.column_name. Fallback to expr
+            // parsing.
         }
-        Some((n, Token::Asterisk)) => return Ok((n, ResultColumn::All)),
+        Some(Token::Asterisk) => {
+            p.next();
+            return Ok(ResultColumn::All);
+        }
         _ => {}
     }
-    let (n, expr) = parse_expr(input)?;
-    match next_token(&input[n..]) {
-        Some((nn, Token::Identifier(alias))) => {
-            Ok((n + nn, ResultColumn::Expr((expr, Some(alias)))))
+    let expr = parse_expr(p)?;
+    match p.peek() {
+        Some(Token::Identifier(alias)) => {
+            let alias = *alias;
+            p.next();
+            Ok(ResultColumn::Expr((expr, Some(alias))))
         }
-        Some((nn, Token::As)) => {
-            let n = n + nn;
-            let Some((nn, Token::Identifier(alias))) = next_token(&input[n..]) else {
-                return Err((n, "no alias"));
+        Some(Token::As) => {
+            let Some(Token::Identifier(alias)) = p.next() else {
+                return Err(p.error("no alias"));
             };
-            Ok((n + nn, ResultColumn::Expr((expr, Some(alias)))))
+            let alias = *alias;
+            p.next();
+            Ok(ResultColumn::Expr((expr, Some(alias))))
         }
-        _ => Ok((n, ResultColumn::Expr((expr, None)))),
+        _ => Ok(ResultColumn::Expr((expr, None))),
     }
 }
 
@@ -485,269 +488,242 @@ pub enum Expr<'a> {
 /// Parse expression.
 ///
 /// https://www.sqlite.org/syntax/expr.html
-fn parse_expr(input: &[u8]) -> Result<(usize, Expr)> {
-    let Some((n, token)) = next_token(input) else {
-        return Err((0, "no expr"));
-    };
-    let (nn, expr) = adjust_error_cursor(parse_expr_eq(token, &input[n..]), n)?;
-    Ok((n + nn, expr))
+fn parse_expr<'a>(p: &mut Parser<'a>) -> Result<Expr<'a>> {
+    parse_expr_eq(p)
 }
 
-fn parse_expr_eq<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'a>)> {
-    let (mut n, mut expr) = parse_expr_compare(token, input)?;
+fn parse_expr_eq<'a>(p: &mut Parser<'a>) -> Result<Expr<'a>> {
+    let mut expr = parse_expr_compare(p)?;
     loop {
-        let (nn, operator) = match next_token(&input[n..]) {
-            Some((n, Token::Eq)) => (n, BinaryOp::Compare(CompareOp::Eq)),
-            Some((n, Token::Ne)) => (n, BinaryOp::Compare(CompareOp::Ne)),
+        let operator = match p.peek() {
+            Some(Token::Eq) => BinaryOp::Compare(CompareOp::Eq),
+            Some(Token::Ne) => BinaryOp::Compare(CompareOp::Ne),
             _ => break,
         };
-        n += nn;
-        let Some((nn, token)) = next_token(&input[n..]) else {
-            return Err((n, "no expr after eq/ne"));
-        };
-        n += nn;
-        let (nn, right) = adjust_error_cursor(parse_expr_compare(token, &input[n..]), n)?;
-        n += nn;
+        p.next();
+        let right = parse_expr_compare(p)?;
         expr = Expr::BinaryOperator {
             operator,
             left: Box::new(expr),
             right: Box::new(right),
         };
     }
-    Ok((n, expr))
+    Ok(expr)
 }
 
-fn parse_expr_compare<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'a>)> {
-    let (mut n, mut expr) = parse_expr_concat(token, input)?;
+fn parse_expr_compare<'a>(p: &mut Parser<'a>) -> Result<Expr<'a>> {
+    let mut expr = parse_expr_concat(p)?;
     loop {
-        let (nn, operator) = match next_token(&input[n..]) {
-            Some((n, Token::Gt)) => (n, BinaryOp::Compare(CompareOp::Gt)),
-            Some((n, Token::Ge)) => (n, BinaryOp::Compare(CompareOp::Ge)),
-            Some((n, Token::Lt)) => (n, BinaryOp::Compare(CompareOp::Lt)),
-            Some((n, Token::Le)) => (n, BinaryOp::Compare(CompareOp::Le)),
+        let operator = match p.peek() {
+            Some(Token::Gt) => BinaryOp::Compare(CompareOp::Gt),
+            Some(Token::Ge) => BinaryOp::Compare(CompareOp::Ge),
+            Some(Token::Lt) => BinaryOp::Compare(CompareOp::Lt),
+            Some(Token::Le) => BinaryOp::Compare(CompareOp::Le),
             _ => break,
         };
-        n += nn;
-        let Some((nn, token)) = next_token(&input[n..]) else {
-            return Err((n, "no expr after compare"));
-        };
-        n += nn;
-        let (nn, right) = adjust_error_cursor(parse_expr_concat(token, &input[n..]), n)?;
-        n += nn;
+        p.next();
+        let right = parse_expr_concat(p)?;
         expr = Expr::BinaryOperator {
             operator,
             left: Box::new(expr),
             right: Box::new(right),
         };
     }
-    Ok((n, expr))
+    Ok(expr)
 }
 
-fn parse_expr_concat<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'a>)> {
-    let (mut n, mut expr) = parse_expr_collate(token, input)?;
+fn parse_expr_concat<'a>(p: &mut Parser<'a>) -> Result<Expr<'a>> {
+    let mut expr = parse_expr_collate(p)?;
     // TODO: -> ->> will be added in the future.
     #[allow(clippy::while_let_loop)]
     loop {
-        let (nn, operator) = match next_token(&input[n..]) {
-            Some((n, Token::Concat)) => (n, BinaryOp::Concat),
+        let operator = match p.peek() {
+            Some(Token::Concat) => BinaryOp::Concat,
             _ => break,
         };
-        n += nn;
-        let Some((nn, token)) = next_token(&input[n..]) else {
-            return Err((n, "no expr after concat"));
-        };
-        n += nn;
-        let (nn, right) = adjust_error_cursor(parse_expr_collate(token, &input[n..]), n)?;
-        n += nn;
+        p.next();
+        let right = parse_expr_collate(p)?;
         expr = Expr::BinaryOperator {
             operator,
             left: Box::new(expr),
             right: Box::new(right),
         };
     }
-    Ok((n, expr))
+    Ok(expr)
 }
 
-fn parse_expr_collate<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'a>)> {
-    let (mut n, expr) = parse_expr_unary(token, input)?;
+fn parse_expr_collate<'a>(p: &mut Parser<'a>) -> Result<Expr<'a>> {
+    let expr = parse_expr_unary(p)?;
     let mut collation = None;
-    while let Some((nn, Token::Collate)) = next_token(&input[n..]) {
-        n += nn;
-        let Some((nn, Token::Identifier(collation_name))) = next_token(&input[n..]) else {
-            return Err((n, "no collation name"));
+    while let Some(Token::Collate) = p.peek() {
+        let Some(Token::Identifier(collation_name)) = p.next() else {
+            return Err(p.error("no collation name"));
         };
-        n += nn;
-        collation = Some(collation_name);
+        collation = Some(*collation_name);
+        p.next();
     }
     if let Some(collation_name) = collation {
-        Ok((
-            n,
-            Expr::Collate {
-                expr: Box::new(expr),
-                collation_name,
-            },
-        ))
+        Ok(Expr::Collate {
+            expr: Box::new(expr),
+            collation_name,
+        })
     } else {
-        Ok((n, expr))
+        Ok(expr)
     }
 }
 
-fn parse_expr_unary<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'a>)> {
-    match token {
-        Token::Tilda => {
-            let Some((n, token)) = next_token(input) else {
-                return Err((0, "no expr after ~"));
-            };
-            let (nn, expr) = adjust_error_cursor(parse_expr_unary(token, &input[n..]), n)?;
-            Ok((
-                n + nn,
-                Expr::UnaryOperator {
-                    operator: UnaryOp::BitNot,
-                    expr: Box::new(expr),
-                },
-            ))
+fn parse_expr_unary<'a>(p: &mut Parser<'a>) -> Result<Expr<'a>> {
+    match p.peek() {
+        Some(Token::Tilda) => {
+            p.next();
+            let expr = parse_expr_unary(p)?;
+            Ok(Expr::UnaryOperator {
+                operator: UnaryOp::BitNot,
+                expr: Box::new(expr),
+            })
         }
-        Token::Plus => {
-            let Some((n, token)) = next_token(input) else {
-                return Err((0, "no expr after +"));
-            };
+        Some(Token::Plus) => {
+            p.next();
             // Unary operator + is a no-op.
-            let (nn, expr) = adjust_error_cursor(parse_expr_unary(token, &input[n..]), n)?;
-            Ok((n + nn, expr))
+            let expr = parse_expr_unary(p)?;
+            Ok(expr)
         }
-        Token::Minus => match next_token(input) {
-            Some((n, Token::Integer(buf))) => {
+        Some(Token::Minus) => match p.next() {
+            Some(Token::Integer(buf)) => {
                 let (valid, parsed_int) = parse_integer(buf);
                 assert!(valid);
-                match parsed_int {
-                    ParseIntegerResult::Integer(v) => Ok((n, Expr::Integer(-v))),
-                    ParseIntegerResult::MaxPlusOne => Ok((n, Expr::Integer(i64::MIN))),
+                let expr = match parsed_int {
+                    ParseIntegerResult::Integer(v) => Expr::Integer(-v),
+                    ParseIntegerResult::MaxPlusOne => Expr::Integer(i64::MIN),
                     ParseIntegerResult::TooBig(_) => {
                         let (valid, pure_integer, d) = parse_float(buf);
                         assert!(valid);
                         assert!(pure_integer);
-                        Ok((n, Expr::Real(-d)))
+                        Expr::Real(-d)
                     }
                     ParseIntegerResult::Empty => {
                         unreachable!("token integer must contain at least 1 digits only")
                     }
-                }
+                };
+                p.next();
+                Ok(expr)
             }
-            Some((n, Token::Float(buf))) => {
+            Some(Token::Float(buf)) => {
                 let (valid, pure_integer, d) = parse_float(buf);
                 assert!(valid);
                 assert!(!pure_integer);
-                Ok((n, Expr::Real(-d)))
+                p.next();
+                Ok(Expr::Real(-d))
             }
-            Some((n, token)) => {
-                let (nn, expr) = adjust_error_cursor(parse_expr_unary(token, &input[n..]), n)?;
-                Ok((
-                    n + nn,
-                    Expr::UnaryOperator {
-                        operator: UnaryOp::Minus,
-                        expr: Box::new(expr),
-                    },
-                ))
+            _ => {
+                let expr = parse_expr_unary(p)?;
+                Ok(Expr::UnaryOperator {
+                    operator: UnaryOp::Minus,
+                    expr: Box::new(expr),
+                })
             }
-            _ => Err((0, "no expr after -")),
         },
-        _ => parse_expr_primitive(token, input),
+        _ => parse_expr_primitive(p),
     }
 }
 
-fn parse_expr_primitive<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'a>)> {
-    match token {
-        Token::Identifier(id) => Ok((0, Expr::Column(id))),
-        Token::Cast => {
-            let Some((mut n, Token::LeftParen)) = next_token(input) else {
-                return Err((0, "no cast left paren"));
+fn parse_expr_primitive<'a>(p: &mut Parser<'a>) -> Result<Expr<'a>> {
+    let expr = match p.peek() {
+        Some(Token::Identifier(id)) => Expr::Column(*id),
+        Some(Token::Cast) => {
+            let Some(Token::LeftParen) = p.next() else {
+                return Err(p.error("no cast left paren"));
+            };
+            p.next();
+
+            let expr = parse_expr(p)?;
+
+            let Some(Token::As) = p.peek() else {
+                return Err(p.error("no cast as"));
+            };
+            p.next();
+
+            let type_name = parse_type_name(p)?;
+
+            let Some(Token::RightParen) = p.peek() else {
+                return Err(p.error("no cast right paren"));
             };
 
-            let (nn, expr) = adjust_error_cursor(parse_expr(&input[n..]), n)?;
-            n += nn;
-
-            let Some((nn, Token::As)) = next_token(&input[n..]) else {
-                return Err((n, "no cast as"));
-            };
-            n += nn;
-
-            let (nn, type_name) = adjust_error_cursor(parse_type_name(&input[n..]), n)?;
-            n += nn;
-
-            let Some((nn, Token::RightParen)) = next_token(&input[n..]) else {
-                return Err((n, "no cast right paren"));
-            };
-            n += nn;
-
-            Ok((
-                n,
-                Expr::Cast {
-                    expr: Box::new(expr),
-                    type_name,
-                },
-            ))
+            Expr::Cast {
+                expr: Box::new(expr),
+                type_name,
+            }
         }
-        Token::Null => Ok((0, Expr::Null)),
-        Token::Integer(buf) => {
+        Some(Token::Null) => Expr::Null,
+        Some(Token::Integer(buf)) => {
             let (valid, parsed_int) = parse_integer(buf);
             assert!(valid);
             match parsed_int {
-                ParseIntegerResult::Integer(v) => Ok((0, Expr::Integer(v))),
+                ParseIntegerResult::Integer(v) => Expr::Integer(v),
                 ParseIntegerResult::MaxPlusOne | ParseIntegerResult::TooBig(_) => {
                     let (valid, pure_integer, d) = parse_float(buf);
                     assert!(valid);
                     assert!(pure_integer);
-                    Ok((0, Expr::Real(d)))
+                    Expr::Real(d)
                 }
                 ParseIntegerResult::Empty => {
                     unreachable!("token integer must contain at least 1 digits only")
                 }
             }
         }
-        Token::Float(buf) => {
+        Some(Token::Float(buf)) => {
             let (valid, pure_integer, d) = parse_float(buf);
             assert!(valid);
             assert!(!pure_integer);
-            Ok((0, Expr::Real(d)))
+            Expr::Real(d)
         }
-        Token::String(text) => Ok((0, Expr::Text(text))),
-        Token::Blob(hex) => Ok((0, Expr::Blob(hex))),
-        _ => Err((0, "no expr")),
-    }
+        Some(Token::String(text)) => Expr::Text(*text),
+        Some(Token::Blob(hex)) => Expr::Blob(*hex),
+        _ => return Err(p.error("no expr")),
+    };
+    p.next();
+
+    Ok(expr)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_next_token() {
-        assert_eq!(next_token(b"(  "), Some((1, Token::LeftParen)));
-        assert_eq!(next_token(b"   (  "), Some((4, Token::LeftParen)));
-        assert_eq!(next_token(b"     "), None);
-        assert_eq!(next_token(b""), None);
+    macro_rules! assert_parser {
+        ($parse_fn:ident, $input:expr, $size:expr, $expected:expr) => {
+            let mut parser = Parser::new($input);
+            let r = $parse_fn(&mut parser);
+            assert!(r.is_ok());
+            assert_eq!(r.unwrap(), $expected);
+            assert_eq!(parser.n_consumed(), $size);
+        };
     }
 
     #[test]
     fn test_expect_semicolon() {
-        assert_eq!(expect_semicolon(b";  "), Ok(1));
-        assert_eq!(expect_semicolon(b"   ;  "), Ok(4));
+        assert_parser!(expect_semicolon, b";  ", 3, ());
+        assert_parser!(expect_semicolon, b";  a  ", 3, ());
+        assert_parser!(expect_semicolon, b"   ;  ", 6, ());
 
-        let r = expect_semicolon(b"     ");
+        let mut parser = Parser::new(b"     ");
+        let r = expect_semicolon(&mut parser);
         assert!(r.is_err());
-        assert_eq!(r.unwrap_err().0, 0);
+        assert_eq!(r.unwrap_err().0, 5);
 
-        let r = expect_semicolon(b"");
+        let mut parser = Parser::new(b"");
+        let r = expect_semicolon(&mut parser);
         assert!(r.is_err());
         assert_eq!(r.unwrap_err().0, 0);
     }
 
     #[test]
     fn test_expect_no_more_token() {
-        assert!(expect_no_more_token(b"").is_ok());
-        assert!(expect_no_more_token(b"    ").is_ok());
+        assert_parser!(expect_no_more_token, b"", 0, ());
+        assert_parser!(expect_no_more_token, b"    ", 4, ());
 
-        let r = expect_no_more_token(b"    ;  ");
+        let mut parser = Parser::new(b"    ;  ");
+        let r = expect_no_more_token(&mut parser);
         assert!(r.is_err());
         assert_eq!(r.unwrap_err().0, 4);
     }
@@ -755,8 +731,9 @@ mod tests {
     #[test]
     fn test_parse_create_table() {
         let input = b"create table foo (id integer primary key, name text, real real, \"blob\" blob, `empty` null,[no_type])";
-        let (n, create_table) = parse_create_table(input).unwrap();
-        assert_eq!(n, input.len());
+        let mut parser = Parser::new(input);
+        let create_table = parse_create_table(&mut parser).unwrap();
+        assert_eq!(parser.n_consumed(), input.len());
         assert_eq!(create_table.table_name, b"foo".as_slice().into());
         assert_eq!(
             create_table.columns,
@@ -798,8 +775,9 @@ mod tests {
     #[test]
     fn test_parse_create_table_type_name() {
         let input = b"create table foo (col1 type type primary key, col2 Varint(10), col3 [Float](+10), col4 \"test\"(-10.0), col5 null(0), col6 `blob```(1,+2))";
-        let (n, create_table) = parse_create_table(input).unwrap();
-        assert_eq!(n, input.len());
+        let mut parser = Parser::new(input);
+        let create_table = parse_create_table(&mut parser).unwrap();
+        assert_eq!(parser.n_consumed(), input.len());
         assert_eq!(create_table.table_name, b"foo".as_slice().into());
         assert_eq!(create_table.columns.len(), 6);
         assert_eq!(
@@ -831,8 +809,9 @@ mod tests {
     #[test]
     fn test_parse_create_table_constraints() {
         let input = b"create table foo (col1 type type collate binary primary key collate nocase, col2 collate rtrim, col3 collate \"RTRIM\")";
-        let (n, create_table) = parse_create_table(input).unwrap();
-        assert_eq!(n, input.len());
+        let mut parser = Parser::new(input);
+        let create_table = parse_create_table(&mut parser).unwrap();
+        assert_eq!(parser.n_consumed(), input.len());
         assert_eq!(
             create_table.columns[0].constraints,
             vec![
@@ -854,8 +833,9 @@ mod tests {
     #[test]
     fn test_parse_create_table_with_extra() {
         let input = b"create table Foo (Id, Name)abc ";
-        let (n, create_table) = parse_create_table(input).unwrap();
-        assert_eq!(n, input.len() - 4);
+        let mut parser = Parser::new(input);
+        let create_table = parse_create_table(&mut parser).unwrap();
+        assert_eq!(parser.n_consumed(), input.len() - 4);
         assert_eq!(create_table.table_name, b"Foo".as_slice().into());
         assert_eq!(
             create_table.columns,
@@ -877,28 +857,29 @@ mod tests {
     #[test]
     fn test_parse_create_table_fail() {
         // no column def.
-        let r = parse_create_table(b"create table foo ()");
+        let r = parse_create_table(&mut Parser::new(b"create table foo ()"));
         assert!(r.is_err());
         assert_eq!(r.unwrap_err().0, 18);
         // no right paren.
-        let r = parse_create_table(b"create table foo (id, name ");
+        let r = parse_create_table(&mut Parser::new(b"create table foo (id, name "));
         assert!(r.is_err());
-        assert_eq!(r.unwrap_err().0, 26);
+        assert_eq!(r.unwrap_err().0, 27);
         // primary without key.
-        let r = parse_create_table(b"create table foo (id primary, name)");
+        let r = parse_create_table(&mut Parser::new(b"create table foo (id primary, name)"));
         assert!(r.is_err());
         assert_eq!(r.unwrap_err().0, 28);
         // key without primary.
-        let r = parse_create_table(b"create table foo (id key, name)");
+        let r = parse_create_table(&mut Parser::new(b"create table foo (id key, name)"));
         assert!(r.is_err());
-        assert_eq!(r.unwrap_err().0, 24);
+        assert_eq!(r.unwrap_err().0, 21);
     }
 
     #[test]
     fn test_parse_create_index() {
         let input = b"create index foo on bar (col1, col2,col3)";
-        let (n, create_index) = parse_create_index(input).unwrap();
-        assert_eq!(n, input.len());
+        let mut parser = Parser::new(input);
+        let create_index = parse_create_index(&mut parser).unwrap();
+        assert_eq!(parser.n_consumed(), input.len());
         assert_eq!(create_index.index_name, b"foo".as_slice().into());
         assert_eq!(create_index.table_name, b"bar".as_slice().into());
         assert_eq!(
@@ -920,8 +901,9 @@ mod tests {
     #[test]
     fn test_parse_create_index_with_extra() {
         let input = b"create index fOo on bAR (Col1,cOL2)abc ";
-        let (n, create_index) = parse_create_index(input).unwrap();
-        assert_eq!(n, input.len() - 4);
+        let mut parser = Parser::new(input);
+        let create_index = parse_create_index(&mut parser).unwrap();
+        assert_eq!(parser.n_consumed(), input.len() - 4);
         assert_eq!(create_index.index_name, b"fOo".as_slice().into());
         assert_eq!(create_index.table_name, b"bAR".as_slice().into());
         assert_eq!(
@@ -940,16 +922,17 @@ mod tests {
     #[test]
     fn test_parse_create_index_fail() {
         // no right paren.
-        let r = parse_create_index(b"create index foo on bar (id, name ");
+        let r = parse_create_index(&mut Parser::new(b"create index foo on bar (id, name "));
         assert!(r.is_err());
-        assert_eq!(r.unwrap_err().0, 33);
+        assert_eq!(r.unwrap_err().0, 34);
     }
 
     #[test]
     fn test_parse_select_all() {
         let input = b"select * from foo";
-        let (n, select) = parse_select(input).unwrap();
-        assert_eq!(n, input.len());
+        let mut parser = Parser::new(input);
+        let select = parse_select(&mut parser).unwrap();
+        assert_eq!(parser.n_consumed(), input.len());
         assert_eq!(select.table_name, b"foo".as_slice().into());
         assert_eq!(select.columns, vec![ResultColumn::All]);
     }
@@ -957,8 +940,9 @@ mod tests {
     #[test]
     fn test_parse_select_columns() {
         let input = b"select id,name,*,col as col2, col3 col4, 10, 'text' as col5, col = 11, col2 < col3 as col6 from foo";
-        let (n, select) = parse_select(input).unwrap();
-        assert_eq!(n, input.len());
+        let mut parser = Parser::new(input);
+        let select = parse_select(&mut parser).unwrap();
+        assert_eq!(parser.n_consumed(), input.len());
         assert_eq!(select.table_name, b"foo".as_slice().into());
         assert_eq!(
             select.columns,
@@ -1002,8 +986,9 @@ mod tests {
     #[test]
     fn test_parse_select_table_all() {
         let input = b"select bar.* from foo";
-        let (n, select) = parse_select(input).unwrap();
-        assert_eq!(n, input.len());
+        let mut parser = Parser::new(input);
+        let select = parse_select(&mut parser).unwrap();
+        assert_eq!(parser.n_consumed(), input.len());
         assert_eq!(select.table_name, b"foo".as_slice().into());
         assert_eq!(
             select.columns,
@@ -1014,8 +999,9 @@ mod tests {
     #[test]
     fn test_parse_select_where() {
         let input = b"select * from foo where id = 5";
-        let (n, select) = parse_select(input).unwrap();
-        assert_eq!(n, input.len());
+        let mut parser = Parser::new(input);
+        let select = parse_select(&mut parser).unwrap();
+        assert_eq!(parser.n_consumed(), input.len());
         assert_eq!(select.table_name, b"foo".as_slice().into());
         assert_eq!(select.columns, vec![ResultColumn::All,]);
         assert!(select.filter.is_some());
@@ -1032,506 +1018,515 @@ mod tests {
     #[test]
     fn test_parse_select_fail() {
         // no expr after comma.
-        let r = parse_select(b"select col, from foo");
+        let r = parse_select(&mut Parser::new(b"select col, from foo"));
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().0, 12);
+        // no table name.
+        let r = parse_select(&mut Parser::new(b"select col from ;"));
         assert!(r.is_err());
         assert_eq!(r.unwrap_err().0, 16);
-        // no table name.
-        let r = parse_select(b"select col from ");
-        assert!(r.is_err());
-        assert_eq!(r.unwrap_err().0, 15);
     }
 
     #[test]
     fn test_parse_expr_literal_value() {
         // Parse null
-        assert_eq!(parse_expr(b"null").unwrap(), (4, Expr::Null));
+        assert_parser!(parse_expr, b"null", 4, Expr::Null);
 
         // Parse integer
-        assert_eq!(
-            parse_expr(b"123456789a").unwrap(),
-            (9, Expr::Integer(123456789))
+        assert_parser!(parse_expr, b"123456789a", 9, Expr::Integer(123456789));
+        assert_parser!(parse_expr, b"00123456789a", 11, Expr::Integer(123456789));
+        assert_parser!(parse_expr, b"00000000000000000001a", 20, Expr::Integer(1));
+        assert_parser!(
+            parse_expr,
+            b"9223372036854775807",
+            19,
+            Expr::Integer(9223372036854775807)
         );
-        assert_eq!(
-            parse_expr(b"00123456789a").unwrap(),
-            (11, Expr::Integer(123456789))
-        );
-        assert_eq!(
-            parse_expr(b"00000000000000000001a").unwrap(),
-            (20, Expr::Integer(1))
-        );
-        assert_eq!(
-            parse_expr(b"9223372036854775807").unwrap(),
-            (19, Expr::Integer(9223372036854775807))
-        );
-        assert_eq!(
-            parse_expr(b"000000000000000000009223372036854775807").unwrap(),
-            (39, Expr::Integer(9223372036854775807))
+        assert_parser!(
+            parse_expr,
+            b"000000000000000000009223372036854775807",
+            39,
+            Expr::Integer(9223372036854775807)
         );
         // integer -> float fallback
-        assert_eq!(
-            parse_expr(b"9223372036854775808").unwrap(),
-            (19, Expr::Real(9223372036854775808.0))
+        assert_parser!(
+            parse_expr,
+            b"9223372036854775808",
+            19,
+            Expr::Real(9223372036854775808.0)
         );
-        assert_eq!(
-            parse_expr(b"9999999999999999999").unwrap(),
-            (19, Expr::Real(9999999999999999999.0))
+        assert_parser!(
+            parse_expr,
+            b"9999999999999999999",
+            19,
+            Expr::Real(9999999999999999999.0)
         );
-        assert_eq!(
-            parse_expr(b"99999999999999999999a").unwrap(),
-            (20, Expr::Real(99999999999999999999.0))
+        assert_parser!(
+            parse_expr,
+            b"99999999999999999999a",
+            20,
+            Expr::Real(99999999999999999999.0)
         );
 
         // Parse float
-        assert_eq!(parse_expr(b".1").unwrap(), (2, Expr::Real(0.1)));
-        assert_eq!(parse_expr(b"1.").unwrap(), (2, Expr::Real(1.0)));
-        assert_eq!(parse_expr(b"1.01").unwrap(), (4, Expr::Real(1.01)));
-        assert_eq!(parse_expr(b"1e1").unwrap(), (3, Expr::Real(10.0)));
-        assert_eq!(parse_expr(b"1e-1").unwrap(), (4, Expr::Real(0.1)));
+        assert_parser!(parse_expr, b".1", 2, Expr::Real(0.1));
+        assert_parser!(parse_expr, b"1.", 2, Expr::Real(1.0));
+        assert_parser!(parse_expr, b"1.01", 4, Expr::Real(1.01));
+        assert_parser!(parse_expr, b"1e1", 3, Expr::Real(10.0));
+        assert_parser!(parse_expr, b"1e-1", 4, Expr::Real(0.1));
 
         // Parse string
-        assert_eq!(
-            parse_expr(b"'hello'").unwrap(),
-            (7, Expr::Text(b"'hello'".as_slice().into()))
+        assert_parser!(
+            parse_expr,
+            b"'hello'",
+            7,
+            Expr::Text(b"'hello'".as_slice().into())
         );
-        assert_eq!(
-            parse_expr(b"'hel''lo'").unwrap(),
-            (9, Expr::Text(b"'hel''lo'".as_slice().into()))
+        assert_parser!(
+            parse_expr,
+            b"'hel''lo'",
+            9,
+            Expr::Text(b"'hel''lo'".as_slice().into())
         );
 
         // Parse blob
-        assert_eq!(
-            parse_expr(b"x'0123456789abcdef' ").unwrap(),
-            (19, Expr::Blob(b"0123456789abcdef".as_slice().into()))
+        assert_parser!(
+            parse_expr,
+            b"x'0123456789abcdef'",
+            19,
+            Expr::Blob(b"0123456789abcdef".as_slice().into())
         );
-        assert_eq!(
-            parse_expr(b"X'0123456789abcdef' ").unwrap(),
-            (19, Expr::Blob(b"0123456789abcdef".as_slice().into()))
+        assert_parser!(
+            parse_expr,
+            b"X'0123456789abcdef'",
+            19,
+            Expr::Blob(b"0123456789abcdef".as_slice().into())
         );
     }
 
     #[test]
     fn test_parse_expr_column() {
-        assert_eq!(
-            parse_expr(b"foo").unwrap(),
-            (3, Expr::Column(b"foo".as_slice().into()))
+        assert_parser!(
+            parse_expr,
+            b"foo",
+            3,
+            Expr::Column(b"foo".as_slice().into())
         );
-        assert_eq!(
-            parse_expr(b"\"foo\"").unwrap(),
-            (5, Expr::Column(b"\"foo\"".as_slice().into()))
+        assert_parser!(
+            parse_expr,
+            b"\"foo\"",
+            5,
+            Expr::Column(b"\"foo\"".as_slice().into())
         );
     }
 
     #[test]
     fn test_parse_expr_cast() {
-        assert_eq!(
-            parse_expr(b"cast(100as text) ").unwrap(),
-            (
-                16,
-                Expr::Cast {
-                    expr: Box::new(Expr::Integer(100)),
-                    type_name: vec![b"text".as_slice().into()],
-                }
-            )
+        assert_parser!(
+            parse_expr,
+            b"cast(100as text)",
+            16,
+            Expr::Cast {
+                expr: Box::new(Expr::Integer(100)),
+                type_name: vec![b"text".as_slice().into()],
+            }
         );
-        assert_eq!(
-            parse_expr(b"cast ( '100' as integer) ").unwrap(),
-            (
-                24,
-                Expr::Cast {
-                    expr: Box::new(Expr::Text(b"'100'".as_slice().into())),
-                    type_name: vec![b"integer".as_slice().into()],
-                }
-            )
+        assert_parser!(
+            parse_expr,
+            b"cast ( '100' as integer)",
+            24,
+            Expr::Cast {
+                expr: Box::new(Expr::Text(b"'100'".as_slice().into())),
+                type_name: vec![b"integer".as_slice().into()],
+            }
         );
-        assert_eq!(
-            parse_expr(b"cast (col = 100 as integer) ").unwrap(),
-            (
-                27,
-                Expr::Cast {
-                    expr: Box::new(Expr::BinaryOperator {
-                        operator: BinaryOp::Compare(CompareOp::Eq),
-                        left: Box::new(Expr::Column(b"col".as_slice().into())),
-                        right: Box::new(Expr::Integer(100))
-                    }),
-                    type_name: vec![b"integer".as_slice().into()],
-                }
-            )
+        assert_parser!(
+            parse_expr,
+            b"cast (col = 100 as integer)",
+            27,
+            Expr::Cast {
+                expr: Box::new(Expr::BinaryOperator {
+                    operator: BinaryOp::Compare(CompareOp::Eq),
+                    left: Box::new(Expr::Column(b"col".as_slice().into())),
+                    right: Box::new(Expr::Integer(100))
+                }),
+                type_name: vec![b"integer".as_slice().into()],
+            }
         );
     }
 
     #[test]
     fn test_parse_expr_unary_operator() {
-        assert_eq!(
-            parse_expr(b"+foo").unwrap(),
-            (4, Expr::Column(b"foo".as_slice().into()))
+        assert_parser!(
+            parse_expr,
+            b"+foo",
+            4,
+            Expr::Column(b"foo".as_slice().into())
         );
-        assert_eq!(
-            parse_expr(b"-foo").unwrap(),
-            (
-                4,
-                Expr::UnaryOperator {
+        assert_parser!(
+            parse_expr,
+            b"-foo",
+            4,
+            Expr::UnaryOperator {
+                operator: UnaryOp::Minus,
+                expr: Box::new(Expr::Column(b"foo".as_slice().into()))
+            }
+        );
+        assert_parser!(
+            parse_expr,
+            b"~foo",
+            4,
+            Expr::UnaryOperator {
+                operator: UnaryOp::BitNot,
+                expr: Box::new(Expr::Column(b"foo".as_slice().into()))
+            }
+        );
+        assert_parser!(
+            parse_expr,
+            b"~~foo",
+            5,
+            Expr::UnaryOperator {
+                operator: UnaryOp::BitNot,
+                expr: Box::new(Expr::UnaryOperator {
+                    operator: UnaryOp::BitNot,
+                    expr: Box::new(Expr::Column(b"foo".as_slice().into()))
+                })
+            }
+        );
+        assert_parser!(
+            parse_expr,
+            b"-+-+-foo",
+            8,
+            Expr::UnaryOperator {
+                operator: UnaryOp::Minus,
+                expr: Box::new(Expr::UnaryOperator {
                     operator: UnaryOp::Minus,
-                    expr: Box::new(Expr::Column(b"foo".as_slice().into()))
-                }
-            )
-        );
-        assert_eq!(
-            parse_expr(b"~foo").unwrap(),
-            (
-                4,
-                Expr::UnaryOperator {
-                    operator: UnaryOp::BitNot,
-                    expr: Box::new(Expr::Column(b"foo".as_slice().into()))
-                }
-            )
-        );
-        assert_eq!(
-            parse_expr(b"~~foo").unwrap(),
-            (
-                5,
-                Expr::UnaryOperator {
-                    operator: UnaryOp::BitNot,
                     expr: Box::new(Expr::UnaryOperator {
-                        operator: UnaryOp::BitNot,
+                        operator: UnaryOp::Minus,
                         expr: Box::new(Expr::Column(b"foo".as_slice().into()))
                     })
-                }
-            )
+                })
+            }
         );
-        assert_eq!(
-            parse_expr(b"-+-+-foo").unwrap(),
-            (
-                8,
-                Expr::UnaryOperator {
-                    operator: UnaryOp::Minus,
-                    expr: Box::new(Expr::UnaryOperator {
-                        operator: UnaryOp::Minus,
-                        expr: Box::new(Expr::UnaryOperator {
-                            operator: UnaryOp::Minus,
-                            expr: Box::new(Expr::Column(b"foo".as_slice().into()))
-                        })
-                    })
-                }
-            )
+        assert_parser!(parse_expr, b"+123", 4, Expr::Integer(123));
+        assert_parser!(parse_expr, b"+ 123", 5, Expr::Integer(123));
+        assert_parser!(parse_expr, b"-123", 4, Expr::Integer(-123));
+        assert_parser!(parse_expr, b"- 123", 5, Expr::Integer(-123));
+        assert_parser!(
+            parse_expr,
+            b"-9223372036854775808",
+            20,
+            Expr::Integer(-9223372036854775808)
         );
-        assert_eq!(parse_expr(b"+123").unwrap(), (4, Expr::Integer(123)));
-        assert_eq!(parse_expr(b"+ 123").unwrap(), (5, Expr::Integer(123)));
-        assert_eq!(parse_expr(b"-123").unwrap(), (4, Expr::Integer(-123)));
-        assert_eq!(parse_expr(b"- 123").unwrap(), (5, Expr::Integer(-123)));
-        assert_eq!(
-            parse_expr(b"-9223372036854775808").unwrap(),
-            (20, Expr::Integer(-9223372036854775808))
+        assert_parser!(
+            parse_expr,
+            b"-+-123",
+            6,
+            Expr::UnaryOperator {
+                operator: UnaryOp::Minus,
+                expr: Box::new(Expr::Integer(-123))
+            }
         );
-        assert_eq!(
-            parse_expr(b"-+-123").unwrap(),
-            (
-                6,
-                Expr::UnaryOperator {
-                    operator: UnaryOp::Minus,
-                    expr: Box::new(Expr::Integer(-123))
-                }
-            )
+        assert_parser!(parse_expr, b"+123.4", 6, Expr::Real(123.4));
+        assert_parser!(parse_expr, b"-123.4", 6, Expr::Real(-123.4));
+        assert_parser!(
+            parse_expr,
+            b"-+-123.4",
+            8,
+            Expr::UnaryOperator {
+                operator: UnaryOp::Minus,
+                expr: Box::new(Expr::Real(-123.4))
+            }
         );
-        assert_eq!(parse_expr(b"+123.4").unwrap(), (6, Expr::Real(123.4)));
-        assert_eq!(parse_expr(b"-123.4").unwrap(), (6, Expr::Real(-123.4)));
-        assert_eq!(
-            parse_expr(b"-+-123.4").unwrap(),
-            (
-                8,
-                Expr::UnaryOperator {
-                    operator: UnaryOp::Minus,
-                    expr: Box::new(Expr::Real(-123.4))
-                }
-            )
+        assert_parser!(
+            parse_expr,
+            b"+'abc'",
+            6,
+            Expr::Text(b"'abc'".as_slice().into())
         );
-        assert_eq!(
-            parse_expr(b"+'abc'").unwrap(),
-            (6, Expr::Text(b"'abc'".as_slice().into()))
+        assert_parser!(
+            parse_expr,
+            b"-'abc'",
+            6,
+            Expr::UnaryOperator {
+                operator: UnaryOp::Minus,
+                expr: Box::new(Expr::Text(b"'abc'".as_slice().into()))
+            }
         );
-        assert_eq!(
-            parse_expr(b"-'abc'").unwrap(),
-            (
-                6,
-                Expr::UnaryOperator {
-                    operator: UnaryOp::Minus,
-                    expr: Box::new(Expr::Text(b"'abc'".as_slice().into()))
-                }
-            )
+        assert_parser!(
+            parse_expr,
+            b"-abc",
+            4,
+            Expr::UnaryOperator {
+                operator: UnaryOp::Minus,
+                expr: Box::new(Expr::Column(b"abc".as_slice().into()))
+            }
         );
-        assert_eq!(
-            parse_expr(b"-abc").unwrap(),
-            (
-                4,
-                Expr::UnaryOperator {
+        assert_parser!(
+            parse_expr,
+            b"~-abc",
+            5,
+            Expr::UnaryOperator {
+                operator: UnaryOp::BitNot,
+                expr: Box::new(Expr::UnaryOperator {
                     operator: UnaryOp::Minus,
                     expr: Box::new(Expr::Column(b"abc".as_slice().into()))
-                }
-            )
-        );
-        assert_eq!(
-            parse_expr(b"~-abc").unwrap(),
-            (
-                5,
-                Expr::UnaryOperator {
-                    operator: UnaryOp::BitNot,
-                    expr: Box::new(Expr::UnaryOperator {
-                        operator: UnaryOp::Minus,
-                        expr: Box::new(Expr::Column(b"abc".as_slice().into()))
-                    })
-                }
-            )
+                })
+            }
         );
     }
 
     #[test]
     fn test_parse_expr_collate() {
-        assert_eq!(
-            parse_expr(b"abc COLLATE binary").unwrap(),
-            (
-                18,
-                Expr::Collate {
-                    expr: Box::new(Expr::Column(b"abc".as_slice().into())),
-                    collation_name: b"binary".as_slice().into()
-                }
-            )
+        assert_parser!(
+            parse_expr,
+            b"abc COLLATE binary",
+            18,
+            Expr::Collate {
+                expr: Box::new(Expr::Column(b"abc".as_slice().into())),
+                collation_name: b"binary".as_slice().into()
+            }
         );
-        assert_eq!(
-            parse_expr(b"'abc' COLLATE \"nocase\"").unwrap(),
-            (
-                22,
-                Expr::Collate {
-                    expr: Box::new(Expr::Text(b"'abc'".as_slice().into())),
-                    collation_name: b"\"nocase\"".as_slice().into()
-                }
-            )
+        assert_parser!(
+            parse_expr,
+            b"'abc' COLLATE \"nocase\"",
+            22,
+            Expr::Collate {
+                expr: Box::new(Expr::Text(b"'abc'".as_slice().into())),
+                collation_name: b"\"nocase\"".as_slice().into()
+            }
         );
-        assert_eq!(
-            parse_expr(b"-abc COLLATE rtrim").unwrap(),
-            (
-                18,
-                Expr::Collate {
-                    expr: Box::new(Expr::UnaryOperator {
-                        operator: UnaryOp::Minus,
-                        expr: Box::new(Expr::Column(b"abc".as_slice().into()))
-                    }),
-                    collation_name: b"rtrim".as_slice().into()
-                }
-            )
+        assert_parser!(
+            parse_expr,
+            b"-abc COLLATE rtrim",
+            18,
+            Expr::Collate {
+                expr: Box::new(Expr::UnaryOperator {
+                    operator: UnaryOp::Minus,
+                    expr: Box::new(Expr::Column(b"abc".as_slice().into()))
+                }),
+                collation_name: b"rtrim".as_slice().into()
+            }
         );
-        assert_eq!(
-            parse_expr(b"abc COLLATE binary COLLATE nocase COLLATE rtrim").unwrap(),
-            (
-                47,
-                Expr::Collate {
-                    expr: Box::new(Expr::Column(b"abc".as_slice().into())),
-                    collation_name: b"rtrim".as_slice().into()
-                }
-            )
+        assert_parser!(
+            parse_expr,
+            b"abc COLLATE binary COLLATE nocase COLLATE rtrim",
+            47,
+            Expr::Collate {
+                expr: Box::new(Expr::Column(b"abc".as_slice().into())),
+                collation_name: b"rtrim".as_slice().into()
+            }
         );
     }
 
     #[test]
     fn test_parse_expr_concat() {
-        assert_eq!(
-            parse_expr(b"'abc' || 2").unwrap(),
-            (
-                10,
-                Expr::BinaryOperator {
-                    operator: BinaryOp::Concat,
-                    left: Box::new(Expr::Text(b"'abc'".as_slice().into())),
-                    right: Box::new(Expr::Integer(2)),
-                }
-            )
+        assert_parser!(
+            parse_expr,
+            b"'abc' || 2",
+            10,
+            Expr::BinaryOperator {
+                operator: BinaryOp::Concat,
+                left: Box::new(Expr::Text(b"'abc'".as_slice().into())),
+                right: Box::new(Expr::Integer(2)),
+            }
         );
-        assert_eq!(
-            parse_expr(b"-1 || 2 || -abc").unwrap(),
-            (
-                15,
-                Expr::BinaryOperator {
+        assert_parser!(
+            parse_expr,
+            b"-1 || 2 || -abc",
+            15,
+            Expr::BinaryOperator {
+                operator: BinaryOp::Concat,
+                left: Box::new(Expr::BinaryOperator {
                     operator: BinaryOp::Concat,
-                    left: Box::new(Expr::BinaryOperator {
-                        operator: BinaryOp::Concat,
-                        left: Box::new(Expr::Integer(-1)),
-                        right: Box::new(Expr::Integer(2)),
-                    }),
-                    right: Box::new(Expr::UnaryOperator {
-                        operator: UnaryOp::Minus,
-                        expr: Box::new(Expr::Column(b"abc".as_slice().into()))
-                    }),
-                }
-            )
+                    left: Box::new(Expr::Integer(-1)),
+                    right: Box::new(Expr::Integer(2)),
+                }),
+                right: Box::new(Expr::UnaryOperator {
+                    operator: UnaryOp::Minus,
+                    expr: Box::new(Expr::Column(b"abc".as_slice().into()))
+                }),
+            }
         );
     }
 
     #[test]
     fn test_parse_expr_compare() {
-        assert_eq!(
-            parse_expr(b"-1 < 2").unwrap(),
-            (
-                6,
-                Expr::BinaryOperator {
-                    operator: BinaryOp::Compare(CompareOp::Lt),
-                    left: Box::new(Expr::Integer(-1)),
-                    right: Box::new(Expr::Integer(2)),
-                }
-            )
+        assert_parser!(
+            parse_expr,
+            b"-1 < 2",
+            6,
+            Expr::BinaryOperator {
+                operator: BinaryOp::Compare(CompareOp::Lt),
+                left: Box::new(Expr::Integer(-1)),
+                right: Box::new(Expr::Integer(2)),
+            }
         );
-        assert_eq!(
-            parse_expr(b"-1 <= 2").unwrap(),
-            (
-                7,
-                Expr::BinaryOperator {
-                    operator: BinaryOp::Compare(CompareOp::Le),
-                    left: Box::new(Expr::Integer(-1)),
-                    right: Box::new(Expr::Integer(2)),
-                }
-            )
+        assert_parser!(
+            parse_expr,
+            b"-1 <= 2",
+            7,
+            Expr::BinaryOperator {
+                operator: BinaryOp::Compare(CompareOp::Le),
+                left: Box::new(Expr::Integer(-1)),
+                right: Box::new(Expr::Integer(2)),
+            }
         );
-        assert_eq!(
-            parse_expr(b"-1 > 2").unwrap(),
-            (
-                6,
-                Expr::BinaryOperator {
-                    operator: BinaryOp::Compare(CompareOp::Gt),
-                    left: Box::new(Expr::Integer(-1)),
-                    right: Box::new(Expr::Integer(2)),
-                }
-            )
+        assert_parser!(
+            parse_expr,
+            b"-1 > 2",
+            6,
+            Expr::BinaryOperator {
+                operator: BinaryOp::Compare(CompareOp::Gt),
+                left: Box::new(Expr::Integer(-1)),
+                right: Box::new(Expr::Integer(2)),
+            }
         );
-        assert_eq!(
-            parse_expr(b"-1 >= 2").unwrap(),
-            (
-                7,
-                Expr::BinaryOperator {
+        assert_parser!(
+            parse_expr,
+            b"-1 >= 2",
+            7,
+            Expr::BinaryOperator {
+                operator: BinaryOp::Compare(CompareOp::Ge),
+                left: Box::new(Expr::Integer(-1)),
+                right: Box::new(Expr::Integer(2)),
+            }
+        );
+        assert_parser!(
+            parse_expr,
+            b"-1 >= 2 >= -abc",
+            15,
+            Expr::BinaryOperator {
+                operator: BinaryOp::Compare(CompareOp::Ge),
+                left: Box::new(Expr::BinaryOperator {
                     operator: BinaryOp::Compare(CompareOp::Ge),
                     left: Box::new(Expr::Integer(-1)),
                     right: Box::new(Expr::Integer(2)),
-                }
-            )
-        );
-        assert_eq!(
-            parse_expr(b"-1 >= 2 >= -abc").unwrap(),
-            (
-                15,
-                Expr::BinaryOperator {
-                    operator: BinaryOp::Compare(CompareOp::Ge),
-                    left: Box::new(Expr::BinaryOperator {
-                        operator: BinaryOp::Compare(CompareOp::Ge),
-                        left: Box::new(Expr::Integer(-1)),
-                        right: Box::new(Expr::Integer(2)),
-                    }),
-                    right: Box::new(Expr::UnaryOperator {
-                        operator: UnaryOp::Minus,
-                        expr: Box::new(Expr::Column(b"abc".as_slice().into()))
-                    }),
-                }
-            )
+                }),
+                right: Box::new(Expr::UnaryOperator {
+                    operator: UnaryOp::Minus,
+                    expr: Box::new(Expr::Column(b"abc".as_slice().into()))
+                }),
+            }
         );
     }
 
     #[test]
     fn test_parse_expr_eq() {
-        assert_eq!(
-            parse_expr(b"-1 = 2").unwrap(),
-            (
-                6,
-                Expr::BinaryOperator {
+        assert_parser!(
+            parse_expr,
+            b"-1 = 2",
+            6,
+            Expr::BinaryOperator {
+                operator: BinaryOp::Compare(CompareOp::Eq),
+                left: Box::new(Expr::Integer(-1)),
+                right: Box::new(Expr::Integer(2)),
+            }
+        );
+        assert_parser!(
+            parse_expr,
+            b"-1 == 2",
+            7,
+            Expr::BinaryOperator {
+                operator: BinaryOp::Compare(CompareOp::Eq),
+                left: Box::new(Expr::Integer(-1)),
+                right: Box::new(Expr::Integer(2)),
+            }
+        );
+        assert_parser!(
+            parse_expr,
+            b"-1 != 2",
+            7,
+            Expr::BinaryOperator {
+                operator: BinaryOp::Compare(CompareOp::Ne),
+                left: Box::new(Expr::Integer(-1)),
+                right: Box::new(Expr::Integer(2)),
+            }
+        );
+        assert_parser!(
+            parse_expr,
+            b"-1 <> 2",
+            7,
+            Expr::BinaryOperator {
+                operator: BinaryOp::Compare(CompareOp::Ne),
+                left: Box::new(Expr::Integer(-1)),
+                right: Box::new(Expr::Integer(2)),
+            }
+        );
+        assert_parser!(
+            parse_expr,
+            b"1 = 2 = 3",
+            9,
+            Expr::BinaryOperator {
+                operator: BinaryOp::Compare(CompareOp::Eq),
+                left: Box::new(Expr::BinaryOperator {
                     operator: BinaryOp::Compare(CompareOp::Eq),
-                    left: Box::new(Expr::Integer(-1)),
+                    left: Box::new(Expr::Integer(1)),
                     right: Box::new(Expr::Integer(2)),
-                }
-            )
-        );
-        assert_eq!(
-            parse_expr(b"-1 == 2").unwrap(),
-            (
-                7,
-                Expr::BinaryOperator {
-                    operator: BinaryOp::Compare(CompareOp::Eq),
-                    left: Box::new(Expr::Integer(-1)),
-                    right: Box::new(Expr::Integer(2)),
-                }
-            )
-        );
-        assert_eq!(
-            parse_expr(b"-1 != 2").unwrap(),
-            (
-                7,
-                Expr::BinaryOperator {
-                    operator: BinaryOp::Compare(CompareOp::Ne),
-                    left: Box::new(Expr::Integer(-1)),
-                    right: Box::new(Expr::Integer(2)),
-                }
-            )
-        );
-        assert_eq!(
-            parse_expr(b"-1 <> 2").unwrap(),
-            (
-                7,
-                Expr::BinaryOperator {
-                    operator: BinaryOp::Compare(CompareOp::Ne),
-                    left: Box::new(Expr::Integer(-1)),
-                    right: Box::new(Expr::Integer(2)),
-                }
-            )
-        );
-        assert_eq!(
-            parse_expr(b"1 = 2 = 3").unwrap(),
-            (
-                9,
-                Expr::BinaryOperator {
-                    operator: BinaryOp::Compare(CompareOp::Eq),
-                    left: Box::new(Expr::BinaryOperator {
-                        operator: BinaryOp::Compare(CompareOp::Eq),
-                        left: Box::new(Expr::Integer(1)),
-                        right: Box::new(Expr::Integer(2)),
-                    }),
-                    right: Box::new(Expr::Integer(3)),
-                }
-            )
+                }),
+                right: Box::new(Expr::Integer(3)),
+            }
         );
     }
 
     #[test]
     fn test_parse_expr_operators() {
-        assert_eq!(
-            parse_expr(b"1 || -2 COLLATE nocase").unwrap(),
-            (
-                22,
-                Expr::BinaryOperator {
+        assert_parser!(
+            parse_expr,
+            b"1 || -2 COLLATE nocase",
+            22,
+            Expr::BinaryOperator {
+                operator: BinaryOp::Concat,
+                left: Box::new(Expr::Integer(1)),
+                right: Box::new(Expr::Collate {
+                    expr: Box::new(Expr::Integer(-2)),
+                    collation_name: b"nocase".as_slice().into()
+                }),
+            }
+        );
+        assert_parser!(
+            parse_expr,
+            b"1 || 2 < 3 || 4",
+            15,
+            Expr::BinaryOperator {
+                operator: BinaryOp::Compare(CompareOp::Lt),
+                left: Box::new(Expr::BinaryOperator {
                     operator: BinaryOp::Concat,
                     left: Box::new(Expr::Integer(1)),
-                    right: Box::new(Expr::Collate {
-                        expr: Box::new(Expr::Integer(-2)),
-                        collation_name: b"nocase".as_slice().into()
-                    }),
-                }
-            )
+                    right: Box::new(Expr::Integer(2)),
+                }),
+                right: Box::new(Expr::BinaryOperator {
+                    operator: BinaryOp::Concat,
+                    left: Box::new(Expr::Integer(3)),
+                    right: Box::new(Expr::Integer(4)),
+                }),
+            }
         );
-        assert_eq!(
-            parse_expr(b"1 || 2 < 3 || 4").unwrap(),
-            (
-                15,
-                Expr::BinaryOperator {
+        assert_parser!(
+            parse_expr,
+            b"1 < 2 = 3 < 4",
+            13,
+            Expr::BinaryOperator {
+                operator: BinaryOp::Compare(CompareOp::Eq),
+                left: Box::new(Expr::BinaryOperator {
                     operator: BinaryOp::Compare(CompareOp::Lt),
-                    left: Box::new(Expr::BinaryOperator {
-                        operator: BinaryOp::Concat,
-                        left: Box::new(Expr::Integer(1)),
-                        right: Box::new(Expr::Integer(2)),
-                    }),
-                    right: Box::new(Expr::BinaryOperator {
-                        operator: BinaryOp::Concat,
-                        left: Box::new(Expr::Integer(3)),
-                        right: Box::new(Expr::Integer(4)),
-                    }),
-                }
-            )
+                    left: Box::new(Expr::Integer(1)),
+                    right: Box::new(Expr::Integer(2)),
+                }),
+                right: Box::new(Expr::BinaryOperator {
+                    operator: BinaryOp::Compare(CompareOp::Lt),
+                    left: Box::new(Expr::Integer(3)),
+                    right: Box::new(Expr::Integer(4)),
+                }),
+            }
         );
-        assert_eq!(
-            parse_expr(b"1 < 2 = 3 < 4").unwrap(),
-            (
-                13,
-                Expr::BinaryOperator {
+        assert_parser!(
+            parse_expr,
+            b"1 < 2 = 3 < 4 = 5",
+            17,
+            Expr::BinaryOperator {
+                operator: BinaryOp::Compare(CompareOp::Eq),
+                left: Box::new(Expr::BinaryOperator {
                     operator: BinaryOp::Compare(CompareOp::Eq),
                     left: Box::new(Expr::BinaryOperator {
                         operator: BinaryOp::Compare(CompareOp::Lt),
@@ -1543,31 +1538,9 @@ mod tests {
                         left: Box::new(Expr::Integer(3)),
                         right: Box::new(Expr::Integer(4)),
                     }),
-                }
-            )
-        );
-        assert_eq!(
-            parse_expr(b"1 < 2 = 3 < 4 = 5").unwrap(),
-            (
-                17,
-                Expr::BinaryOperator {
-                    operator: BinaryOp::Compare(CompareOp::Eq),
-                    left: Box::new(Expr::BinaryOperator {
-                        operator: BinaryOp::Compare(CompareOp::Eq),
-                        left: Box::new(Expr::BinaryOperator {
-                            operator: BinaryOp::Compare(CompareOp::Lt),
-                            left: Box::new(Expr::Integer(1)),
-                            right: Box::new(Expr::Integer(2)),
-                        }),
-                        right: Box::new(Expr::BinaryOperator {
-                            operator: BinaryOp::Compare(CompareOp::Lt),
-                            left: Box::new(Expr::Integer(3)),
-                            right: Box::new(Expr::Integer(4)),
-                        }),
-                    }),
-                    right: Box::new(Expr::Integer(5)),
-                }
-            )
+                }),
+                right: Box::new(Expr::Integer(5)),
+            }
         );
     }
 }
