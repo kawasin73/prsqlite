@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Display;
+
 use crate::token::get_token;
 use crate::token::Token;
 use crate::utils::parse_float;
@@ -20,8 +22,54 @@ use crate::utils::HexedBytes;
 use crate::utils::MaybeQuotedBytes;
 use crate::utils::ParseIntegerResult;
 
-pub type Error = (usize, &'static str);
-pub type Result<T> = std::result::Result<T, Error>;
+#[derive(Debug)]
+pub struct Error<'a> {
+    input: &'a [u8],
+    cursor: usize,
+    token_size: usize,
+    msg: &'static str,
+}
+
+impl Error<'_> {
+    /// This is for testing.
+    #[allow(dead_code)]
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+}
+
+impl Display for Error<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Ok(sql) = std::str::from_utf8(self.input) else {
+            return Err(std::fmt::Error);
+        };
+        // TODO: Adjust character width
+        let mut n_chars = 0;
+        let mut rest_bytes = self.cursor;
+        for c in sql.chars() {
+            if c.len_utf8() > rest_bytes {
+                break;
+            }
+            rest_bytes -= c.len_utf8();
+            n_chars += 1;
+        }
+        let token_size = if self.token_size > 0 {
+            self.token_size
+        } else {
+            1
+        };
+        write!(
+            f,
+            "{}\n{}\n{}{}",
+            self.msg,
+            sql,
+            " ".repeat(n_chars),
+            "^".repeat(token_size)
+        )
+    }
+}
+
+pub type Result<'a, T> = std::result::Result<T, Error<'a>>;
 
 static NULL_BYTES: &[u8] = b"null";
 
@@ -73,13 +121,18 @@ impl<'a> Parser<'a> {
         self.token.as_ref()
     }
 
-    fn error(&self, msg: &'static str) -> Error {
-        (self.cursor, msg)
+    fn error(&self, msg: &'static str) -> Error<'a> {
+        Error {
+            input: self.input,
+            cursor: self.cursor,
+            token_size: self.token_size,
+            msg,
+        }
     }
 }
 
 /// Assert that the next token is a semicolon.
-pub fn expect_semicolon(p: &mut Parser) -> Result<()> {
+pub fn expect_semicolon<'a>(p: &mut Parser<'a>) -> Result<'a, ()> {
     match p.peek() {
         Some(Token::Semicolon) => {}
         _ => return Err(p.error("no semicolon")),
@@ -89,7 +142,9 @@ pub fn expect_semicolon(p: &mut Parser) -> Result<()> {
 }
 
 /// Assert that there is no token except spaces.
-pub fn expect_no_more_token(p: &mut Parser) -> Result<()> {
+///
+/// Uses mutable [Parser] to unify the interface with other expect functions.
+pub fn expect_no_more_token<'a>(p: &mut Parser<'a>) -> Result<'a, ()> {
     match p.peek() {
         Some(_) => Err(p.error("unexpected token")),
         None => Ok(()),
@@ -111,7 +166,7 @@ pub enum ColumnConstraint<'a> {
 }
 
 /// https://www.sqlite.org/syntax/column-constraint.html
-fn parse_column_constraint<'a>(p: &mut Parser<'a>) -> Result<Option<ColumnConstraint<'a>>> {
+fn parse_column_constraint<'a>(p: &mut Parser<'a>) -> Result<'a, Option<ColumnConstraint<'a>>> {
     match p.peek() {
         Some(Token::Collate) => {
             let Some(Token::Identifier(collation)) = p.next() else {
@@ -141,7 +196,7 @@ pub struct ColumnDef<'a> {
 }
 
 /// https://www.sqlite.org/syntax/signed-number.html
-fn skip_signed_number(p: &mut Parser) -> Result<()> {
+fn skip_signed_number<'a>(p: &mut Parser<'a>) -> Result<'a, ()> {
     if matches!(p.peek(), Some(Token::Plus) | Some(Token::Minus)) {
         p.next();
     }
@@ -153,7 +208,7 @@ fn skip_signed_number(p: &mut Parser) -> Result<()> {
 }
 
 /// https://www.sqlite.org/syntax/type-name.html
-fn parse_type_name<'a>(p: &mut Parser<'a>) -> Result<Vec<MaybeQuotedBytes<'a>>> {
+fn parse_type_name<'a>(p: &mut Parser<'a>) -> Result<'a, Vec<MaybeQuotedBytes<'a>>> {
     // TODO: Parse type_name to type affinity without converting it to the temporary
     // Vec. Use iterator instead.
     let mut type_name = Vec::new();
@@ -204,7 +259,7 @@ fn parse_type_name<'a>(p: &mut Parser<'a>) -> Result<Vec<MaybeQuotedBytes<'a>>> 
 /// Parse CREATE TABLE statement.
 ///
 /// https://www.sqlite.org/lang_createtable.html
-pub fn parse_create_table<'a>(p: &mut Parser<'a>) -> Result<CreateTable<'a>> {
+pub fn parse_create_table<'a>(p: &mut Parser<'a>) -> Result<'a, CreateTable<'a>> {
     let Some(Token::Create) = p.peek() else {
         return Err(p.error("no create"));
     };
@@ -276,7 +331,7 @@ pub struct IndexedColumn<'a> {
 /// Parse CREATE INDEX statement.
 ///
 /// https://www.sqlite.org/lang_createindex.html
-pub fn parse_create_index<'a>(p: &mut Parser<'a>) -> Result<CreateIndex<'a>> {
+pub fn parse_create_index<'a>(p: &mut Parser<'a>) -> Result<'a, CreateIndex<'a>> {
     let Some(Token::Create) = p.peek() else {
         return Err(p.error("no create"));
     };
@@ -337,7 +392,7 @@ pub struct Select<'a> {
 // Parse SELECT statement.
 //
 // https://www.sqlite.org/lang_select.html
-pub fn parse_select<'a>(p: &mut Parser<'a>) -> Result<Select<'a>> {
+pub fn parse_select<'a>(p: &mut Parser<'a>) -> Result<'a, Select<'a>> {
     let Some(Token::Select) = p.peek() else {
         return Err(p.error("no select"));
     };
@@ -389,7 +444,7 @@ pub enum ResultColumn<'a> {
 /// Parse result column.
 ///
 /// https://www.sqlite.org/syntax/result-column.html
-fn parse_result_column<'a>(p: &mut Parser<'a>) -> Result<ResultColumn<'a>> {
+fn parse_result_column<'a>(p: &mut Parser<'a>) -> Result<'a, ResultColumn<'a>> {
     match p.peek() {
         Some(Token::Identifier(table_name)) => {
             let table_name = *table_name;
@@ -488,11 +543,11 @@ pub enum Expr<'a> {
 /// Parse expression.
 ///
 /// https://www.sqlite.org/syntax/expr.html
-fn parse_expr<'a>(p: &mut Parser<'a>) -> Result<Expr<'a>> {
+fn parse_expr<'a>(p: &mut Parser<'a>) -> Result<'a, Expr<'a>> {
     parse_expr_eq(p)
 }
 
-fn parse_expr_eq<'a>(p: &mut Parser<'a>) -> Result<Expr<'a>> {
+fn parse_expr_eq<'a>(p: &mut Parser<'a>) -> Result<'a, Expr<'a>> {
     let mut expr = parse_expr_compare(p)?;
     loop {
         let operator = match p.peek() {
@@ -511,7 +566,7 @@ fn parse_expr_eq<'a>(p: &mut Parser<'a>) -> Result<Expr<'a>> {
     Ok(expr)
 }
 
-fn parse_expr_compare<'a>(p: &mut Parser<'a>) -> Result<Expr<'a>> {
+fn parse_expr_compare<'a>(p: &mut Parser<'a>) -> Result<'a, Expr<'a>> {
     let mut expr = parse_expr_concat(p)?;
     loop {
         let operator = match p.peek() {
@@ -532,7 +587,7 @@ fn parse_expr_compare<'a>(p: &mut Parser<'a>) -> Result<Expr<'a>> {
     Ok(expr)
 }
 
-fn parse_expr_concat<'a>(p: &mut Parser<'a>) -> Result<Expr<'a>> {
+fn parse_expr_concat<'a>(p: &mut Parser<'a>) -> Result<'a, Expr<'a>> {
     let mut expr = parse_expr_collate(p)?;
     // TODO: -> ->> will be added in the future.
     #[allow(clippy::while_let_loop)]
@@ -552,7 +607,7 @@ fn parse_expr_concat<'a>(p: &mut Parser<'a>) -> Result<Expr<'a>> {
     Ok(expr)
 }
 
-fn parse_expr_collate<'a>(p: &mut Parser<'a>) -> Result<Expr<'a>> {
+fn parse_expr_collate<'a>(p: &mut Parser<'a>) -> Result<'a, Expr<'a>> {
     let expr = parse_expr_unary(p)?;
     let mut collation = None;
     while let Some(Token::Collate) = p.peek() {
@@ -572,7 +627,7 @@ fn parse_expr_collate<'a>(p: &mut Parser<'a>) -> Result<Expr<'a>> {
     }
 }
 
-fn parse_expr_unary<'a>(p: &mut Parser<'a>) -> Result<Expr<'a>> {
+fn parse_expr_unary<'a>(p: &mut Parser<'a>) -> Result<'a, Expr<'a>> {
     match p.peek() {
         Some(Token::Tilda) => {
             p.next();
@@ -627,7 +682,7 @@ fn parse_expr_unary<'a>(p: &mut Parser<'a>) -> Result<Expr<'a>> {
     }
 }
 
-fn parse_expr_primitive<'a>(p: &mut Parser<'a>) -> Result<Expr<'a>> {
+fn parse_expr_primitive<'a>(p: &mut Parser<'a>) -> Result<'a, Expr<'a>> {
     let expr = match p.peek() {
         Some(Token::Identifier(id)) => Expr::Column(*id),
         Some(Token::Cast) => {
@@ -709,12 +764,12 @@ mod tests {
         let mut parser = Parser::new(b"     ");
         let r = expect_semicolon(&mut parser);
         assert!(r.is_err());
-        assert_eq!(r.unwrap_err().0, 5);
+        assert_eq!(r.unwrap_err().cursor(), 5);
 
         let mut parser = Parser::new(b"");
         let r = expect_semicolon(&mut parser);
         assert!(r.is_err());
-        assert_eq!(r.unwrap_err().0, 0);
+        assert_eq!(r.unwrap_err().cursor(), 0);
     }
 
     #[test]
@@ -725,7 +780,7 @@ mod tests {
         let mut parser = Parser::new(b"    ;  ");
         let r = expect_no_more_token(&mut parser);
         assert!(r.is_err());
-        assert_eq!(r.unwrap_err().0, 4);
+        assert_eq!(r.unwrap_err().cursor(), 4);
     }
 
     #[test]
@@ -859,19 +914,19 @@ mod tests {
         // no column def.
         let r = parse_create_table(&mut Parser::new(b"create table foo ()"));
         assert!(r.is_err());
-        assert_eq!(r.unwrap_err().0, 18);
+        assert_eq!(r.unwrap_err().cursor(), 18);
         // no right paren.
         let r = parse_create_table(&mut Parser::new(b"create table foo (id, name "));
         assert!(r.is_err());
-        assert_eq!(r.unwrap_err().0, 27);
+        assert_eq!(r.unwrap_err().cursor(), 27);
         // primary without key.
         let r = parse_create_table(&mut Parser::new(b"create table foo (id primary, name)"));
         assert!(r.is_err());
-        assert_eq!(r.unwrap_err().0, 28);
+        assert_eq!(r.unwrap_err().cursor(), 28);
         // key without primary.
         let r = parse_create_table(&mut Parser::new(b"create table foo (id key, name)"));
         assert!(r.is_err());
-        assert_eq!(r.unwrap_err().0, 21);
+        assert_eq!(r.unwrap_err().cursor(), 21);
     }
 
     #[test]
@@ -924,7 +979,7 @@ mod tests {
         // no right paren.
         let r = parse_create_index(&mut Parser::new(b"create index foo on bar (id, name "));
         assert!(r.is_err());
-        assert_eq!(r.unwrap_err().0, 34);
+        assert_eq!(r.unwrap_err().cursor(), 34);
     }
 
     #[test]
@@ -1020,11 +1075,11 @@ mod tests {
         // no expr after comma.
         let r = parse_select(&mut Parser::new(b"select col, from foo"));
         assert!(r.is_err());
-        assert_eq!(r.unwrap_err().0, 12);
+        assert_eq!(r.unwrap_err().cursor(), 12);
         // no table name.
         let r = parse_select(&mut Parser::new(b"select col from ;"));
         assert!(r.is_err());
-        assert_eq!(r.unwrap_err().0, 16);
+        assert_eq!(r.unwrap_err().cursor(), 16);
     }
 
     #[test]

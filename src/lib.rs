@@ -43,6 +43,7 @@ use crate::parser::expect_semicolon;
 use crate::parser::parse_select;
 use crate::parser::BinaryOp;
 use crate::parser::CompareOp;
+use crate::parser::Error as ParseError;
 use crate::parser::Expr;
 use crate::parser::Parser;
 use crate::parser::ResultColumn;
@@ -68,12 +69,14 @@ const MAGIC_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 #[derive(Debug)]
 pub enum Error<'a> {
-    SqlParse {
-        sql: &'a str,
-        cursor: usize,
-        message: &'static str,
-    },
+    Parse(ParseError<'a>),
     Other(anyhow::Error),
+}
+
+impl<'a> From<ParseError<'a>> for Error<'a> {
+    fn from(e: ParseError<'a>) -> Self {
+        Self::Parse(e)
+    }
 }
 
 impl From<anyhow::Error> for Error<'_> {
@@ -85,28 +88,8 @@ impl From<anyhow::Error> for Error<'_> {
 impl Display for Error<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::SqlParse {
-                sql,
-                cursor,
-                message,
-            } => {
-                // TODO: Adjust character width
-                let mut n_chars = 0;
-                let mut rest_bytes = *cursor;
-                for c in sql.chars() {
-                    if c.len_utf8() > rest_bytes {
-                        break;
-                    }
-                    rest_bytes -= c.len_utf8();
-                    n_chars += 1;
-                }
-                write!(
-                    f,
-                    "Error parsing SQL: {}\n{}\n{}^",
-                    message,
-                    sql,
-                    " ".repeat(n_chars)
-                )
+            Error::Parse(e) => {
+                write!(f, "SQL parser error: {}", e)
             }
             Error::Other(e) => write!(f, "{}", e),
         }
@@ -180,21 +163,9 @@ impl Connection {
     pub fn prepare<'a>(&mut self, sql: &'a str) -> Result<'a, Statement> {
         let input = sql.as_bytes();
         let mut parser = Parser::new(input);
-        let parsed_sql = match parse_select(&mut parser) {
-            Ok(select) => match expect_semicolon(&mut parser) {
-                Ok(()) => match expect_no_more_token(&mut parser) {
-                    Ok(()) => Ok(select),
-                    Err((n, msg)) => Err((n, msg)),
-                },
-                Err((n, msg)) => Err((n, msg)),
-            },
-            Err(e) => Err(e),
-        };
-        let select = parsed_sql.map_err(|(cursor, message)| Error::SqlParse {
-            sql,
-            cursor,
-            message,
-        })?;
+        let select = parse_select(&mut parser)?;
+        expect_semicolon(&mut parser)?;
+        expect_no_more_token(&mut parser)?;
 
         if self.schema.is_none() {
             let schema_table = Schema::schema_table();
