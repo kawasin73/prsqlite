@@ -325,6 +325,26 @@ pub fn calc_type_affinity(type_name: &[MaybeQuotedBytes]) -> TypeAffinity {
     affinity
 }
 
+/// Parse the collation name to [Collation].
+///
+/// This now supports BINARY, NOCASE, and RTRIM only.
+///
+/// TODO: Support user defined collating sequence.
+pub fn calc_collation(collation_name: &MaybeQuotedBytes) -> anyhow::Result<Collation> {
+    // TODO: Validate with iterator.
+    let collation_name = collation_name.dequote();
+    let case_insensitive_collation_name = CaseInsensitiveBytes::from(collation_name.as_slice());
+    if case_insensitive_collation_name.equal_to_lower_bytes(b"binary") {
+        Ok(Collation::Binary)
+    } else if case_insensitive_collation_name.equal_to_lower_bytes(b"nocase") {
+        Ok(Collation::NoCase)
+    } else if case_insensitive_collation_name.equal_to_lower_bytes(b"rtrim") {
+        Ok(Collation::RTrim)
+    } else {
+        bail!("invalid collation: {:?}", collation_name);
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Table {
     pub root_page_id: PageId,
@@ -368,19 +388,7 @@ impl Table {
             let mut collation = DEFAULT_COLLATION.clone();
             for constraint in &column_def.constraints {
                 if let ColumnConstraint::Collate(collation_name) = constraint {
-                    let collation_name = collation_name.dequote();
-                    let case_insensitive_collation_name =
-                        CaseInsensitiveBytes::from(collation_name.as_slice());
-                    // TODO: Support user defined collating sequence.
-                    collation = if case_insensitive_collation_name.equal_to_lower_bytes(b"binary") {
-                        Collation::Binary
-                    } else if case_insensitive_collation_name.equal_to_lower_bytes(b"nocase") {
-                        Collation::NoCase
-                    } else if case_insensitive_collation_name.equal_to_lower_bytes(b"rtrim") {
-                        Collation::RTrim
-                    } else {
-                        bail!("invalid collation: {:?}", collation_name);
-                    };
+                    collation = calc_collation(collation_name)?;
                 }
             }
 

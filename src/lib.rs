@@ -45,9 +45,11 @@ use crate::parser::BinaryOp;
 use crate::parser::CompareOp;
 use crate::parser::Expr;
 use crate::parser::ResultColumn;
+use crate::parser::UnaryOp;
 use crate::record::parse_record_header;
 use crate::record::Record;
 use crate::record::SerialType;
+use crate::schema::calc_collation;
 use crate::schema::calc_type_affinity;
 use crate::schema::ColumnNumber;
 use crate::schema::Schema;
@@ -324,13 +326,30 @@ impl ConstantValue {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum CollateOrigin {
+    Column,
+    Expression,
+}
+
+fn filter_expression_collation(
+    collation: Option<(&Collation, CollateOrigin)>,
+) -> Option<(&Collation, CollateOrigin)> {
+    match collation {
+        Some((_, CollateOrigin::Expression)) => collation,
+        _ => None,
+    }
+}
+
 enum Expression {
     Column((ColumnNumber, TypeAffinity, Collation)),
-    BitNot {
+    UnaryOperator {
+        operator: UnaryOp,
         expr: Box<Expression>,
     },
-    UnaryMinus {
+    Collate {
         expr: Box<Expression>,
+        collation: Collation,
     },
     BinaryOperator {
         operator: BinaryOp,
@@ -345,6 +364,12 @@ enum Expression {
     Const(ConstantValue),
 }
 
+type ExecutionResult<'a> = (
+    Value<'a>,
+    Option<TypeAffinity>,
+    Option<(&'a Collation, CollateOrigin)>,
+);
+
 impl Expression {
     fn from(expr: Expr, table: &Table) -> anyhow::Result<Self> {
         match expr {
@@ -353,11 +378,16 @@ impl Expression {
             Expr::Real(f) => Ok(Self::Const(ConstantValue::Real(f))),
             Expr::Text(text) => Ok(Self::Const(ConstantValue::Text(text.dequote()))),
             Expr::Blob(hex) => Ok(Self::Const(ConstantValue::Blob(hex.decode()))),
-            Expr::BitNot(expr) => Ok(Self::BitNot {
+            Expr::UnaryOperator { operator, expr } => Ok(Self::UnaryOperator {
+                operator,
                 expr: Box::new(Self::from(*expr, table)?),
             }),
-            Expr::UnaryMinus(expr) => Ok(Self::UnaryMinus {
+            Expr::Collate {
+                expr,
+                collation_name,
+            } => Ok(Self::Collate {
                 expr: Box::new(Self::from(*expr, table)?),
+                collation: calc_collation(&collation_name)?,
             }),
             Expr::BinaryOperator {
                 operator,
@@ -385,32 +415,40 @@ impl Expression {
         }
     }
 
-    fn execute<'a>(
-        &'a self,
-        row: &'a RowData,
-    ) -> anyhow::Result<(Value<'a>, Option<TypeAffinity>, Option<&'a Collation>)> {
+    fn execute<'a>(&'a self, row: &'a RowData) -> anyhow::Result<ExecutionResult<'a>> {
         match self {
-            Self::Column((idx, affinity, collation)) => {
-                Ok((row.get_column_value(idx)?, Some(*affinity), Some(collation)))
-            }
-            Self::BitNot { expr } => {
-                let (value, _, _) = expr.execute(row)?;
-                let value = if let Some(i) = value.as_integer() {
-                    Value::Integer(!i)
-                } else {
-                    Value::Null
+            Self::Column((idx, affinity, collation)) => Ok((
+                row.get_column_value(idx)?,
+                Some(*affinity),
+                Some((collation, CollateOrigin::Column)),
+            )),
+            Self::UnaryOperator { operator, expr } => {
+                let (value, _, collation) = expr.execute(row)?;
+                let value = match operator {
+                    UnaryOp::BitNot => {
+                        if let Some(i) = value.as_integer() {
+                            Value::Integer(!i)
+                        } else {
+                            Value::Null
+                        }
+                    }
+                    UnaryOp::Minus => match value {
+                        Value::Null => Value::Null,
+                        Value::Integer(i) => Value::Integer(-i),
+                        Value::Real(d) => Value::Real(-d),
+                        Value::Text(_) | Value::Blob(_) => Value::Integer(0),
+                    },
                 };
-                Ok((value, None, None))
+                Ok((value, None, filter_expression_collation(collation)))
             }
-            Self::UnaryMinus { expr } => {
-                let (value, _, _) = expr.execute(row)?;
-                let value = match value {
-                    Value::Null => Value::Null,
-                    Value::Integer(i) => Value::Integer(-i),
-                    Value::Real(d) => Value::Real(-d),
-                    Value::Text(_) | Value::Blob(_) => Value::Integer(0),
-                };
-                Ok((value, None, None))
+            Self::Collate { expr, collation } => {
+                let (value, affinity, _) = expr.execute(row)?;
+                Ok((
+                    value,
+                    // Type affinity is preserved.
+                    affinity,
+                    Some((collation, CollateOrigin::Expression)),
+                ))
             }
             Self::BinaryOperator {
                 operator,
@@ -426,6 +464,15 @@ impl Expression {
                     (_, Value::Null) => return Ok((Value::Null, None, None)),
                     _ => {}
                 }
+
+                let collation = match (left_collation, right_collation) {
+                    (None, _) => right_collation,
+                    (Some((_, CollateOrigin::Column)), Some((_, CollateOrigin::Expression))) => {
+                        right_collation
+                    }
+                    _ => left_collation,
+                };
+                let next_collation = filter_expression_collation(collation);
 
                 match operator {
                     BinaryOp::Compare(compare_op) => {
@@ -456,15 +503,11 @@ impl Expression {
                             _ => {}
                         }
 
-                        let collation = if left_collation.is_none() {
-                            right_collation
-                        } else {
-                            left_collation
-                        };
-
-                        let cmp =
-                            ValueCmp::new(&left_value, collation.unwrap_or(&DEFAULT_COLLATION))
-                                .compare(&right_value);
+                        let cmp = ValueCmp::new(
+                            &left_value,
+                            collation.map(|(c, _)| c).unwrap_or(&DEFAULT_COLLATION),
+                        )
+                        .compare(&right_value);
 
                         let result = match compare_op {
                             CompareOp::Eq => cmp == Ordering::Equal,
@@ -475,9 +518,9 @@ impl Expression {
                             CompareOp::Ge => cmp != Ordering::Less,
                         };
                         if result {
-                            Ok((Value::Integer(1), None, None))
+                            Ok((Value::Integer(1), None, next_collation))
                         } else {
-                            Ok((Value::Integer(0), None, None))
+                            Ok((Value::Integer(0), None, next_collation))
                         }
                     }
                     BinaryOp::Concat => {
@@ -494,7 +537,7 @@ impl Expression {
                             }
                         };
                         buffer.extend(right.iter());
-                        Ok((Value::Text(Buffer::Owned(buffer)), None, None))
+                        Ok((Value::Text(Buffer::Owned(buffer)), None, next_collation))
                     }
                 }
             }

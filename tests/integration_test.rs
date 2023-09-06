@@ -368,6 +368,18 @@ fn test_select_expression() {
             Value::Blob(b"12345".as_slice().into()),
             "CAST(x'3132333435' AS BLOB)",
         ),
+        // Collate
+        (Value::Integer(1), "col1 COLLATE BINARY"),
+        (Value::Integer(2), "2 COLLATE NOCASE"),
+        (Value::Real(4.5), "4.5 COLLATE RTRIM"),
+        (
+            Value::Text(b"abc".as_slice().into()),
+            "'abc' COLLATE BINARY",
+        ),
+        (
+            Value::Blob(b"123".as_slice().into()),
+            "x'313233' COLLATE BINARY",
+        ),
         // Concat
         (Value::Text(b"foobar".to_vec().into()), "'foo' || 'bar'"),
         (
@@ -552,7 +564,10 @@ fn test_select_collation_sequence() {
         // Text comparison a=b is performed using the BINARY collating sequence.
         (vec![1, 2, 3], "SELECT x FROM t1 WHERE a = b;"),
         // Text comparison a=b is performed using the RTRIM collating sequence.
-        // (vec![1, 2, 3, 4], "SELECT x FROM t1 WHERE a = b COLLATE RTRIM;"),
+        (
+            vec![1, 2, 3, 4],
+            "SELECT x FROM t1 WHERE a = b COLLATE RTRIM;",
+        ),
         // Text comparison d=a is performed using the NOCASE collating sequence.
         (vec![1, 2, 3, 4], "SELECT x FROM t1 WHERE d = a;"),
         // Text comparison a=d is performed using the BINARY collating sequence.
@@ -604,26 +619,55 @@ fn test_select_preserved_collation_sequence() {
     let mut conn = Connection::open(file.path()).unwrap();
 
     for (expected, query) in [
-        // Collation is preserved by CAST.
+        // Left collation is prioritized.
+        (
+            vec![1, 2, 3],
+            "SELECT x FROM t1 WHERE a COLLATE BINARY = b COLLATE RTRIM;",
+        ),
+        // Collation (column) is preserved by CAST.
         (
             vec![1, 2, 3, 4],
             "SELECT x FROM t1 WHERE CAST(d AS TEXT) = CAST(a AS TEXT);",
         ),
         (vec![1, 4], "SELECT x FROM t1 WHERE CAST(a AS TEXT) = d;"),
-        // Collation is not preserved by concatinating.
+        // Collation (expression) is preserved by CAST.
+        (
+            vec![2],
+            "SELECT x FROM t1 WHERE CAST(c COLLATE BINARY AS TEXT) = CAST(a COLLATE NOCASE AS TEXT);",
+        ),
+        (
+            vec![2, 4],
+            "SELECT x FROM t1 WHERE CAST(a COLLATE NOCASE AS TEXT) = CAST(c COLLATE BINARY AS TEXT);",
+        ),
+        (
+            vec![2, 4],
+            "SELECT x FROM t1 WHERE c = CAST(a COLLATE NOCASE AS TEXT);",
+        ),
+        // Collation (column) is NOT preserved by concatinating.
         (vec![1, 4], "SELECT x FROM t1 WHERE d || 'd' = a || 'd';"),
+        (vec![2], "SELECT x FROM t1 WHERE 'a' || c = 'a' || a;"),
         (vec![1, 2, 3, 4], "SELECT x FROM t1 WHERE a || '' = d;"),
-        // Collation is not preserved by concatinating even if both operand are the same collation.
+        // Collation (column) is NOT preserved by concatinating even if both operand are the same collation.
         (vec![2], "SELECT x FROM t1 WHERE 'ABCABC' = d || d;"),
-        // Collation is not preserved by unary -. `-a` is 0 and converted to '0' by right operand
+        // Collation (expression) is preserved by concatinating.
+        (vec![1, 2, 3], "SELECT x FROM t1 WHERE 'a' || c = 'a' COLLATE RTRIM || a;"),
+        (vec![2, 4], "SELECT x FROM t1 WHERE 'a' COLLATE NOCASE || c = 'a' COLLATE RTRIM || a;"),
+        // Collation (column) is NOT preserved by unary -. `-a` is 0 and converted to '0' by right operand
         // CAST.
         (vec![5], "SELECT x FROM t1 WHERE -a = CAST(c AS TEXT);"),
-        // Collation is not preserved by unary ~. `-a` is -1 and converted to '-1' by right
+        // Collation (expression) is preserved by unary -.
+        (vec![], "SELECT x FROM t1 WHERE -CAST(a COLLATE BINARY AS TEXT) = CAST(c AS TEXT);"),
+        // Collation (column) is NOT preserved by unary ~. `-a` is -1 and converted to '-1' by right
         // operand CAST.
         (vec![6], "SELECT x FROM t1 WHERE ~a = CAST(c AS TEXT);"),
-        // Collation is not preserved by binary operator. `a = 'a'` is 0 and converted to '0' by
+        // Collation (expression) is preserved by unary ~.
+        (vec![], "SELECT x FROM t1 WHERE ~CAST(a COLLATE BINARY AS TEXT) = CAST(c AS TEXT);"),
+        // Collation (column) is NOT preserved by binary operator. `a = 'a'` is 0 and converted to '0' by
         // right operand CAST.
         (vec![5], "SELECT x FROM t1 WHERE a = 'a' = CAST(c AS TEXT);"),
+        // Collation (expression) is preserved by binary operator.
+        (vec![], "SELECT x FROM t1 WHERE a = 'a' COLLATE BINARY = CAST(c AS TEXT);"),
+        (vec![], "SELECT x FROM t1 WHERE a COLLATE BINARY = 'a' COLLATE RTRIM = CAST(c AS TEXT);"),
     ] {
         let results = load_test_rowids(&test_conn, query);
         assert_eq!(results, expected, "query: {}", query);

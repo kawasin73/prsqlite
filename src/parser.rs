@@ -427,6 +427,12 @@ fn parse_result_column(input: &[u8]) -> Result<(usize, ResultColumn)> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub enum UnaryOp {
+    BitNot,
+    Minus,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum BinaryOp {
     Compare(CompareOp),
     Concat,
@@ -452,8 +458,14 @@ pub enum CompareOp {
 #[derive(Debug, PartialEq)]
 pub enum Expr<'a> {
     Column(MaybeQuotedBytes<'a>),
-    BitNot(Box<Expr<'a>>),
-    UnaryMinus(Box<Expr<'a>>),
+    UnaryOperator {
+        operator: UnaryOp,
+        expr: Box<Expr<'a>>,
+    },
+    Collate {
+        expr: Box<Expr<'a>>,
+        collation_name: MaybeQuotedBytes<'a>,
+    },
     BinaryOperator {
         operator: BinaryOp,
         left: Box<Expr<'a>>,
@@ -532,7 +544,7 @@ fn parse_expr_compare<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, E
 }
 
 fn parse_expr_concat<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'a>)> {
-    let (mut n, mut expr) = parse_expr_unary(token, input)?;
+    let (mut n, mut expr) = parse_expr_collate(token, input)?;
     // TODO: -> ->> will be added in the future.
     #[allow(clippy::while_let_loop)]
     loop {
@@ -545,7 +557,7 @@ fn parse_expr_concat<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Ex
             return Err((n, "no expr after concat"));
         };
         n += nn;
-        let (nn, right) = adjust_error_cursor(parse_expr_unary(token, &input[n..]), n)?;
+        let (nn, right) = adjust_error_cursor(parse_expr_collate(token, &input[n..]), n)?;
         n += nn;
         expr = Expr::BinaryOperator {
             operator,
@@ -556,6 +568,30 @@ fn parse_expr_concat<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Ex
     Ok((n, expr))
 }
 
+fn parse_expr_collate<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'a>)> {
+    let (mut n, expr) = parse_expr_unary(token, input)?;
+    let mut collation = None;
+    while let Some((nn, Token::Collate)) = next_token(&input[n..]) {
+        n += nn;
+        let Some((nn, Token::Identifier(collation_name))) = next_token(&input[n..]) else {
+            return Err((n, "no collation name"));
+        };
+        n += nn;
+        collation = Some(collation_name);
+    }
+    if let Some(collation_name) = collation {
+        Ok((
+            n,
+            Expr::Collate {
+                expr: Box::new(expr),
+                collation_name,
+            },
+        ))
+    } else {
+        Ok((n, expr))
+    }
+}
+
 fn parse_expr_unary<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Expr<'a>)> {
     match token {
         Token::Tilda => {
@@ -563,7 +599,13 @@ fn parse_expr_unary<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Exp
                 return Err((0, "no expr after ~"));
             };
             let (nn, expr) = adjust_error_cursor(parse_expr_unary(token, &input[n..]), n)?;
-            Ok((n + nn, Expr::BitNot(Box::new(expr))))
+            Ok((
+                n + nn,
+                Expr::UnaryOperator {
+                    operator: UnaryOp::BitNot,
+                    expr: Box::new(expr),
+                },
+            ))
         }
         Token::Plus => {
             let Some((n, token)) = next_token(input) else {
@@ -599,7 +641,13 @@ fn parse_expr_unary<'a>(token: Token<'a>, input: &'a [u8]) -> Result<(usize, Exp
             }
             Some((n, token)) => {
                 let (nn, expr) = adjust_error_cursor(parse_expr_unary(token, &input[n..]), n)?;
-                Ok((n + nn, Expr::UnaryMinus(Box::new(expr))))
+                Ok((
+                    n + nn,
+                    Expr::UnaryOperator {
+                        operator: UnaryOp::Minus,
+                        expr: Box::new(expr),
+                    },
+                ))
             }
             _ => Err((0, "no expr after -")),
         },
@@ -1121,32 +1169,49 @@ mod tests {
             parse_expr(b"-foo").unwrap(),
             (
                 4,
-                Expr::UnaryMinus(Box::new(Expr::Column(b"foo".as_slice().into())))
+                Expr::UnaryOperator {
+                    operator: UnaryOp::Minus,
+                    expr: Box::new(Expr::Column(b"foo".as_slice().into()))
+                }
             )
         );
         assert_eq!(
             parse_expr(b"~foo").unwrap(),
             (
                 4,
-                Expr::BitNot(Box::new(Expr::Column(b"foo".as_slice().into())))
+                Expr::UnaryOperator {
+                    operator: UnaryOp::BitNot,
+                    expr: Box::new(Expr::Column(b"foo".as_slice().into()))
+                }
             )
         );
         assert_eq!(
             parse_expr(b"~~foo").unwrap(),
             (
                 5,
-                Expr::BitNot(Box::new(Expr::BitNot(Box::new(Expr::Column(
-                    b"foo".as_slice().into()
-                )))))
+                Expr::UnaryOperator {
+                    operator: UnaryOp::BitNot,
+                    expr: Box::new(Expr::UnaryOperator {
+                        operator: UnaryOp::BitNot,
+                        expr: Box::new(Expr::Column(b"foo".as_slice().into()))
+                    })
+                }
             )
         );
         assert_eq!(
             parse_expr(b"-+-+-foo").unwrap(),
             (
                 8,
-                Expr::UnaryMinus(Box::new(Expr::UnaryMinus(Box::new(Expr::UnaryMinus(
-                    Box::new(Expr::Column(b"foo".as_slice().into()))
-                )))))
+                Expr::UnaryOperator {
+                    operator: UnaryOp::Minus,
+                    expr: Box::new(Expr::UnaryOperator {
+                        operator: UnaryOp::Minus,
+                        expr: Box::new(Expr::UnaryOperator {
+                            operator: UnaryOp::Minus,
+                            expr: Box::new(Expr::Column(b"foo".as_slice().into()))
+                        })
+                    })
+                }
             )
         );
         assert_eq!(parse_expr(b"+123").unwrap(), (4, Expr::Integer(123)));
@@ -1159,13 +1224,25 @@ mod tests {
         );
         assert_eq!(
             parse_expr(b"-+-123").unwrap(),
-            (6, Expr::UnaryMinus(Box::new(Expr::Integer(-123))))
+            (
+                6,
+                Expr::UnaryOperator {
+                    operator: UnaryOp::Minus,
+                    expr: Box::new(Expr::Integer(-123))
+                }
+            )
         );
         assert_eq!(parse_expr(b"+123.4").unwrap(), (6, Expr::Real(123.4)));
         assert_eq!(parse_expr(b"-123.4").unwrap(), (6, Expr::Real(-123.4)));
         assert_eq!(
             parse_expr(b"-+-123.4").unwrap(),
-            (8, Expr::UnaryMinus(Box::new(Expr::Real(-123.4))))
+            (
+                8,
+                Expr::UnaryOperator {
+                    operator: UnaryOp::Minus,
+                    expr: Box::new(Expr::Real(-123.4))
+                }
+            )
         );
         assert_eq!(
             parse_expr(b"+'abc'").unwrap(),
@@ -1175,23 +1252,80 @@ mod tests {
             parse_expr(b"-'abc'").unwrap(),
             (
                 6,
-                Expr::UnaryMinus(Box::new(Expr::Text(b"'abc'".as_slice().into())))
+                Expr::UnaryOperator {
+                    operator: UnaryOp::Minus,
+                    expr: Box::new(Expr::Text(b"'abc'".as_slice().into()))
+                }
             )
         );
         assert_eq!(
             parse_expr(b"-abc").unwrap(),
             (
                 4,
-                Expr::UnaryMinus(Box::new(Expr::Column(b"abc".as_slice().into())))
+                Expr::UnaryOperator {
+                    operator: UnaryOp::Minus,
+                    expr: Box::new(Expr::Column(b"abc".as_slice().into()))
+                }
             )
         );
         assert_eq!(
             parse_expr(b"~-abc").unwrap(),
             (
                 5,
-                Expr::BitNot(Box::new(Expr::UnaryMinus(Box::new(Expr::Column(
-                    b"abc".as_slice().into()
-                )))))
+                Expr::UnaryOperator {
+                    operator: UnaryOp::BitNot,
+                    expr: Box::new(Expr::UnaryOperator {
+                        operator: UnaryOp::Minus,
+                        expr: Box::new(Expr::Column(b"abc".as_slice().into()))
+                    })
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_expr_collate() {
+        assert_eq!(
+            parse_expr(b"abc COLLATE binary").unwrap(),
+            (
+                18,
+                Expr::Collate {
+                    expr: Box::new(Expr::Column(b"abc".as_slice().into())),
+                    collation_name: b"binary".as_slice().into()
+                }
+            )
+        );
+        assert_eq!(
+            parse_expr(b"'abc' COLLATE \"nocase\"").unwrap(),
+            (
+                22,
+                Expr::Collate {
+                    expr: Box::new(Expr::Text(b"'abc'".as_slice().into())),
+                    collation_name: b"\"nocase\"".as_slice().into()
+                }
+            )
+        );
+        assert_eq!(
+            parse_expr(b"-abc COLLATE rtrim").unwrap(),
+            (
+                18,
+                Expr::Collate {
+                    expr: Box::new(Expr::UnaryOperator {
+                        operator: UnaryOp::Minus,
+                        expr: Box::new(Expr::Column(b"abc".as_slice().into()))
+                    }),
+                    collation_name: b"rtrim".as_slice().into()
+                }
+            )
+        );
+        assert_eq!(
+            parse_expr(b"abc COLLATE binary COLLATE nocase COLLATE rtrim").unwrap(),
+            (
+                47,
+                Expr::Collate {
+                    expr: Box::new(Expr::Column(b"abc".as_slice().into())),
+                    collation_name: b"rtrim".as_slice().into()
+                }
             )
         );
     }
@@ -1220,9 +1354,10 @@ mod tests {
                         left: Box::new(Expr::Integer(-1)),
                         right: Box::new(Expr::Integer(2)),
                     }),
-                    right: Box::new(Expr::UnaryMinus(Box::new(Expr::Column(
-                        b"abc".as_slice().into()
-                    )))),
+                    right: Box::new(Expr::UnaryOperator {
+                        operator: UnaryOp::Minus,
+                        expr: Box::new(Expr::Column(b"abc".as_slice().into()))
+                    }),
                 }
             )
         );
@@ -1285,9 +1420,10 @@ mod tests {
                         left: Box::new(Expr::Integer(-1)),
                         right: Box::new(Expr::Integer(2)),
                     }),
-                    right: Box::new(Expr::UnaryMinus(Box::new(Expr::Column(
-                        b"abc".as_slice().into()
-                    )))),
+                    right: Box::new(Expr::UnaryOperator {
+                        operator: UnaryOp::Minus,
+                        expr: Box::new(Expr::Column(b"abc".as_slice().into()))
+                    }),
                 }
             )
         );
@@ -1358,6 +1494,20 @@ mod tests {
 
     #[test]
     fn test_parse_expr_operators() {
+        assert_eq!(
+            parse_expr(b"1 || -2 COLLATE nocase").unwrap(),
+            (
+                22,
+                Expr::BinaryOperator {
+                    operator: BinaryOp::Concat,
+                    left: Box::new(Expr::Integer(1)),
+                    right: Box::new(Expr::Collate {
+                        expr: Box::new(Expr::Integer(-2)),
+                        collation_name: b"nocase".as_slice().into()
+                    }),
+                }
+            )
+        );
         assert_eq!(
             parse_expr(b"1 || 2 < 3 || 4").unwrap(),
             (
