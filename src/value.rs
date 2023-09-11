@@ -191,6 +191,26 @@ impl<'a> Value<'a> {
         }
     }
 
+    /// Convert the value to a string value if it is well-formed. otherwise,
+    /// convert it to an empty string.
+    ///
+    /// [Value::Null] is converted to [None].
+    pub fn as_string(&self) -> Option<String> {
+        match self {
+            Value::Null => None,
+            Value::Integer(i) => Some(i.to_string()),
+            Value::Real(d) => Some(d.to_string()),
+            Value::Text(buf) | Value::Blob(buf) => {
+                let slice: &[u8] = &buf;
+
+                // Attempt to convert the buffer to a UTF-8 string
+                match std::str::from_utf8(slice) {
+                    Ok(s) => Some(s.to_string()),
+                    Err(_) => None,
+                }
+            }
+        }
+    }
     /// Convert the value to text and return the [Buffer].
     ///
     /// This does not support [Value::Null] values.
