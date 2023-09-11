@@ -211,6 +211,22 @@ impl<'a> Value<'a> {
             }
         }
     }
+
+    /// Convert the value to a real value if it is well-formed. otherwise,
+    /// convert it to 0.0.
+    /// [Value::Null] is converted to [None].
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            Value::Null => None,
+            Value::Integer(i) => Some(*i as f64),
+            Value::Real(d) => Some(*d),
+            Value::Text(buf) | Value::Blob(buf) => {
+                let (_, _, d) = parse_float(buf);
+                Some(d)
+            }
+        }
+    }
+
     /// Convert the value to text and return the [Buffer].
     ///
     /// This does not support [Value::Null] values.
