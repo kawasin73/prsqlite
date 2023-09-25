@@ -206,7 +206,6 @@ pub fn parse_record_header(payload: &BtreePayload) -> anyhow::Result<Vec<(Serial
 mod tests {
 
     use super::*;
-
     use crate::cursor::BtreeCursor;
     use crate::test_utils::*;
 

@@ -469,7 +469,6 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-
     use crate::test_utils::*;
     use crate::Connection;
     use crate::Expression;

@@ -488,7 +488,6 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::record::Record;
     use crate::test_utils::*;
     use crate::value::Collation;

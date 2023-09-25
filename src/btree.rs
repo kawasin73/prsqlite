@@ -392,7 +392,6 @@ pub fn parse_btree_interior_cell_page_id(
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::test_utils::*;
     use crate::utils::unsafe_parse_varint;
 
