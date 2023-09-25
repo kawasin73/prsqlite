@@ -309,7 +309,7 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
         Ok(())
     }
 
-    pub fn next(&mut self) -> anyhow::Result<()> {
+    pub fn move_next(&mut self) -> anyhow::Result<()> {
         if !self.initialized {
             bail!("cursor is not initialized");
         } else if self.parent_pages.is_empty()
@@ -517,7 +517,7 @@ mod tests {
         assert!(cursor.get_index_payload().is_err());
         drop(payload);
 
-        cursor.next().unwrap();
+        cursor.move_next().unwrap();
         let payload = cursor.get_table_payload().unwrap();
         assert!(payload.is_some());
         let (key, payload) = payload.unwrap();
@@ -527,7 +527,7 @@ mod tests {
         assert!(cursor.get_index_payload().is_err());
         drop(payload);
 
-        cursor.next().unwrap();
+        cursor.move_next().unwrap();
         let payload = cursor.get_table_payload().unwrap();
         assert!(payload.is_some());
         let (key, payload) = payload.unwrap();
@@ -537,7 +537,7 @@ mod tests {
         assert!(cursor.get_index_payload().is_err());
         drop(payload);
 
-        cursor.next().unwrap();
+        cursor.move_next().unwrap();
         assert!(cursor.get_table_payload().unwrap().is_none());
         assert!(cursor.get_index_payload().is_err());
     }
@@ -566,7 +566,7 @@ mod tests {
         assert!(cursor.get_table_payload().is_err());
         drop(payload);
 
-        cursor.next().unwrap();
+        cursor.move_next().unwrap();
         let payload = cursor.get_index_payload().unwrap();
         assert!(payload.is_some());
         let payload = payload.unwrap();
@@ -575,7 +575,7 @@ mod tests {
         assert!(cursor.get_table_payload().is_err());
         drop(payload);
 
-        cursor.next().unwrap();
+        cursor.move_next().unwrap();
         let payload = cursor.get_index_payload().unwrap();
         assert!(payload.is_some());
         let payload = payload.unwrap();
@@ -584,7 +584,7 @@ mod tests {
         assert!(cursor.get_table_payload().is_err());
         drop(payload);
 
-        cursor.next().unwrap();
+        cursor.move_next().unwrap();
         assert!(cursor.get_index_payload().unwrap().is_none());
         assert!(cursor.get_table_payload().is_err());
     }
@@ -606,9 +606,9 @@ mod tests {
         let mut table_cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
         let mut index_cursor = BtreeCursor::new(index_page_id, &pager, &bctx).unwrap();
 
-        assert!(table_cursor.next().is_err());
+        assert!(table_cursor.move_next().is_err());
         assert!(table_cursor.get_table_payload().is_err());
-        assert!(index_cursor.next().is_err());
+        assert!(index_cursor.move_next().is_err());
         assert!(index_cursor.get_index_payload().is_err());
     }
 
@@ -622,7 +622,7 @@ mod tests {
         let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
         cursor.move_to_first().unwrap();
         assert!(cursor.get_table_payload().unwrap().is_none());
-        cursor.next().unwrap();
+        cursor.move_next().unwrap();
         assert!(cursor.get_table_payload().unwrap().is_none());
         cursor.table_move_to(0).unwrap();
         assert!(cursor.get_table_payload().unwrap().is_none());
@@ -641,7 +641,7 @@ mod tests {
         let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
         cursor.move_to_first().unwrap();
         assert!(cursor.get_index_payload().unwrap().is_none());
-        cursor.next().unwrap();
+        cursor.move_next().unwrap();
         assert!(cursor.get_index_payload().unwrap().is_none());
         cursor
             .index_move_to(&[ValueCmp::new(&Value::Integer(0), &Collation::Binary)])
@@ -702,7 +702,7 @@ mod tests {
             let mut table_record = Record::parse(&payload).unwrap();
             assert_eq!(table_record.get(0).unwrap(), Value::Integer(i));
             drop(payload);
-            table_cursor.next().unwrap();
+            table_cursor.move_next().unwrap();
 
             let payload = index1_cursor.get_index_payload().unwrap();
             let payload = payload.unwrap();
@@ -711,7 +711,7 @@ mod tests {
             assert!(payload.size() > BUFFER_SIZE as i32, "{}", i);
             assert_eq!(payload.size(), payload.buf().len() as i32);
             drop(payload);
-            index1_cursor.next().unwrap();
+            index1_cursor.move_next().unwrap();
 
             let payload = index2_cursor.get_index_payload().unwrap();
             let payload = payload.unwrap();
@@ -720,7 +720,7 @@ mod tests {
             assert_eq!(index_record.get(1).unwrap(), Value::Integer(i + 1));
             assert_eq!(payload.size(), payload.buf().len() as i32);
             drop(payload);
-            index2_cursor.next().unwrap();
+            index2_cursor.move_next().unwrap();
         }
         for i in 4000..5000 {
             let payload = table_cursor.get_table_payload().unwrap();
@@ -731,7 +731,7 @@ mod tests {
             assert_eq!(payload.buf(), &[3, 2, 14, col_buf[0], col_buf[1], 0xff]);
             assert_eq!(payload.size(), payload.buf().len() as i32);
             drop(payload);
-            table_cursor.next().unwrap();
+            table_cursor.move_next().unwrap();
 
             let payload = index1_cursor.get_index_payload().unwrap();
             let payload = payload.unwrap();
@@ -741,7 +741,7 @@ mod tests {
             assert_eq!(payload.buf(), &[3, 14, 2, 0xff, rowid_buf[0], rowid_buf[1]]);
             assert_eq!(payload.size(), payload.buf().len() as i32);
             drop(payload);
-            index1_cursor.next().unwrap();
+            index1_cursor.move_next().unwrap();
 
             let payload = index2_cursor.get_index_payload().unwrap();
             let payload = payload.unwrap();
@@ -750,7 +750,7 @@ mod tests {
             assert_eq!(index_record.get(1).unwrap(), Value::Integer(i + 1));
             assert_eq!(payload.size(), payload.buf().len() as i32);
             drop(payload);
-            index2_cursor.next().unwrap();
+            index2_cursor.move_next().unwrap();
         }
 
         assert!(table_cursor.get_table_payload().unwrap().is_none());

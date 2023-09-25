@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(record.get(3).unwrap(), Value::Integer(0));
         drop(payload);
 
-        cursor.next().unwrap();
+        cursor.move_next().unwrap();
         let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
         let mut record = Record::parse(&payload).unwrap();
         assert_eq!(record.get(0).unwrap(), Value::Integer(i8::MAX as i64));
@@ -267,7 +267,7 @@ mod tests {
         assert_eq!(record.get(3).unwrap(), Value::Integer(i16::MIN as i64));
         drop(payload);
 
-        cursor.next().unwrap();
+        cursor.move_next().unwrap();
         let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
         let mut record = Record::parse(&payload).unwrap();
         assert_eq!(record.get(0).unwrap(), Value::Integer((ONE << 23) - 1));
@@ -276,7 +276,7 @@ mod tests {
         assert_eq!(record.get(3).unwrap(), Value::Integer(i32::MIN as i64));
         drop(payload);
 
-        cursor.next().unwrap();
+        cursor.move_next().unwrap();
         let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
         let mut record = Record::parse(&payload).unwrap();
         assert_eq!(record.get(0).unwrap(), Value::Integer((ONE << 47) - 1));
@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(record.get(3).unwrap(), Value::Integer(i64::MIN));
         drop(payload);
 
-        cursor.next().unwrap();
+        cursor.move_next().unwrap();
         let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
         let mut record = Record::parse(&payload).unwrap();
         assert_eq!(record.get(0).unwrap(), Value::Integer(0));
@@ -304,7 +304,7 @@ mod tests {
         );
         drop(payload);
 
-        cursor.next().unwrap();
+        cursor.move_next().unwrap();
         let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
         let mut record = Record::parse(&payload).unwrap();
         assert_eq!(record.get(0).unwrap(), Value::Real(0.5));

@@ -739,9 +739,9 @@ impl<'conn> Rows<'conn> {
             // Only one row is selected.
             return Ok(false);
         } else if let Some(index_cursor) = &mut self.index_cursor {
-            index_cursor.next()?;
+            index_cursor.move_next()?;
         } else {
-            self.cursor.next()?;
+            self.cursor.move_next()?;
         }
         if let Some(index_cursor) = &mut self.index_cursor {
             let Some(index_payload) = index_cursor.get_index_payload()? else {
