@@ -26,6 +26,13 @@ pub fn u64_to_i64(v: u64) -> i64 {
     i64::from_ne_bytes(v.to_ne_bytes())
 }
 
+/// Convert i64 to u64 representation.
+///
+/// For example: -1 -> 0xffff_ffff_ffff_ffff
+pub fn i64_to_u64(v: i64) -> u64 {
+    u64::from_ne_bytes(v.to_ne_bytes())
+}
+
 /// Parse varint.
 ///
 /// Return None if the buffer is not valid varint.
@@ -73,7 +80,6 @@ pub fn unsafe_parse_varint(buf: &[u8]) -> (u64, usize) {
 /// Return the number of bytes written.
 ///
 /// The `buf` must have at least 9 bytes.
-#[allow(dead_code)]
 pub fn put_varint(buf: &mut [u8], v: u64) -> usize {
     assert!(buf.len() >= 9);
     let mut v = v;

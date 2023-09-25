@@ -14,9 +14,12 @@
 
 use std::cell::Ref;
 use std::cell::RefCell;
+use std::cell::RefMut;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fs::File;
+use std::ops::Deref;
+use std::ops::DerefMut;
 use std::os::unix::fs::FileExt;
 use std::rc::Rc;
 
@@ -24,9 +27,35 @@ use anyhow::bail;
 
 use crate::DATABASE_HEADER_SIZE;
 
+pub const MAX_BUFFER_SIZE: usize = 65536;
+
 pub type PageId = u32;
+
 // The size of a page is more than 512.
-pub type PageBuffer<'a> = Ref<'a, Vec<u8>>;
+pub struct PageBuffer<'a>(Ref<'a, RawPage>);
+
+impl<'a> Deref for PageBuffer<'a> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.buf
+    }
+}
+pub struct PageBufferMut<'a>(RefMut<'a, RawPage>);
+
+impl<'a> Deref for PageBufferMut<'a> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.buf
+    }
+}
+
+impl<'a> DerefMut for PageBufferMut<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0.buf
+    }
+}
 
 pub const ROOT_PAGE_ID: PageId = 1;
 
@@ -55,9 +84,9 @@ impl Pager {
             id => {
                 let (page, is_new) = self.cache.get_page(id);
                 if is_new {
-                    let mut buffer = page.borrow_mut();
-                    let offset = (id - 1) as usize * buffer.len();
-                    self.file.read_exact_at(&mut buffer, offset as u64)?;
+                    let mut raw_page = page.borrow_mut();
+                    let offset = (id - 1) as usize * self.cache.pagesize;
+                    self.file.read_exact_at(&mut raw_page.buf, offset as u64)?;
                 }
                 let header_offset = if id == 1 { DATABASE_HEADER_SIZE } else { 0 };
                 Ok(MemPage {
@@ -68,6 +97,35 @@ impl Pager {
         }
     }
 
+    pub fn make_page_mut<'a>(&self, page: &'a MemPage) -> anyhow::Result<PageBufferMut<'a>> {
+        let mut raw_page = page
+            .page
+            .try_borrow_mut()
+            .map_err(|e| anyhow::anyhow!("buffer mut: {}", e))?;
+
+        if !raw_page.is_dirty {
+            raw_page.is_dirty = true;
+            // TODO: setup journal
+        }
+
+        Ok(PageBufferMut(raw_page))
+    }
+
+    #[allow(dead_code)]
+    pub fn commit(&self) -> anyhow::Result<()> {
+        for (page_id, page) in self.cache.map.borrow().iter() {
+            let raw_page = page.borrow();
+            if raw_page.is_dirty {
+                let offset = (*page_id - 1) as usize * self.cache.pagesize;
+                self.file.write_all_at(&raw_page.buf, offset as u64)?;
+                drop(raw_page);
+                // TODO: How to guarantee page is not referenced?
+                page.borrow_mut().is_dirty = false;
+            }
+        }
+        Ok(())
+    }
+
     // TODO: this is currently only used for testing.
     #[allow(dead_code)]
     pub fn num_pages(&self) -> u32 {
@@ -76,18 +134,32 @@ impl Pager {
 }
 
 pub struct MemPage {
-    page: Rc<RefCell<Vec<u8>>>,
+    page: Rc<RefCell<RawPage>>,
     pub header_offset: usize,
 }
 
 impl MemPage {
     pub fn buffer(&self) -> PageBuffer {
-        self.page.borrow()
+        PageBuffer(self.page.borrow())
+    }
+}
+
+struct RawPage {
+    buf: Vec<u8>,
+    is_dirty: bool,
+}
+
+impl RawPage {
+    fn new(pagesize: usize) -> Self {
+        Self {
+            buf: vec![0_u8; pagesize],
+            is_dirty: false,
+        }
     }
 }
 
 struct PageCache {
-    map: RefCell<HashMap<PageId, Rc<RefCell<Vec<u8>>>>>,
+    map: RefCell<HashMap<PageId, Rc<RefCell<RawPage>>>>,
     pagesize: usize,
 }
 
@@ -99,11 +171,11 @@ impl PageCache {
         }
     }
 
-    fn get_page(&self, id: PageId) -> (Rc<RefCell<Vec<u8>>>, bool) {
+    fn get_page(&self, id: PageId) -> (Rc<RefCell<RawPage>>, bool) {
         match self.map.borrow_mut().entry(id) {
             Entry::Occupied(entry) => (entry.get().clone(), false),
             Entry::Vacant(entry) => {
-                let page = Rc::new(RefCell::new(vec![0_u8; self.pagesize]));
+                let page = Rc::new(RefCell::new(RawPage::new(self.pagesize)));
                 entry.insert(page.clone());
                 (page, true)
             }
