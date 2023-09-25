@@ -13,11 +13,14 @@
 // limitations under the License.
 
 use std::num::NonZeroU32;
+use std::num::NonZeroUsize;
 use std::ops::Range;
 
 use crate::pager::MemPage;
 use crate::pager::PageBuffer;
+use crate::pager::PageBufferMut;
 use crate::pager::PageId;
+use crate::pager::MAX_BUFFER_SIZE;
 use crate::utils::parse_varint;
 use crate::utils::u64_to_i64;
 
@@ -69,9 +72,31 @@ impl<'page> BtreePageHeader<'page> {
         BtreePageType(self.0[0])
     }
 
+    /// The offset of the first freeblock, or zero if there are no freeblocks.
+    pub fn first_freeblock_offset(&self) -> u16 {
+        u16::from_be_bytes(self.0[1..3].try_into().unwrap())
+    }
+
     /// The number of cells in this page
     pub fn n_cells(&self) -> u16 {
         u16::from_be_bytes(self.0[3..5].try_into().unwrap())
+    }
+
+    /// The offset of the cell content area
+    ///
+    /// zero is interpreted as 65536.
+    pub fn cell_content_area_offset(&self) -> NonZeroUsize {
+        let v = u16::from_be_bytes(self.0[5..7].try_into().unwrap()) as usize;
+        if v == 0 {
+            NonZeroUsize::new(MAX_BUFFER_SIZE).unwrap()
+        } else {
+            NonZeroUsize::new(v).unwrap()
+        }
+    }
+
+    /// Fragmented free bytes in the cell content area.
+    pub fn fragmented_free_bytes(&self) -> u8 {
+        self.0[7]
     }
 
     /// The right-most pointer
@@ -93,6 +118,37 @@ impl<'page> BtreePageHeader<'page> {
         // 0(leaf) or 4(interior)
         let additional_size = is_interior >> 1;
         8 + additional_size
+    }
+}
+
+pub struct BtreePageHeaderMut<'a>(&'a mut [u8; BTREE_PAGE_HEADER_MAX_SIZE]);
+
+impl<'a> BtreePageHeaderMut<'a> {
+    pub fn from_page(page: &MemPage, buffer: &'a mut PageBufferMut<'_>) -> Self {
+        // SAFETY: PageBuffer is always more than 512 bytes.
+        Self(
+            (&mut buffer[page.header_offset..page.header_offset + BTREE_PAGE_HEADER_MAX_SIZE])
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    /// Set number of cells in this page
+    pub fn set_n_cells(&mut self, n_cells: u16) {
+        self.0[3..5].copy_from_slice(n_cells.to_be_bytes().as_slice());
+    }
+
+    /// Set offset of the cell content area.
+    ///
+    /// The offset must be less than or equal to 65536.
+    pub fn set_cell_content_area_offset(&mut self, offset: NonZeroUsize) {
+        let mut offset = offset.get();
+        assert!(offset <= MAX_BUFFER_SIZE);
+        if offset == MAX_BUFFER_SIZE {
+            offset = 0;
+        }
+        let offset = offset as u16;
+        self.0[5..7].copy_from_slice(offset.to_be_bytes().as_slice());
     }
 }
 
@@ -166,6 +222,11 @@ impl<'a> IndexCellKeyParser<'a> {
     }
 }
 
+#[inline]
+pub fn cell_pointer_offset(page: &MemPage, cell_idx: u16, header_size: u8) -> usize {
+    page.header_offset + header_size as usize + (cell_idx << 1) as usize
+}
+
 /// Returns the offset of the cell in the buffer.
 ///
 /// Returned cell offset is in the range of the buffer.
@@ -175,7 +236,7 @@ fn get_cell_offset(
     cell_idx: u16,
     header_size: u8,
 ) -> ParseResult<usize> {
-    let cell_pointer_offset = page.header_offset + header_size as usize + (cell_idx << 1) as usize;
+    let cell_pointer_offset = cell_pointer_offset(page, cell_idx, header_size);
     if cell_pointer_offset + 2 > buffer.len() {
         return Err("cell pointer out of range");
     }

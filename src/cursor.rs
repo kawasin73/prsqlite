@@ -13,14 +13,17 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
+use std::num::NonZeroUsize;
 use std::ptr::copy_nonoverlapping;
 
 use anyhow::bail;
 
+use crate::btree::cell_pointer_offset;
 use crate::btree::parse_btree_interior_cell_page_id;
 use crate::btree::parse_btree_leaf_table_cell;
 use crate::btree::BtreeContext;
 use crate::btree::BtreePageHeader;
+use crate::btree::BtreePageHeaderMut;
 use crate::btree::BtreePageType;
 use crate::btree::IndexCellKeyParser;
 use crate::btree::PayloadInfo;
@@ -30,6 +33,8 @@ use crate::pager::PageBuffer;
 use crate::pager::PageId;
 use crate::pager::Pager;
 use crate::record::compare_record;
+use crate::utils::i64_to_u64;
+use crate::utils::put_varint;
 use crate::value::ValueCmp;
 
 pub struct BtreePayload<'a, 'pager> {
@@ -142,6 +147,11 @@ impl CursorPage {
     }
 }
 
+/// The cursor of btree.
+///
+/// This does not support creating multiple cursors for the same btree.
+/// Otherwise, [BtreeCursor::insert()] fails to get a writable buffer from the
+/// pager.
 pub struct BtreeCursor<'ctx, 'pager> {
     pager: &'pager Pager,
     btree_ctx: &'ctx BtreeContext,
@@ -170,7 +180,9 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
     /// Move to the specified btree table cell with the key.
     ///
     /// If it does not exist, move to the next cell.
-    pub fn table_move_to(&mut self, key: i64) -> anyhow::Result<()> {
+    ///
+    /// Returns the key of the cell which cursor is pointing.
+    pub fn table_move_to(&mut self, key: i64) -> anyhow::Result<Option<i64>> {
         // TODO: optimize for sequential access. i.e. key == previouse key + 1
         self.move_to_root()?;
         loop {
@@ -182,6 +194,7 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
             let buffer = self.current_page.mem.buffer();
             let cell_key_parser = TableCellKeyParser::new(&self.current_page.mem, &buffer);
 
+            let mut max_cell_key = None;
             while i_min < i_max {
                 let i_mid = (i_min + i_max) / 2;
                 let cell_key = cell_key_parser
@@ -190,9 +203,11 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
                 match key.cmp(&cell_key) {
                     Ordering::Less => {
                         i_max = i_mid;
+                        max_cell_key = Some(cell_key);
                     }
                     Ordering::Equal => {
                         i_min = i_mid;
+                        max_cell_key = Some(cell_key);
                         break;
                     }
                     Ordering::Greater => {
@@ -203,7 +218,7 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
             self.current_page.idx_cell = i_min as u16;
             if self.current_page.is_leaf {
                 self.initialized = true;
-                return Ok(());
+                return Ok(max_cell_key);
             }
 
             let next_page_id = if i_min == self.current_page.n_cells as usize {
@@ -363,6 +378,98 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
             }
         } else {
             bail!("not a btree page");
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn insert(&mut self, key: i64, payload: &[u8]) -> anyhow::Result<()> {
+        let current_cell_key = self.table_move_to(key)?;
+
+        let mut cell_header = [0; 18];
+        let mut cell_header_size = put_varint(cell_header.as_mut_slice(), payload.len() as u64);
+        cell_header_size += put_varint(&mut cell_header[cell_header_size..], i64_to_u64(key));
+        let cell_size = cell_header_size + payload.len();
+
+        // TODO: split the payload into overflow page if it is too large.
+
+        match current_cell_key {
+            Some(current_cell_key) if current_cell_key == key => {
+                // TODO: Update the payload
+                todo!("update the payload");
+            }
+            _ => {
+                let buffer = self.current_page.mem.buffer();
+                let page_header = BtreePageHeader::from_page(&self.current_page.mem, &buffer);
+
+                // TODO: Support freeblock.
+                assert_eq!(page_header.first_freeblock_offset(), 0);
+                assert_eq!(page_header.fragmented_free_bytes(), 0);
+                let cell_content_area_offset = page_header.cell_content_area_offset().get();
+                let header_size = page_header.header_size();
+                let unallocated_space_offset = cell_pointer_offset(
+                    &self.current_page.mem,
+                    self.current_page.n_cells,
+                    header_size,
+                );
+                let free_size = cell_content_area_offset - unallocated_space_offset;
+                if free_size < cell_size + 2 {
+                    // TODO: balance the btree.
+                    todo!("balance the btree");
+                }
+
+                // Upgrade the buffer to writable.
+                drop(buffer);
+                // Upgrading should be success because there must be no buffer reference of the
+                // page. We can guarantee it because:
+                //
+                // * This cursor is the only cursor handling the btree containing the page and
+                // * Only the possible reference is the returned payload from
+                //   get_table_payload(). However the payload is dropped before calling insert()
+                //   which is mutable method.
+                let mut buffer = self.pager.make_page_mut(&self.current_page.mem)?;
+
+                // TODO: allocateSpace().
+                // 1. Search freeblock first.
+                // 2. Defragmentation if needed
+                // 3. Allocate space from unallocated space.
+
+                let offset = cell_content_area_offset - cell_size;
+                // cell_content_area_offset is less than or equal to 65536. data is not empty.
+                // The offset must be less than 65536 and safe to cast into u16.
+                assert!(offset < u16::MAX as usize);
+
+                // Update the page header.
+                let mut page_header =
+                    BtreePageHeaderMut::from_page(&self.current_page.mem, &mut buffer);
+                assert!(offset > 0);
+                page_header.set_cell_content_area_offset(NonZeroUsize::new(offset).unwrap());
+                self.current_page.n_cells += 1;
+                page_header.set_n_cells(self.current_page.n_cells);
+
+                // Update cell pointer.
+                let cell_pointer_offset = if current_cell_key.is_some() {
+                    // Insert the new cell between cells.
+                    let cell_pointer_offset = self.current_page.mem.header_offset
+                        + header_size as usize
+                        + (self.current_page.idx_cell << 1) as usize;
+                    buffer.copy_within(
+                        cell_pointer_offset..unallocated_space_offset,
+                        cell_pointer_offset + 2,
+                    );
+                    cell_pointer_offset
+                } else {
+                    // Append the new cell to the tail.
+                    unallocated_space_offset
+                };
+                buffer[cell_pointer_offset..cell_pointer_offset + 2]
+                    .copy_from_slice(&(offset as u16).to_be_bytes());
+
+                // Copy payload to the btree page.
+                let payload_offset = offset + cell_header_size;
+                buffer[offset..payload_offset].copy_from_slice(&cell_header[..cell_header_size]);
+                buffer[payload_offset..payload_offset + payload.len()].copy_from_slice(payload);
+            }
         }
         Ok(())
     }
@@ -624,7 +731,7 @@ mod tests {
         assert!(cursor.get_table_payload().unwrap().is_none());
         cursor.move_next().unwrap();
         assert!(cursor.get_table_payload().unwrap().is_none());
-        cursor.table_move_to(0).unwrap();
+        assert!(cursor.table_move_to(0).unwrap().is_none());
         assert!(cursor.get_table_payload().unwrap().is_none());
     }
 
@@ -909,20 +1016,25 @@ mod tests {
         let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
 
         for i in 0..8 {
-            cursor.table_move_to(2 * i).unwrap();
+            let cell_key = cursor.table_move_to(2 * i).unwrap();
+            assert!(cell_key.is_some());
+            assert_eq!(cell_key.unwrap(), 2 * i + 1);
             let payload = cursor.get_table_payload().unwrap();
             assert!(payload.is_some());
             let (key, _) = payload.unwrap();
             assert_eq!(key, 2 * i + 1);
 
-            cursor.table_move_to(2 * i + 1).unwrap();
+            let cell_key = cursor.table_move_to(2 * i + 1).unwrap();
+            assert!(cell_key.is_some());
+            assert_eq!(cell_key.unwrap(), 2 * i + 1);
             let payload = cursor.get_table_payload().unwrap();
             assert!(payload.is_some());
             let (key, _) = payload.unwrap();
             assert_eq!(key, 2 * i + 1);
         }
 
-        cursor.table_move_to(16).unwrap();
+        let cell_key = cursor.table_move_to(16).unwrap();
+        assert!(cell_key.is_none());
         let payload = cursor.get_table_payload().unwrap();
         assert!(payload.is_none());
     }
@@ -937,7 +1049,8 @@ mod tests {
         let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
 
         for i in 0..3 {
-            cursor.table_move_to(i).unwrap();
+            let cell_key = cursor.table_move_to(i).unwrap();
+            assert!(cell_key.is_none());
             let payload = cursor.get_table_payload().unwrap();
             assert!(payload.is_none());
         }
@@ -973,20 +1086,25 @@ mod tests {
         let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
 
         for i in 0..2000 {
-            cursor.table_move_to(2 * i).unwrap();
+            let cell_key = cursor.table_move_to(2 * i).unwrap();
+            assert!(cell_key.is_some());
+            assert_eq!(cell_key.unwrap(), 2 * i + 1);
             let payload = cursor.get_table_payload().unwrap();
             assert!(payload.is_some());
             let (key, _) = payload.unwrap();
             assert_eq!(key, 2 * i + 1);
 
-            cursor.table_move_to(2 * i + 1).unwrap();
+            let cell_key = cursor.table_move_to(2 * i + 1).unwrap();
+            assert!(cell_key.is_some());
+            assert_eq!(cell_key.unwrap(), 2 * i + 1);
             let payload = cursor.get_table_payload().unwrap();
             assert!(payload.is_some());
             let (key, _) = payload.unwrap();
             assert_eq!(key, 2 * i + 1);
         }
 
-        cursor.table_move_to(40002).unwrap();
+        let cell_key = cursor.table_move_to(40002).unwrap();
+        assert!(cell_key.is_none());
         let payload = cursor.get_table_payload().unwrap();
         assert!(payload.is_none());
     }
@@ -1478,5 +1596,160 @@ mod tests {
             .unwrap();
         let payload = cursor.get_index_payload().unwrap();
         assert!(payload.is_none());
+    }
+
+    #[test]
+    fn test_insert_empty_table() {
+        let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let table_page_id = find_table_page_id("example", file.path());
+
+        let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
+
+        cursor.insert(1, &[1]).unwrap();
+        cursor.move_to_first().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 1);
+        assert_eq!(payload.buf(), &[1]);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let payload = cursor.get_table_payload().unwrap();
+        assert!(payload.is_none());
+        drop(payload);
+
+        cursor.insert(2, &[2, 3]).unwrap();
+        cursor.insert(4, &[4, 5, 6]).unwrap();
+
+        cursor.move_to_first().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 1);
+        assert_eq!(payload.buf(), &[1]);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 2);
+        assert_eq!(payload.buf(), &[2, 3]);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 4);
+        assert_eq!(payload.buf(), &[4, 5, 6]);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let payload = cursor.get_table_payload().unwrap();
+        assert!(payload.is_none());
+        drop(payload);
+
+        cursor.insert(-1, &[255]).unwrap();
+        cursor.insert(3, &[]).unwrap();
+
+        cursor.move_to_first().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, -1);
+        assert_eq!(payload.buf(), &[255]);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 1);
+        assert_eq!(payload.buf(), &[1]);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 2);
+        assert_eq!(payload.buf(), &[2, 3]);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 3);
+        assert_eq!(payload.buf(), &[]);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 4);
+        assert_eq!(payload.buf(), &[4, 5, 6]);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let payload = cursor.get_table_payload().unwrap();
+        assert!(payload.is_none());
+        drop(payload);
+    }
+
+    #[test]
+    fn test_insert_existing_table() {
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col);",
+            "INSERT INTO example(col) VALUES (1);", // rowid = 1
+            "INSERT INTO example(col) VALUES (2);", // rowid = 2
+            "INSERT INTO example(rowid, col) VALUES (5, 5);",
+        ]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let table_page_id = find_table_page_id("example", file.path());
+
+        let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
+
+        cursor.insert(6, &[6]).unwrap();
+        cursor.insert(-1, &[255]).unwrap();
+        cursor.insert(3, &[3]).unwrap();
+
+        cursor.move_to_first().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, -1);
+        assert_eq!(payload.buf(), &[255]);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 1);
+        assert_eq!(
+            Record::parse(&payload).unwrap().get(0).unwrap(),
+            Value::Integer(1)
+        );
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 2);
+        assert_eq!(
+            Record::parse(&payload).unwrap().get(0).unwrap(),
+            Value::Integer(2)
+        );
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 3);
+        assert_eq!(payload.buf(), &[3]);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 5);
+        assert_eq!(
+            Record::parse(&payload).unwrap().get(0).unwrap(),
+            Value::Integer(5)
+        );
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 6);
+        assert_eq!(payload.buf(), &[6]);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let payload = cursor.get_table_payload().unwrap();
+        assert!(payload.is_none());
+        drop(payload);
     }
 }
