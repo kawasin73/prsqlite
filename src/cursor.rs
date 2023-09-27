@@ -311,7 +311,6 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn move_to_last(&mut self) -> anyhow::Result<()> {
         self.move_to_root()?;
         if self.current_page.n_cells == 0 {
@@ -388,7 +387,6 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn insert(&mut self, key: i64, payload: &[u8]) -> anyhow::Result<()> {
         let current_cell_key = self.table_move_to(key)?;
 
@@ -480,7 +478,6 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn get_table_key(&self) -> anyhow::Result<Option<i64>> {
         if !self.initialized {
             bail!("cursor is not initialized");

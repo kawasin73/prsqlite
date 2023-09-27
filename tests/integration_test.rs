@@ -12,74 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod common;
+
+use common::*;
 use prsqlite::Connection;
 use prsqlite::Value;
-use tempfile::NamedTempFile;
-
-fn create_sqlite_database(queries: &[&str]) -> NamedTempFile {
-    let file = NamedTempFile::new().unwrap();
-    let conn = rusqlite::Connection::open(file.path()).unwrap();
-    for query in queries {
-        conn.execute(query, []).unwrap();
-    }
-    conn.close().unwrap();
-    file
-}
-
-fn load_rowids(conn: &mut Connection, query: &str) -> Vec<i64> {
-    let mut stmt = conn.prepare(query).unwrap();
-    let mut rows = stmt.execute().unwrap();
-    let mut results = Vec::new();
-    while let Some(row) = rows.next_row().unwrap() {
-        let columns = row.parse().unwrap();
-        assert_eq!(columns.len(), 1);
-        assert!(matches!(columns.get(0), &Value::Integer(_)));
-        let Value::Integer(rowid) = columns.get(0) else {
-            unreachable!()
-        };
-        results.push(*rowid);
-    }
-    results
-}
-
-fn load_test_rowids(conn: &rusqlite::Connection, query: &str) -> Vec<i64> {
-    let mut stmt = conn.prepare(query).unwrap();
-    let mut rows = stmt.query([]).unwrap();
-    let mut results = Vec::new();
-    while let Some(row) = rows.next().unwrap() {
-        results.push(row.get::<_, i64>(0).unwrap());
-    }
-    results
-}
-
-fn assert_same_results(
-    expected: &[Value],
-    query: &str,
-    test_conn: &rusqlite::Connection,
-    conn: &mut Connection,
-) {
-    let mut stmt = test_conn.prepare(query).unwrap();
-    let mut rows = stmt.query([]).unwrap();
-    let row = rows.next().unwrap().unwrap();
-    for (i, e) in expected.iter().enumerate() {
-        let v = match row.get::<_, rusqlite::types::Value>(i).unwrap() {
-            rusqlite::types::Value::Null => Value::Null,
-            rusqlite::types::Value::Integer(v) => Value::Integer(v),
-            rusqlite::types::Value::Real(v) => Value::Real(v),
-            rusqlite::types::Value::Text(v) => Value::Text(v.into_bytes().into()),
-            rusqlite::types::Value::Blob(v) => Value::Blob(v.into()),
-        };
-        assert_eq!(&v, e, "i: {}, query: {}", i, query);
-    }
-
-    let mut stmt = conn.prepare(query).unwrap();
-    let mut rows = stmt.execute().unwrap();
-    let row = rows.next_row().unwrap().unwrap();
-    let columns = row.parse().unwrap();
-    for (i, e) in expected.iter().enumerate() {
-        assert_eq!(columns.get(i), e, "i: {}, query: {}", i, query);
-    }
-}
 
 #[test]
 fn test_select_all_from_table() {
@@ -99,7 +36,7 @@ fn test_select_all_from_table() {
 
     let mut conn = Connection::open(file.path()).unwrap();
     let mut stmt = conn.prepare("SELECT * FROM example3;").unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -145,7 +82,7 @@ fn test_select_partial() {
 
     let mut conn = Connection::open(file.path()).unwrap();
     let mut stmt = conn.prepare("SELECT col3, col1 FROM example;").unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -184,7 +121,7 @@ fn test_select_rowid() {
 
     let mut conn = Connection::open(file.path()).unwrap();
     let mut stmt = conn.prepare("SELECT col, RoWid FROM example;").unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -204,7 +141,7 @@ fn test_select_rowid() {
 
     let mut conn = Connection::open(file.path()).unwrap();
     let mut stmt = conn.prepare("SELECT col, Rowid FROM example2;").unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -236,7 +173,7 @@ fn test_select_column_name_and_all() {
     let mut stmt = conn
         .prepare("SELECT col3, col3, *, col1 FROM example;")
         .unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -396,7 +333,7 @@ fn test_select_expression() {
         ),
     ] {
         let query = format!("SELECT {} FROM example;", expr);
-        assert_same_results(&[expected], &query, &test_conn, &mut conn);
+        assert_same_results(&[&[expected]], &query, &test_conn, &mut conn);
     }
 }
 
@@ -417,7 +354,7 @@ fn test_select_expression_operators() {
         (Value::Integer(0), "1 = 2 <= 1"),
     ] {
         let query = format!("SELECT {} FROM example;", expr);
-        assert_same_results(&[expected], &query, &test_conn, &mut conn);
+        assert_same_results(&[&[expected]], &query, &test_conn, &mut conn);
     }
 }
 
@@ -432,7 +369,7 @@ fn test_select_primary_key() {
     let mut conn = Connection::open(file.path()).unwrap();
 
     let mut stmt = conn.prepare("SELECT * FROM example;").unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -529,7 +466,7 @@ fn test_select_type_conversions_prior_to_comparison() {
         assert_eq!(result, expected, "query: {}", query);
 
         let mut stmt = conn.prepare(query).unwrap();
-        let mut rows = stmt.execute().unwrap();
+        let mut rows = stmt.query().unwrap();
         let row = rows.next_row().unwrap().unwrap();
         let columns = row.parse().unwrap();
         assert_eq!(columns.len(), expected.len());
@@ -690,7 +627,7 @@ fn test_select_filter() {
     let mut stmt = conn
         .prepare("SELECT * FROM example WHERE col2 == 5;")
         .unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -705,7 +642,7 @@ fn test_select_filter() {
     let mut stmt = conn
         .prepare("SELECT col2 FROM example WHERE col2 >= 5;")
         .unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -724,7 +661,7 @@ fn test_select_filter() {
     let mut stmt = conn
         .prepare("SELECT col2 FROM example WHERE col2 != 5;")
         .unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -755,7 +692,7 @@ fn test_select_filter_eq() {
     let mut stmt = conn
         .prepare("SELECT rowid, col1 FROM example WHERE col1 == 'hello';")
         .unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -776,7 +713,7 @@ fn test_select_filter_eq() {
     let mut stmt = conn
         .prepare("SELECT rowid, col2 FROM example WHERE col2 = 2.0;")
         .unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -797,7 +734,7 @@ fn test_select_filter_eq() {
     let mut stmt = conn
         .prepare("SELECT rowid, col3 FROM example WHERE col3 == 9;")
         .unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -818,7 +755,7 @@ fn test_select_filter_eq() {
     let mut stmt = conn
         .prepare("SELECT rowid, col4 FROM example WHERE col4 == x'2345ab';")
         .unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -847,7 +784,7 @@ fn test_select_filter_ne() {
     let mut stmt = conn
         .prepare("SELECT rowid, col1 FROM example WHERE col1 != 'hello';")
         .unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -861,7 +798,7 @@ fn test_select_filter_ne() {
     let mut stmt = conn
         .prepare("SELECT rowid, col2 FROM example WHERE col2 != 2.0;")
         .unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -875,7 +812,7 @@ fn test_select_filter_ne() {
     let mut stmt = conn
         .prepare("SELECT rowid, col3 FROM example WHERE col3 != 9;")
         .unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -889,7 +826,7 @@ fn test_select_filter_ne() {
     let mut stmt = conn
         .prepare("SELECT rowid, col4 FROM example WHERE col4 != x'01ef';")
         .unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -988,7 +925,7 @@ fn test_select_filter_with_rowid() {
     let mut stmt = conn
         .prepare("SELECT col, RoWid FROM example WHERE rowid = 2;")
         .unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -1016,7 +953,7 @@ fn test_select_filter_with_primary_key() {
     let mut stmt = conn
         .prepare("SELECT col, RoWid FROM example WHERE id = 3;")
         .unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
@@ -1028,7 +965,7 @@ fn test_select_filter_with_primary_key() {
     let mut stmt = conn
         .prepare("SELECT col, RoWid FROM example WHERE id = 4;")
         .unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
     assert!(rows.next_row().unwrap().is_none());
 }
 
@@ -1049,7 +986,7 @@ fn test_select_with_index() {
     let mut stmt = conn
         .prepare("SELECT * FROM example WHERE col2 == 5;")
         .unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -1072,7 +1009,7 @@ fn test_select_with_index() {
     let mut stmt = conn
         .prepare("SELECT * FROM example WHERE col3 == 6;")
         .unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
@@ -1087,7 +1024,7 @@ fn test_select_with_index() {
     let mut stmt = conn
         .prepare("SELECT * FROM example WHERE col3 == 3;")
         .unwrap();
-    let mut rows = stmt.execute().unwrap();
+    let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();

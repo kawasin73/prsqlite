@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::Path;
 
 use prsqlite::Connection;
+use prsqlite::Statement;
 
 fn main() {
     let mut args = env::args();
@@ -28,31 +29,40 @@ fn main() {
             ".quit" | ".exit" => break,
             "" => continue,
             line => {
-                let mut stmt = match conn.prepare(line) {
+                let stmt = match conn.prepare(line) {
                     Ok(stmt) => stmt,
                     Err(e) => {
                         eprintln!("{e}");
                         continue;
                     }
                 };
-                let mut rows = stmt.execute().expect("execute statement");
-                loop {
-                    let row = match rows.next_row() {
-                        Ok(Some(row)) => row,
-                        Ok(None) => break,
-                        Err(e) => {
-                            eprintln!("{e}");
-                            break;
+                match stmt {
+                    Statement::Query(mut stmt) => {
+                        let mut rows = stmt.query().expect("execute statement");
+                        loop {
+                            let row = match rows.next_row() {
+                                Ok(Some(row)) => row,
+                                Ok(None) => break,
+                                Err(e) => {
+                                    eprintln!("{e}");
+                                    break;
+                                }
+                            };
+                            let columns = row.parse().expect("parse row");
+                            for i in 0..columns.len() {
+                                if i > 0 {
+                                    print!("|");
+                                }
+                                columns.get(i).display(&mut stdout).expect("display column");
+                            }
+                            println!();
                         }
-                    };
-                    let columns = row.parse().expect("parse row");
-                    for i in 0..columns.len() {
-                        if i > 0 {
-                            print!("|");
-                        }
-                        columns.get(i).display(&mut stdout).expect("display column");
                     }
-                    println!();
+                    Statement::Execution(mut stmt) => {
+                        if let Err(e) = stmt.execute() {
+                            eprintln!("{e}");
+                        }
+                    }
                 }
             }
         }

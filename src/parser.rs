@@ -131,6 +131,25 @@ impl<'a> Parser<'a> {
     }
 }
 
+pub enum Stmt<'a> {
+    Select(Select<'a>),
+    Insert(Insert<'a>),
+}
+
+pub fn parse_sql<'a>(p: &mut Parser<'a>) -> Result<'a, Stmt<'a>> {
+    match p.peek() {
+        Some(Token::Select) => {
+            let select = parse_select(p)?;
+            Ok(Stmt::Select(select))
+        }
+        Some(Token::Insert) => {
+            let select = parse_insert(p)?;
+            Ok(Stmt::Insert(select))
+        }
+        _ => Err(p.error("no statement")),
+    }
+}
+
 /// Assert that the next token is a semicolon.
 pub fn expect_semicolon<'a>(p: &mut Parser<'a>) -> Result<'a, ()> {
     match p.peek() {
@@ -494,7 +513,6 @@ pub struct Insert<'a> {
 // Parse INSERT statement.
 //
 // https://www.sqlite.org/lang_insert.html
-#[allow(dead_code)]
 pub fn parse_insert<'a>(p: &mut Parser<'a>) -> Result<'a, Insert<'a>> {
     let Some(Token::Insert) = p.peek() else {
         return Err(p.error("no insert"));

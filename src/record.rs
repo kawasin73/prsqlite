@@ -259,7 +259,6 @@ fn parse_record_header_payload<P: RecordPayload>(
 ///
 /// TODO: Consider reduce memory copy. The returned temporary Vec<u8> is not
 /// necessary?
-#[allow(dead_code)]
 pub fn build_record(record: &[Value<'_>]) -> Vec<u8> {
     // TODO: How to avoid Vec allocation?
     let mut values = Vec::with_capacity(record.len());

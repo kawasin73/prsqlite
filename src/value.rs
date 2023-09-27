@@ -117,7 +117,14 @@ impl<'a> Value<'a> {
         match self {
             Value::Null => Value::Null,
             Value::Integer(i) => Value::Integer(i),
-            Value::Real(d) => Value::Real(d),
+            Value::Real(d) => {
+                let di = real_to_int(d);
+                if is_real_same_as_int(d, di) {
+                    Value::Integer(di)
+                } else {
+                    Value::Real(d)
+                }
+            }
             Value::Text(buf) => match parse_integer(&buf) {
                 (true, ParseIntegerResult::Integer(i)) => Value::Integer(i),
                 _ => {
@@ -653,6 +660,10 @@ mod tests {
         assert_eq!(
             Value::Real(12345.1).apply_numeric_affinity(),
             Value::Real(12345.1)
+        );
+        assert_eq!(
+            Value::Real(12345.0).apply_numeric_affinity(),
+            Value::Integer(12345)
         );
 
         assert_eq!(
