@@ -17,12 +17,19 @@ use std::hash::Hash;
 use std::hash::Hasher;
 
 const VARINT_FLAG_MASK: u8 = 0b1000_0000;
-const VARINT_VAR_MASK: u8 = !VARINT_FLAG_MASK;
+const VARINT_VAR_MASK: u64 = (!VARINT_FLAG_MASK) as u64;
+
+/// Convert u64 representation to i64.
+///
+/// For example: 0xffff_ffff_ffff_ffff -> -1
+pub fn u64_to_i64(v: u64) -> i64 {
+    i64::from_ne_bytes(v.to_ne_bytes())
+}
 
 /// Parse varint.
 ///
 /// Return None if the buffer is not valid varint.
-pub fn parse_varint(buf: &[u8]) -> Option<(i64, usize)> {
+pub fn parse_varint(buf: &[u8]) -> Option<(u64, usize)> {
     if valid_varint_buffer(buf) {
         Some(unsafe_parse_varint(buf))
     } else {
@@ -42,22 +49,59 @@ fn valid_varint_buffer(buf: &[u8]) -> bool {
 }
 
 /// Parse varint without validation
-pub fn unsafe_parse_varint(buf: &[u8]) -> (i64, usize) {
+pub fn unsafe_parse_varint(buf: &[u8]) -> (u64, usize) {
+    assert!(!buf.is_empty());
     if buf[0] & VARINT_FLAG_MASK == 0 {
-        (buf[0] as i64, 1)
+        (buf[0] as u64, 1)
     } else {
-        let mut v = (buf[0] & VARINT_VAR_MASK) as i64;
-        #[allow(clippy::needless_range_loop)]
-        for i in 1..8 {
+        let mut v = 0;
+        for (i, v2) in buf.iter().enumerate().take(8) {
             v <<= 7;
-            v |= (buf[i] & VARINT_VAR_MASK) as i64;
-            if buf[i] & VARINT_FLAG_MASK == 0 {
+            v |= *v2 as u64 & VARINT_VAR_MASK;
+            if *v2 & VARINT_FLAG_MASK == 0 {
                 return (v, i + 1);
             }
         }
         v <<= 8;
-        v |= buf[8] as i64;
+        v |= buf[8] as u64;
         (v, 9)
+    }
+}
+
+/// Put varint into the `buf`.
+///
+/// Return the number of bytes written.
+///
+/// The `buf` must have at least 9 bytes.
+#[allow(dead_code)]
+pub fn put_varint(buf: &mut [u8], v: u64) -> usize {
+    assert!(buf.len() >= 9);
+    let mut v = v;
+    if v & (0xff000000 << 32) != 0 {
+        buf[8] = v as u8;
+        v >>= 8;
+        for v2 in buf[..8].iter_mut().rev() {
+            *v2 = (v & 0x7f) as u8 | VARINT_FLAG_MASK;
+            v >>= 7;
+        }
+        9
+    } else {
+        let mut reversed_buf = [0_u8; 9];
+        let mut i = 0;
+        loop {
+            assert!(i < 9);
+            reversed_buf[i] = (v & 0x7f) as u8 | VARINT_FLAG_MASK;
+            v >>= 7;
+            i += 1;
+            if v == 0 {
+                break;
+            }
+        }
+        reversed_buf[0] &= VARINT_VAR_MASK as u8;
+        for (v1, v2) in reversed_buf[..i].iter().rev().zip(buf.iter_mut()) {
+            *v2 = *v1;
+        }
+        i
     }
 }
 
@@ -643,9 +687,9 @@ mod tests {
             ),
             (
                 &[192, 128, 128, 128, 128, 128, 128, 128, 1],
-                -9223372036854775807,
+                9223372036854775809,
             ),
-            (&[255, 255, 255, 255, 255, 255, 255, 255, 255], -1),
+            (&[255, 255, 255, 255, 255, 255, 255, 255, 255], u64::MAX),
         ] {
             let (result, consumed) = unsafe_parse_varint(buf);
             assert_eq!(consumed, buf.len(), "buf: {buf:?}");
@@ -683,6 +727,32 @@ mod tests {
         ] as [&[u8]; 10]
         {
             assert!(parse_varint(buf).is_none());
+        }
+    }
+
+    #[test]
+    fn test_put_varint() {
+        for v in [
+            0,
+            1,
+            2,
+            127,
+            128,
+            0b11_1111_0111_1111,
+            0b1_1111_1011_1111_0111_1111,
+            0b1111_1101_1111_1011_1111_0111_1111,
+            0b1111_1101_1111_1011_1111_0111_1110_1111_1101_1111_1011_1111_0111_1111,
+            9223372036854775809,
+            u64::MAX,
+        ] {
+            let mut buf = [0; 10];
+            let n = put_varint(buf.as_mut_slice(), v);
+
+            let result = parse_varint(&buf[..n]);
+            assert!(result.is_some(), "v: {v}, {:?}", &buf[..n]);
+            let (v2, consumed) = result.unwrap();
+            assert_eq!(v2, v);
+            assert_eq!(consumed, n, "v: {v}");
         }
     }
 
