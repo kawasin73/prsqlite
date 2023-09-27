@@ -26,7 +26,7 @@ mod value;
 
 use std::cmp::Ordering;
 use std::fmt::Display;
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 
@@ -40,14 +40,18 @@ use crate::pager::PageId;
 use crate::pager::Pager;
 use crate::parser::expect_no_more_token;
 use crate::parser::expect_semicolon;
-use crate::parser::parse_select;
+use crate::parser::parse_sql;
 use crate::parser::BinaryOp;
 use crate::parser::CompareOp;
 use crate::parser::Error as ParseError;
 use crate::parser::Expr;
+use crate::parser::Insert;
 use crate::parser::Parser;
 use crate::parser::ResultColumn;
+use crate::parser::Select;
+use crate::parser::Stmt;
 use crate::parser::UnaryOp;
+use crate::record::build_record;
 use crate::record::parse_record;
 use crate::record::parse_record_header;
 use crate::record::SerialType;
@@ -66,6 +70,9 @@ use crate::value::DEFAULT_COLLATION;
 const SQLITE_MAX_PAGE_SIZE: u32 = 65536;
 pub const DATABASE_HEADER_SIZE: usize = 100;
 const MAGIC_HEADER: &[u8; 16] = b"SQLite format 3\0";
+// Original SQLite support both 32-bit or 64-bit rowid. prsqlite only support
+// 64-bit rowid.
+const MAX_ROWID: i64 = i64::MAX;
 
 #[derive(Debug)]
 pub enum Error<'a> {
@@ -141,7 +148,12 @@ pub struct Connection {
 
 impl Connection {
     pub fn open(filename: &Path) -> anyhow::Result<Self> {
-        let file = File::open(filename)?;
+        // TODO: support read only mode.
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(filename)
+            .with_context(|| format!("failed to open file: {:?}", filename))?;
         let mut buf = [0; DATABASE_HEADER_SIZE];
         file.read_exact_at(&mut buf, 0)?;
         let header = DatabaseHeader::from(&buf);
@@ -163,20 +175,32 @@ impl Connection {
     pub fn prepare<'a>(&mut self, sql: &'a str) -> Result<'a, Statement> {
         let input = sql.as_bytes();
         let mut parser = Parser::new(input);
-        let select = parse_select(&mut parser)?;
+        let statement = parse_sql(&mut parser)?;
         expect_semicolon(&mut parser)?;
         expect_no_more_token(&mut parser)?;
 
+        match statement {
+            Stmt::Select(select) => Ok(Statement::Query(self.prepare_select(select)?)),
+            Stmt::Insert(insert) => Ok(Statement::Execution(self.prepare_insert(insert)?)),
+        }
+    }
+
+    fn load_schema(&mut self) -> anyhow::Result<()> {
+        let schema_table = Schema::schema_table();
+        let columns = schema_table
+            .get_all_columns()
+            .map(Expression::Column)
+            .collect::<Vec<_>>();
+        self.schema = Some(Schema::generate(
+            SelectStatement::new(self, schema_table.root_page_id, columns, None),
+            schema_table,
+        )?);
+        Ok(())
+    }
+
+    fn prepare_select<'a>(&mut self, select: Select<'a>) -> Result<'a, SelectStatement> {
         if self.schema.is_none() {
-            let schema_table = Schema::schema_table();
-            let columns = schema_table
-                .get_all_columns()
-                .map(Expression::Column)
-                .collect::<Vec<_>>();
-            self.schema = Some(Schema::generate(
-                Statement::new(self, schema_table.root_page_id, columns, None),
-                schema_table,
-            )?);
+            self.load_schema()?;
         }
         let schema = self.schema.as_ref().unwrap();
         let table_name = select.table_name.dequote();
@@ -193,7 +217,7 @@ impl Connection {
                 }
                 ResultColumn::Expr((expr, _alias)) => {
                     // TODO: consider alias.
-                    columns.push(Expression::from(expr, table)?);
+                    columns.push(Expression::from(expr, Some(table))?);
                 }
                 ResultColumn::AllOfTable(_table_name) => {
                     todo!("ResultColumn::AllOfTable");
@@ -203,7 +227,7 @@ impl Connection {
 
         let filter = select
             .filter
-            .map(|expr| Expression::from(expr, table))
+            .map(|expr| Expression::from(expr, Some(table)))
             .transpose()?;
 
         let index = if let Some(Expression::BinaryOperator {
@@ -254,7 +278,7 @@ impl Connection {
 
         let table_page_id = table.root_page_id;
         if index.is_some() {
-            Ok(Statement::with_index(
+            Ok(SelectStatement::with_index(
                 self,
                 table_page_id,
                 columns,
@@ -262,11 +286,73 @@ impl Connection {
                 index,
             ))
         } else {
-            Ok(Statement::new(self, table_page_id, columns, filter))
+            Ok(SelectStatement::new(self, table_page_id, columns, filter))
         }
+    }
+
+    fn prepare_insert<'a>(&mut self, insert: Insert<'a>) -> Result<'a, InsertStatement> {
+        if self.schema.is_none() {
+            self.load_schema()?;
+        }
+
+        let schema = self.schema.as_ref().unwrap();
+        let table_name = insert.table_name.dequote();
+        let table = schema.get_table(&table_name).ok_or(anyhow::anyhow!(
+            "table not found: {:?}",
+            std::str::from_utf8(&table_name).unwrap_or_default()
+        ))?;
+
+        let mut columns_idx = Vec::with_capacity(insert.columns.len());
+        for column in insert.columns {
+            let column_name = column.dequote();
+            if let Some((column_idx, _, _)) = table.get_column(&column_name) {
+                columns_idx.push(column_idx);
+            } else {
+                return Err(Error::Other(anyhow::anyhow!(
+                    "column not found: {:?}",
+                    std::str::from_utf8(&column_name).unwrap_or_default()
+                )));
+            }
+        }
+
+        let mut records = Vec::with_capacity(insert.values.len());
+        for column_values in insert.values {
+            let mut columns = table
+                .columns
+                .iter()
+                .map(|column| (Expression::Null, column.type_affinity))
+                .collect::<Vec<_>>();
+            let mut rowid = None;
+            if column_values.len() != columns_idx.len() {
+                return Err(Error::Other(anyhow::anyhow!(
+                    "{} values for {} columns",
+                    column_values.len(),
+                    columns_idx.len()
+                )));
+            }
+            for (column, expr) in columns_idx.iter().zip(column_values.into_iter()) {
+                match column {
+                    ColumnNumber::RowId => {
+                        rowid = Some(Expression::from(expr, None)?);
+                    }
+                    ColumnNumber::Column(column_idx) => {
+                        columns[*column_idx].0 = Expression::from(expr, None)?;
+                    }
+                }
+            }
+            records.push(InsertRecord { rowid, columns })
+        }
+
+        let table_page_id = table.root_page_id;
+        Ok(InsertStatement {
+            conn: self,
+            table_page_id,
+            records,
+        })
     }
 }
 
+#[derive(Debug, Clone)]
 enum ConstantValue {
     Integer(i64),
     Real(f64),
@@ -311,6 +397,7 @@ fn filter_expression_collation(
     }
 }
 
+#[derive(Debug, Clone)]
 enum Expression {
     Column((ColumnNumber, TypeAffinity, Collation)),
     UnaryOperator {
@@ -341,7 +428,7 @@ type ExecutionResult<'a> = (
 );
 
 impl Expression {
-    fn from(expr: Expr, table: &Table) -> anyhow::Result<Self> {
+    fn from(expr: Expr, table: Option<&Table>) -> anyhow::Result<Self> {
         match expr {
             Expr::Null => Ok(Self::Null),
             Expr::Integer(i) => Ok(Self::Const(ConstantValue::Integer(i))),
@@ -369,14 +456,18 @@ impl Expression {
                 right: Box::new(Self::from(*right, table)?),
             }),
             Expr::Column(column_name) => {
-                let column_name = column_name.dequote();
-                table
-                    .get_column(&column_name)
-                    .map(Self::Column)
-                    .ok_or(anyhow::anyhow!(
-                        "column not found: {}",
-                        std::str::from_utf8(&column_name).unwrap_or_default()
-                    ))
+                if let Some(table) = table {
+                    let column_name = column_name.dequote();
+                    table
+                        .get_column(&column_name)
+                        .map(Self::Column)
+                        .ok_or(anyhow::anyhow!(
+                            "column not found: {}",
+                            std::str::from_utf8(&column_name).unwrap_or_default()
+                        ))
+                } else {
+                    bail!("no table context is not specified");
+                }
             }
             Expr::Cast { expr, type_name } => Ok(Self::Cast {
                 expr: Box::new(Self::from(*expr, table)?),
@@ -385,13 +476,22 @@ impl Expression {
         }
     }
 
-    fn execute<'a>(&'a self, row: &'a RowData) -> anyhow::Result<ExecutionResult<'a>> {
+    /// Execute the expression and return the result.
+    ///
+    /// TODO: The row should be a context object.
+    fn execute<'a>(&'a self, row: Option<&'a RowData>) -> anyhow::Result<ExecutionResult<'a>> {
         match self {
-            Self::Column((idx, affinity, collation)) => Ok((
-                row.get_column_value(idx)?,
-                Some(*affinity),
-                Some((collation, CollateOrigin::Column)),
-            )),
+            Self::Column((idx, affinity, collation)) => {
+                if let Some(row) = row {
+                    Ok((
+                        row.get_column_value(idx)?,
+                        Some(*affinity),
+                        Some((collation, CollateOrigin::Column)),
+                    ))
+                } else {
+                    bail!("column value is not available");
+                }
+            }
             Self::UnaryOperator { operator, expr } => {
                 let (value, _, collation) = expr.execute(row)?;
                 let value = match operator {
@@ -534,8 +634,29 @@ struct IndexInfo {
     n_extra: usize,
 }
 
+pub enum Statement<'conn> {
+    Query(SelectStatement<'conn>),
+    Execution(InsertStatement<'conn>),
+}
+
+impl<'conn> Statement<'conn> {
+    pub fn query(&'conn mut self) -> anyhow::Result<Rows<'conn>> {
+        match self {
+            Self::Query(stmt) => stmt.query(),
+            Self::Execution(_) => bail!("execute statement not support query"),
+        }
+    }
+
+    pub fn execute(&'conn mut self) -> anyhow::Result<usize> {
+        match self {
+            Self::Query(_) => bail!("select statement not support execute"),
+            Self::Execution(stmt) => stmt.execute(),
+        }
+    }
+}
+
 // TODO: make Connection non mut and support multiple statements.
-pub struct Statement<'conn> {
+pub struct SelectStatement<'conn> {
     conn: &'conn mut Connection,
     table_page_id: PageId,
     columns: Vec<Expression>,
@@ -544,7 +665,7 @@ pub struct Statement<'conn> {
     index: Option<IndexInfo>,
 }
 
-impl<'conn> Statement<'conn> {
+impl<'conn> SelectStatement<'conn> {
     pub(crate) fn new(
         conn: &'conn mut Connection,
         table_page_id: PageId,
@@ -596,7 +717,8 @@ impl<'conn> Statement<'conn> {
         }
     }
 
-    pub fn execute(&'conn mut self) -> anyhow::Result<Rows<'conn>> {
+    pub fn query(&'conn mut self) -> anyhow::Result<Rows<'conn>> {
+        // TODO: ReadLock table/schema.
         // TODO: check schema version.
         let mut cursor =
             BtreeCursor::new(self.table_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
@@ -635,7 +757,7 @@ impl<'conn> Statement<'conn> {
 }
 
 pub struct Rows<'conn> {
-    stmt: &'conn Statement<'conn>,
+    stmt: &'conn SelectStatement<'conn>,
     cursor: BtreeCursor<'conn, 'conn>,
     index_cursor: Option<BtreeCursor<'conn, 'conn>>,
     is_first_row: bool,
@@ -697,7 +819,10 @@ impl<'conn> Rows<'conn> {
                     use_local_buffer,
                     content_offset,
                 };
-                let skip = matches!(filter.execute(&data)?.0, Value::Null | Value::Integer(0));
+                let skip = matches!(
+                    filter.execute(Some(&data))?.0,
+                    Value::Null | Value::Integer(0)
+                );
                 RowData {
                     rowid: _,
                     payload: _,
@@ -804,7 +929,7 @@ impl<'a> RowData<'a> {
 }
 
 pub struct Row<'a> {
-    stmt: &'a Statement<'a>,
+    stmt: &'a SelectStatement<'a>,
     data: RowData<'a>,
 }
 
@@ -812,7 +937,7 @@ impl<'a> Row<'a> {
     pub fn parse(&self) -> anyhow::Result<Columns<'_>> {
         let mut columns = Vec::with_capacity(self.stmt.columns.len());
         for expr in self.stmt.columns.iter() {
-            let (value, _, _) = expr.execute(&self.data)?;
+            let (value, _, _) = expr.execute(Some(&self.data))?;
             columns.push(value);
         }
         Ok(Columns(columns))
@@ -836,6 +961,77 @@ impl<'a> Columns<'a> {
 
     pub fn iter(&self) -> impl Iterator<Item = &Value<'a>> {
         self.0.iter()
+    }
+}
+
+struct InsertRecord {
+    rowid: Option<Expression>,
+    columns: Vec<(Expression, TypeAffinity)>,
+}
+
+pub struct InsertStatement<'conn> {
+    conn: &'conn mut Connection,
+    table_page_id: PageId,
+    records: Vec<InsertRecord>,
+}
+
+impl InsertStatement<'_> {
+    pub fn execute(&mut self) -> anyhow::Result<usize> {
+        // TODO: Lock table/schema.
+        let mut cursor =
+            BtreeCursor::new(self.table_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
+        let mut n = 0;
+        for record in self.records.iter() {
+            let mut rowid = None;
+            if let Some(rowid_expr) = &record.rowid {
+                let (rowid_value, _, _) = rowid_expr.execute(None)?;
+                match rowid_value.apply_numeric_affinity() {
+                    Value::Null => {
+                        // NULL then fallback to generate new rowid.
+                    }
+                    Value::Integer(rowid_value) => {
+                        rowid = Some(rowid_value);
+                    }
+                    _ => bail!("rowid is not integer"),
+                }
+            }
+            let rowid = if let Some(rowid) = rowid {
+                rowid
+            } else {
+                cursor.move_to_last()?;
+                let last_rowid = cursor.get_table_key()?.unwrap_or(0);
+                // TODO: 32-bit rowid support.
+                if last_rowid == MAX_ROWID {
+                    todo!("find unused rowid randomly");
+                } else {
+                    last_rowid + 1
+                }
+            };
+
+            // Check rowid conflict
+            let current_rowid = cursor.table_move_to(rowid)?;
+            if current_rowid.is_some() && current_rowid.unwrap() == rowid {
+                bail!("the rowid already exists");
+            }
+
+            let mut columns = Vec::with_capacity(record.columns.len());
+            for (expr, _type_affinity) in record.columns.iter() {
+                let (value, _, _) = expr.execute(None)?;
+                // TODO: apply affinity
+                columns.push(value);
+            }
+
+            let record = build_record(&columns);
+
+            cursor.insert(rowid, &record)?;
+
+            // TODO: insert into index if exists.
+
+            n += 1;
+        }
+
+        self.conn.pager.commit()?;
+        Ok(n)
     }
 }
 

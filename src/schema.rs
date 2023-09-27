@@ -36,7 +36,7 @@ use crate::value::TypeAffinity;
 use crate::value::Value;
 use crate::value::DEFAULT_COLLATION;
 use crate::Columns;
-use crate::Statement;
+use crate::SelectStatement;
 
 struct SchemaRecord<'a> {
     type_: &'a [u8],
@@ -127,9 +127,9 @@ impl Schema {
         }
     }
 
-    pub fn generate(stmt: Statement, schema_table: Table) -> anyhow::Result<Schema> {
+    pub fn generate(stmt: SelectStatement, schema_table: Table) -> anyhow::Result<Schema> {
         let mut stmt = stmt;
-        let mut rows = stmt.execute()?;
+        let mut rows = stmt.query()?;
         let mut tables = HashMap::new();
         let mut indexes = HashMap::new();
         while let Some(row) = rows.next_row()? {
@@ -290,7 +290,7 @@ pub struct Column {
     pub collation: Collation,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ColumnNumber {
     RowId,
     Column(usize),
@@ -481,7 +481,7 @@ mod tests {
             .map(Expression::Column)
             .collect::<Vec<_>>();
         Schema::generate(
-            Statement::new(&mut conn, schema_table.root_page_id, columns, None),
+            SelectStatement::new(&mut conn, schema_table.root_page_id, columns, None),
             schema_table,
         )
         .unwrap()

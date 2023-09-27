@@ -26,7 +26,7 @@ use crate::schema::Schema;
 use crate::Connection;
 use crate::DatabaseHeader;
 use crate::Expression;
-use crate::Statement;
+use crate::SelectStatement;
 use crate::DATABASE_HEADER_SIZE;
 
 pub fn create_sqlite_database(queries: &[&str]) -> NamedTempFile {
@@ -74,7 +74,7 @@ pub fn find_table_page_id(table: &str, filepath: &Path) -> PageId {
         .map(Expression::Column)
         .collect::<Vec<_>>();
     let schema = Schema::generate(
-        Statement::new(&mut conn, schema_table.root_page_id, columns, None),
+        SelectStatement::new(&mut conn, schema_table.root_page_id, columns, None),
         schema_table,
     )
     .unwrap();
@@ -89,7 +89,7 @@ pub fn find_index_page_id(index: &str, filepath: &Path) -> PageId {
         .map(Expression::Column)
         .collect::<Vec<_>>();
     let schema = Schema::generate(
-        Statement::new(&mut conn, schema_table.root_page_id, columns, None),
+        SelectStatement::new(&mut conn, schema_table.root_page_id, columns, None),
         schema_table,
     )
     .unwrap();

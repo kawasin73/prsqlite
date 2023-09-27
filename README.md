@@ -39,15 +39,19 @@ use prsqlite::NextRow;
 use prsqlite::Value;
 
 let mut conn = Connection::open(Path::new("path/to/sqlite.db")).unwrap();
+
+let mut stmt = conn.prepare("INSERT INTO example (col) VALUES (1), (2);").unwrap();
+assert_eq!(stmt.execute().unwrap(), 2);
+
 let mut stmt = conn.prepare("SELECT * FROM example WHERE col = 1;").unwrap();
-let mut rows = stmt.execute().unwrap();
+let mut rows = stmt.query().unwrap();
 
 let row = rows.next_row().unwrap().unwrap();
 let columns = row.parse().unwrap();
 assert_eq!(columns.get(0), &Value::Integer(1));
 drop(row);
 
-assert!(rows.next().unwrap().is_none());
+assert!(rows.next_row().unwrap().is_none());
 ```
 
 prsqlite provides REPL command.
@@ -79,6 +83,17 @@ Hello prsqlite!|4
 prsqlite|5
 prsqlite> SELECT col1 FROM example WHERE col2 == 4;
 Hello prsqlite!
+prsqlite> INSERT INTO example(col1, col2) VALUES (123, 6);
+prsqlite> INSERT INTO example(rowid, col2) VALUES (20, 20);
+prsqlite> INSERT INTO example(rowid, col2) VALUES (6, 6);
+the rowid already exists
+prsqlite> INSERT INTO example(rowid, col2) VALUES (7, 7);
+prsqlite> INSERT INTO example(col1, col2) VALUES ('hello', 21);
+prsqlite> SELECT rowid, * FROM example WHERE col2 >= 6;
+6|123|6
+7||7
+20||20
+21|hello|21
 prsqlite> .quit
 ```
 
