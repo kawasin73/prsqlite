@@ -19,6 +19,7 @@ use crate::pager::MemPage;
 use crate::pager::PageBuffer;
 use crate::pager::PageId;
 use crate::utils::parse_varint;
+use crate::utils::u64_to_i64;
 
 type ParseError = &'static str;
 type ParseResult<T> = std::result::Result<T, ParseError>;
@@ -125,7 +126,7 @@ impl<'a> TableCellKeyParser<'a> {
         };
         let (key, _) =
             parse_varint(&self.buffer[offset + offset_in_cell..]).ok_or("parse key varint")?;
-        Ok(key)
+        Ok(u64_to_i64(key))
     }
 }
 
@@ -355,6 +356,7 @@ pub fn parse_btree_leaf_table_cell(
     }
     let (key, consumed2) =
         parse_varint(&buffer[cell_offset + consumed1..]).map_or(Err("parse key varint"), Ok)?;
+    let key = u64_to_i64(key);
 
     let payload = PayloadInfo::parse(
         ctx,
@@ -524,8 +526,8 @@ mod tests {
         let (header_size, c1) = unsafe_parse_varint(payload);
         let (serial_type, c2) = unsafe_parse_varint(&payload[c1..]);
         let payload_size = (serial_type - 12) / 2;
-        assert_eq!(payload_size, buf.len() as i64);
-        assert_eq!(header_size, (c1 + c2) as i64);
+        assert_eq!(payload_size, buf.len() as u64);
+        assert_eq!(header_size, (c1 + c2) as u64);
         payload = &payload[header_size as usize..];
         assert_ne!(payload.len(), buf.len());
         assert_eq!(payload, &buf[..payload.len()]);
