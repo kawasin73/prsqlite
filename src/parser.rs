@@ -484,20 +484,97 @@ fn parse_result_column<'a>(p: &mut Parser<'a>) -> Result<'a, ResultColumn<'a>> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
+pub struct Insert<'a> {
+    pub table_name: MaybeQuotedBytes<'a>,
+    pub columns: Vec<MaybeQuotedBytes<'a>>,
+    pub values: Vec<Vec<Expr<'a>>>,
+}
+
+// Parse INSERT statement.
+//
+// https://www.sqlite.org/lang_insert.html
+#[allow(dead_code)]
+pub fn parse_insert<'a>(p: &mut Parser<'a>) -> Result<'a, Insert<'a>> {
+    let Some(Token::Insert) = p.peek() else {
+        return Err(p.error("no insert"));
+    };
+    let Some(Token::Into) = p.next() else {
+        return Err(p.error("no into"));
+    };
+    let Some(Token::Identifier(table_name)) = p.next() else {
+        return Err(p.error("no table_name"));
+    };
+    let table_name = *table_name;
+
+    let Some(Token::LeftParen) = p.next() else {
+        return Err(p.error("no left paren"));
+    };
+    let mut columns = Vec::new();
+
+    loop {
+        let Some(Token::Identifier(column_name)) = p.next() else {
+            return Err(p.error("no column_name"));
+        };
+        columns.push(*column_name);
+        match p.next() {
+            Some(Token::Comma) => continue,
+            Some(Token::RightParen) => break,
+            _ => return Err(p.error("no right paren")),
+        }
+    }
+    let Some(Token::Values) = p.next() else {
+        return Err(p.error("no values"));
+    };
+
+    let mut values = Vec::new();
+    loop {
+        let Some(Token::LeftParen) = p.next() else {
+            return Err(p.error("no left paren"));
+        };
+        p.next();
+        let expr = parse_expr(p)?;
+        let mut column_values = vec![expr];
+        loop {
+            match p.peek() {
+                Some(Token::Comma) => {
+                    p.next();
+                    let expr = parse_expr(p)?;
+                    column_values.push(expr);
+                }
+                Some(Token::RightParen) => {
+                    break;
+                }
+                _ => return Err(p.error("no right paren")),
+            }
+        }
+        values.push(column_values);
+        let Some(Token::Comma) = p.next() else {
+            break;
+        };
+    }
+
+    Ok(Insert {
+        table_name,
+        columns,
+        values,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum UnaryOp {
     BitNot,
     Minus,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum BinaryOp {
     Compare(CompareOp),
     Concat,
     // TODO: BitOr
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum CompareOp {
     /// Equal to
     Eq,
@@ -1080,6 +1157,55 @@ mod tests {
         let r = parse_select(&mut Parser::new(b"select col from ;"));
         assert!(r.is_err());
         assert_eq!(r.unwrap_err().cursor(), 16);
+    }
+
+    #[test]
+    fn test_parse_insert() {
+        assert_parser!(
+            parse_insert,
+            b"insert into example (col) values (1)",
+            36,
+            Insert {
+                table_name: b"example".as_slice().into(),
+                columns: vec![b"col".as_slice().into()],
+                values: vec![vec![Expr::Integer(1)]],
+            }
+        );
+        assert_parser!(
+            parse_insert,
+            b"insert into example2 (col, col2) values (1, 2)a",
+            46,
+            Insert {
+                table_name: b"example2".as_slice().into(),
+                columns: vec![b"col".as_slice().into(), b"col2".as_slice().into()],
+                values: vec![vec![Expr::Integer(1), Expr::Integer(2)]],
+            }
+        );
+        assert_parser!(
+            parse_insert,
+            b"insert into example2 (col, col2) values (1, 2), (3, 4)a",
+            54,
+            Insert {
+                table_name: b"example2".as_slice().into(),
+                columns: vec![b"col".as_slice().into(), b"col2".as_slice().into()],
+                values: vec![
+                    vec![Expr::Integer(1), Expr::Integer(2)],
+                    vec![Expr::Integer(3), Expr::Integer(4)]
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_insert_fail() {
+        // no expr right paren.
+        let r = parse_insert(&mut Parser::new(b"insert into example (col values (1)"));
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().cursor(), 25);
+        // no table name.
+        let r = parse_insert(&mut Parser::new(b"insert into (col) values (1)"));
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().cursor(), 12);
     }
 
     #[test]
