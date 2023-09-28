@@ -324,6 +324,25 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
         Ok(())
     }
 
+    #[allow(dead_code)]
+    pub fn move_to_last(&mut self) -> anyhow::Result<()> {
+        self.move_to_root()?;
+        if self.current_page.n_cells == 0 {
+            self.current_page.idx_cell = 0;
+        } else {
+            while !self.current_page.is_leaf {
+                let buffer = self.current_page.mem.buffer();
+                let page_header = BtreePageHeader::from_page(&self.current_page.mem, &buffer);
+                let page_id = page_header.right_page_id();
+                drop(buffer);
+                self.move_to_child(page_id)?;
+            }
+            self.current_page.idx_cell = self.current_page.n_cells - 1;
+        }
+        self.initialized = true;
+        Ok(())
+    }
+
     pub fn move_next(&mut self) -> anyhow::Result<()> {
         if !self.initialized {
             bail!("cursor is not initialized");
@@ -472,6 +491,26 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
             }
         }
         Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn get_table_key(&self) -> anyhow::Result<Option<i64>> {
+        if !self.initialized {
+            bail!("cursor is not initialized");
+        }
+        if !self.current_page.page_type.is_table() {
+            bail!("not a table page");
+        }
+        if self.current_page.idx_cell >= self.current_page.n_cells {
+            return Ok(None);
+        }
+        assert!(self.current_page.is_leaf);
+        let buffer = self.current_page.mem.buffer();
+        let cell_key_parser = TableCellKeyParser::new(&self.current_page.mem, &buffer);
+        let key = cell_key_parser
+            .get_cell_key(self.current_page.idx_cell)
+            .map_err(|e| anyhow::anyhow!("parse table cell key: {:?}", e))?;
+        Ok(Some(key))
     }
 
     pub fn get_table_payload<'a>(
@@ -623,6 +662,7 @@ mod tests {
         assert_eq!(payload.size(), payload.buf().len() as i32);
         assert!(cursor.get_index_payload().is_err());
         drop(payload);
+        assert_eq!(cursor.get_table_key().unwrap().unwrap(), 1);
 
         cursor.move_next().unwrap();
         let payload = cursor.get_table_payload().unwrap();
@@ -633,6 +673,7 @@ mod tests {
         assert_eq!(payload.size(), payload.buf().len() as i32);
         assert!(cursor.get_index_payload().is_err());
         drop(payload);
+        assert_eq!(cursor.get_table_key().unwrap().unwrap(), 2);
 
         cursor.move_next().unwrap();
         let payload = cursor.get_table_payload().unwrap();
@@ -643,10 +684,19 @@ mod tests {
         assert_eq!(payload.size(), payload.buf().len() as i32);
         assert!(cursor.get_index_payload().is_err());
         drop(payload);
+        assert_eq!(cursor.get_table_key().unwrap().unwrap(), 3);
 
         cursor.move_next().unwrap();
         assert!(cursor.get_table_payload().unwrap().is_none());
         assert!(cursor.get_index_payload().is_err());
+        assert!(cursor.get_table_key().unwrap().is_none());
+
+        cursor.move_to_last().unwrap();
+        assert_eq!(cursor.get_table_key().unwrap().unwrap(), 3);
+
+        cursor.move_to_first().unwrap();
+        cursor.move_to_last().unwrap();
+        assert_eq!(cursor.get_table_key().unwrap().unwrap(), 3);
     }
 
     #[test]
@@ -694,6 +744,19 @@ mod tests {
         cursor.move_next().unwrap();
         assert!(cursor.get_index_payload().unwrap().is_none());
         assert!(cursor.get_table_payload().is_err());
+
+        cursor.move_to_last().unwrap();
+        assert_eq!(
+            cursor.get_index_payload().unwrap().unwrap().buf(),
+            &[3, 1, 1, 2, 3]
+        );
+
+        cursor.move_to_first().unwrap();
+        cursor.move_to_last().unwrap();
+        assert_eq!(
+            cursor.get_index_payload().unwrap().unwrap().buf(),
+            &[3, 1, 1, 2, 3]
+        );
     }
 
     #[test]
@@ -733,6 +796,8 @@ mod tests {
         assert!(cursor.get_table_payload().unwrap().is_none());
         assert!(cursor.table_move_to(0).unwrap().is_none());
         assert!(cursor.get_table_payload().unwrap().is_none());
+        cursor.move_to_last().unwrap();
+        assert!(cursor.get_table_payload().unwrap().is_none());
     }
 
     #[test]
@@ -753,6 +818,8 @@ mod tests {
         cursor
             .index_move_to(&[ValueCmp::new(&Value::Integer(0), &Collation::Binary)])
             .unwrap();
+        assert!(cursor.get_index_payload().unwrap().is_none());
+        cursor.move_to_last().unwrap();
         assert!(cursor.get_index_payload().unwrap().is_none());
     }
 
@@ -809,6 +876,7 @@ mod tests {
             let mut table_record = Record::parse(&payload).unwrap();
             assert_eq!(table_record.get(0).unwrap(), Value::Integer(i));
             drop(payload);
+            assert_eq!(table_cursor.get_table_key().unwrap().unwrap(), i + 1);
             table_cursor.move_next().unwrap();
 
             let payload = index1_cursor.get_index_payload().unwrap();
@@ -838,6 +906,7 @@ mod tests {
             assert_eq!(payload.buf(), &[3, 2, 14, col_buf[0], col_buf[1], 0xff]);
             assert_eq!(payload.size(), payload.buf().len() as i32);
             drop(payload);
+            assert_eq!(table_cursor.get_table_key().unwrap().unwrap(), i + 1);
             table_cursor.move_next().unwrap();
 
             let payload = index1_cursor.get_index_payload().unwrap();
@@ -862,6 +931,34 @@ mod tests {
 
         assert!(table_cursor.get_table_payload().unwrap().is_none());
         assert!(index1_cursor.get_index_payload().unwrap().is_none());
+
+        // move_to_last() for table
+        table_cursor.move_to_last().unwrap();
+        assert_eq!(table_cursor.get_table_key().unwrap().unwrap(), 5000);
+        table_cursor.table_move_to(1000).unwrap();
+        table_cursor.move_to_last().unwrap();
+        assert_eq!(table_cursor.get_table_key().unwrap().unwrap(), 5000);
+
+        // move_to_last() for index
+        index1_cursor.move_to_last().unwrap();
+        assert_eq!(
+            Record::parse(&index1_cursor.get_index_payload().unwrap().unwrap())
+                .unwrap()
+                .get(1)
+                .unwrap(),
+            Value::Integer(5000)
+        );
+        index1_cursor
+            .index_move_to(&[ValueCmp::new(&Value::Integer(1000), &Collation::Binary)])
+            .unwrap();
+        index1_cursor.move_to_last().unwrap();
+        assert_eq!(
+            Record::parse(&index1_cursor.get_index_payload().unwrap().unwrap())
+                .unwrap()
+                .get(1)
+                .unwrap(),
+            Value::Integer(5000)
+        );
 
         table_cursor.table_move_to(2000).unwrap();
         let payload = table_cursor.get_table_payload().unwrap();
