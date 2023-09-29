@@ -38,9 +38,9 @@ use prsqlite::Connection;
 use prsqlite::NextRow;
 use prsqlite::Value;
 
-let mut conn = Connection::open(Path::new("path/to/sqlite.db")).unwrap();
+let conn = Connection::open(Path::new("path/to/sqlite.db")).unwrap();
 
-let mut stmt = conn.prepare("INSERT INTO example (col) VALUES (1), (2);").unwrap();
+let stmt = conn.prepare("INSERT INTO example (col) VALUES (1), (2);").unwrap();
 assert_eq!(stmt.execute().unwrap(), 2);
 
 let stmt = conn.prepare("SELECT * FROM example WHERE col = 1;").unwrap();

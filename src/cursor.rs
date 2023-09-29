@@ -136,9 +136,8 @@ impl CursorPage {
 
 /// The cursor of btree.
 ///
-/// This does not support creating multiple cursors for the same btree.
-/// Otherwise, [BtreeCursor::insert()] fails to get a writable buffer from the
-/// pager.
+/// [BtreeCursor::insert()] may fail to get a writable buffer from the pager if
+/// there are another [BtreeCursor] pointing the same btree simultaniously.
 pub struct BtreeCursor<'a> {
     pager: &'a Pager,
     btree_ctx: &'a BtreeContext,
@@ -387,6 +386,10 @@ impl<'a> BtreeCursor<'a> {
         Ok(())
     }
 
+    /// Insert or update a new item to the table.
+    ///
+    /// There should not be other [BtreeCursor]s pointing the same btree.
+    /// Otherwise, this fails.
     pub fn insert(&mut self, key: i64, payload: &[u8]) -> anyhow::Result<()> {
         let current_cell_key = self.table_move_to(key)?;
 

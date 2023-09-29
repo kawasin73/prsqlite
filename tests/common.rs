@@ -28,7 +28,7 @@ pub fn create_sqlite_database(queries: &[&str]) -> NamedTempFile {
 }
 
 #[allow(dead_code)]
-pub fn load_rowids(conn: &mut Connection, query: &str) -> Vec<i64> {
+pub fn load_rowids(conn: &Connection, query: &str) -> Vec<i64> {
     let stmt = conn.prepare(query).unwrap();
     let mut rows = stmt.query().unwrap();
     let mut results = Vec::new();
@@ -72,7 +72,7 @@ pub fn assert_same_results(
     expected: &[&[Value]],
     query: &str,
     test_conn: &rusqlite::Connection,
-    conn: &mut Connection,
+    conn: &Connection,
 ) {
     let mut stmt = test_conn.prepare(query).unwrap();
     let mut rows = stmt.query([]).unwrap();

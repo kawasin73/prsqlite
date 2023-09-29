@@ -34,7 +34,7 @@ fn test_select_all_from_table() {
     queries.push(&blob_query);
     let file = create_sqlite_database(&queries);
 
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
     let stmt = conn.prepare("SELECT * FROM example3;").unwrap();
     let mut rows = stmt.query().unwrap();
 
@@ -78,7 +78,7 @@ fn test_select_reuse_statement() {
         "INSERT INTO example(col) VALUES (1), (2);",
     ]);
 
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
     let stmt = conn.prepare("SELECT * FROM example;").unwrap();
 
     let mut rows = stmt.query().unwrap();
@@ -91,6 +91,35 @@ fn test_select_reuse_statement() {
 }
 
 #[test]
+fn test_select_multiple_statements() {
+    let file = create_sqlite_database(&[
+        "CREATE TABLE example(col);",
+        "INSERT INTO example(col) VALUES (1), (2);",
+    ]);
+
+    let conn = Connection::open(file.path()).unwrap();
+    let stmt1 = conn.prepare("SELECT * FROM example;").unwrap();
+    let stmt2 = conn
+        .prepare("SELECT * FROM example WHERE col = 2;")
+        .unwrap();
+
+    let mut rows1 = stmt1.query().unwrap();
+    let mut rows2 = stmt1.query().unwrap();
+    let mut rows3 = stmt2.query().unwrap();
+    let mut rows4 = stmt2.query().unwrap();
+    assert_same_result_prsqlite!(rows1, [Value::Integer(1)], "");
+    assert_same_result_prsqlite!(rows2, [Value::Integer(1)], "");
+    assert_same_result_prsqlite!(rows3, [Value::Integer(2)], "");
+    assert_same_result_prsqlite!(rows4, [Value::Integer(2)], "");
+    assert_same_result_prsqlite!(rows1, [Value::Integer(2)], "");
+    assert_same_result_prsqlite!(rows2, [Value::Integer(2)], "");
+    assert!(rows1.next_row().unwrap().is_none());
+    assert!(rows2.next_row().unwrap().is_none());
+    assert!(rows3.next_row().unwrap().is_none());
+    assert!(rows4.next_row().unwrap().is_none());
+}
+
+#[test]
 fn test_select_partial() {
     let file = create_sqlite_database(&[
         "CREATE TABLE example(col1, col2, col3);",
@@ -99,7 +128,7 @@ fn test_select_partial() {
         "INSERT INTO example(col1, col2, col3) VALUES (7, 8, 9);",
     ]);
 
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
     let stmt = conn.prepare("SELECT col3, col1 FROM example;").unwrap();
     let mut rows = stmt.query().unwrap();
 
@@ -138,7 +167,7 @@ fn test_select_rowid() {
         "INSERT INTO example2(col, rowid) VALUES (20, 100);",
     ]);
 
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
     let stmt = conn.prepare("SELECT col, RoWid FROM example;").unwrap();
     let mut rows = stmt.query().unwrap();
 
@@ -158,7 +187,7 @@ fn test_select_rowid() {
 
     assert!(rows.next_row().unwrap().is_none());
 
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
     let stmt = conn.prepare("SELECT col, Rowid FROM example2;").unwrap();
     let mut rows = stmt.query().unwrap();
 
@@ -188,7 +217,7 @@ fn test_select_column_name_and_all() {
         "INSERT INTO example(col1, col2, col3) VALUES (7, 8, 9);",
     ]);
 
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
     let stmt = conn
         .prepare("SELECT col3, col3, *, col1 FROM example;")
         .unwrap();
@@ -238,7 +267,7 @@ fn test_select_expression() {
     ]);
 
     let test_conn = rusqlite::Connection::open(file.path()).unwrap();
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
 
     for (expected, expr) in [
         // Literals
@@ -352,7 +381,7 @@ fn test_select_expression() {
         ),
     ] {
         let query = format!("SELECT {} FROM example;", expr);
-        assert_same_results(&[&[expected]], &query, &test_conn, &mut conn);
+        assert_same_results(&[&[expected]], &query, &test_conn, &conn);
     }
 }
 
@@ -364,7 +393,7 @@ fn test_select_expression_operators() {
     ]);
 
     let test_conn = rusqlite::Connection::open(file.path()).unwrap();
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
 
     for (expected, expr) in [
         (Value::Integer(1), "'a' = 'a' = 1"),
@@ -373,7 +402,7 @@ fn test_select_expression_operators() {
         (Value::Integer(0), "1 = 2 <= 1"),
     ] {
         let query = format!("SELECT {} FROM example;", expr);
-        assert_same_results(&[&[expected]], &query, &test_conn, &mut conn);
+        assert_same_results(&[&[expected]], &query, &test_conn, &conn);
     }
 }
 
@@ -385,7 +414,7 @@ fn test_select_primary_key() {
         "INSERT INTO example(id, col) VALUES (5, '20');",
         "INSERT INTO example(id, col) VALUES (3, '30');",
     ]);
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
 
     let stmt = conn.prepare("SELECT * FROM example;").unwrap();
     stmt.query().unwrap();
@@ -424,7 +453,7 @@ fn test_select_type_conversions_prior_to_comparison() {
     ]);
 
     let test_conn = rusqlite::Connection::open(file.path()).unwrap();
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
 
     for (expected, query) in [
         (vec![0, 1, 1], "SELECT a < 40,   a < 60,   a < 600 FROM t1;"),
@@ -515,7 +544,7 @@ fn test_select_collation_sequence() {
     ]);
 
     let test_conn = rusqlite::Connection::open(file.path()).unwrap();
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
 
     for (expected, query) in [
         // Text comparison a=b is performed using the BINARY collating sequence.
@@ -555,7 +584,7 @@ fn test_select_collation_sequence() {
         let results = load_test_rowids(&test_conn, query);
         assert_eq!(results, expected, "query: {}", query);
 
-        let results = load_rowids(&mut conn, query);
+        let results = load_rowids(&conn, query);
         assert_eq!(results, expected, "query: {}", query);
     }
 }
@@ -573,7 +602,7 @@ fn test_select_preserved_collation_sequence() {
     ]);
 
     let test_conn = rusqlite::Connection::open(file.path()).unwrap();
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
 
     for (expected, query) in [
         // Left collation is prioritized.
@@ -629,7 +658,7 @@ fn test_select_preserved_collation_sequence() {
         let results = load_test_rowids(&test_conn, query);
         assert_eq!(results, expected, "query: {}", query);
 
-        let results = load_rowids(&mut conn, query);
+        let results = load_rowids(&conn, query);
         assert_eq!(results, expected, "query: {}", query);
     }
 }
@@ -643,7 +672,7 @@ fn test_select_filter() {
         "INSERT INTO example(col1, col2, col3) VALUES (7, 8, 9);",
     ]);
 
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
     let stmt = conn
         .prepare("SELECT * FROM example WHERE col2 == 5;")
         .unwrap();
@@ -708,7 +737,7 @@ fn test_select_filter_eq() {
         "INSERT INTO example(col1, col2, col3, col4) VALUES ('hello', 5.0, 9, x'01ef');",
     ]);
 
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
     let stmt = conn
         .prepare("SELECT rowid, col1 FROM example WHERE col1 == 'hello';")
         .unwrap();
@@ -800,7 +829,7 @@ fn test_select_filter_ne() {
         "INSERT INTO example(col1, col2, col3, col4) VALUES ('hello', 5.0, 9, x'01ef');",
     ]);
 
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
     let stmt = conn
         .prepare("SELECT rowid, col1 FROM example WHERE col1 != 'hello';")
         .unwrap();
@@ -887,7 +916,7 @@ fn test_select_filter_compare() {
         "INSERT INTO example(col) VALUES (x'313233');",
     ]);
 
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
 
     let test_conn = rusqlite::Connection::open(file.path()).unwrap();
 
@@ -925,7 +954,7 @@ fn test_select_filter_compare() {
             let rows = stmt.query([]).unwrap();
             let rowids: Vec<i64> = rows.mapped(|r| r.get(0)).map(|v| v.unwrap()).collect();
 
-            let results = load_rowids(&mut conn, &query);
+            let results = load_rowids(&conn, &query);
             assert_eq!(results, rowids, "query: {}", query);
         }
     }
@@ -941,7 +970,7 @@ fn test_select_filter_with_rowid() {
         "INSERT INTO example(col) VALUES (40);",
     ]);
 
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
     let stmt = conn
         .prepare("SELECT col, RoWid FROM example WHERE rowid = 2;")
         .unwrap();
@@ -968,7 +997,7 @@ fn test_select_filter_with_primary_key() {
         "INSERT INTO example(id, col) VALUES (5, '30');",
         "INSERT INTO example(id, col) VALUES (6, '40');",
     ]);
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
 
     let stmt = conn
         .prepare("SELECT col, RoWid FROM example WHERE id = 3;")
@@ -1002,7 +1031,7 @@ fn test_select_with_index() {
         "INSERT INTO example(col1, col2, col3) VALUES (3, 3, 3);",
     ]);
 
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
     let stmt = conn
         .prepare("SELECT * FROM example WHERE col2 == 5;")
         .unwrap();
@@ -1084,7 +1113,7 @@ fn test_select_with_index_multi_type() {
     ]);
 
     let test_conn = rusqlite::Connection::open(file.path()).unwrap();
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
 
     for (expected, query) in [
         (vec![4, 7], "col1 = 1234"),
@@ -1115,7 +1144,7 @@ fn test_select_with_index_multi_type() {
         let rowids: Vec<i64> = rows.mapped(|r| r.get(0)).map(|v| v.unwrap()).collect();
         assert_eq!(rowids, expected, "query: {}", query);
 
-        let results = load_rowids(&mut conn, &query);
+        let results = load_rowids(&conn, &query);
 
         assert_eq!(results, expected, "query: {}", query);
     }
@@ -1142,7 +1171,7 @@ fn test_select_with_index_same_items() {
     let file = create_sqlite_database(&queries);
 
     let test_conn = rusqlite::Connection::open(file.path()).unwrap();
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
 
     for (expected, query) in [
         ((1..=100).collect::<Vec<i64>>(), "col1 = 'abc'"),
@@ -1154,7 +1183,7 @@ fn test_select_with_index_same_items() {
         let rowids: Vec<i64> = rows.mapped(|r| r.get(0)).map(|v| v.unwrap()).collect();
         assert_eq!(rowids, expected, "query: {}", query);
 
-        let results = load_rowids(&mut conn, &query);
+        let results = load_rowids(&conn, &query);
         assert_eq!(results, expected, "query: {}", query);
     }
 }

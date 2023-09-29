@@ -21,7 +21,7 @@ use prsqlite::Value;
 #[test]
 fn test_insert() {
     let file = create_sqlite_database(&["CREATE TABLE example(col1, col2, col3);"]);
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
 
     let mut stmt = conn
         .prepare("INSERT INTO example (col1, col2, col3) VALUES (0, 1, 2);")
@@ -77,14 +77,14 @@ fn test_insert() {
         ],
         "SELECT rowid, * FROM example;",
         &test_conn,
-        &mut conn,
+        &conn,
     )
 }
 
 #[test]
 fn test_insert_with_rowid() {
     let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
 
     let mut stmt = conn
         .prepare("INSERT INTO example (rowid, col) VALUES (-10, 2), (10, 5);")
@@ -115,7 +115,7 @@ fn test_insert_with_rowid() {
         ],
         "SELECT rowid, * FROM example;",
         &test_conn,
-        &mut conn,
+        &conn,
     )
 }
 
@@ -126,7 +126,7 @@ fn test_insert_into_existing_table() {
         "INSERT INTO example(rowid, col) VALUES (1, 1);",
         "INSERT INTO example(rowid, col) VALUES (10, 2);",
     ]);
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
 
     let mut stmt = conn
         .prepare("INSERT INTO example (rowid, col) VALUES (2, 3), (8, 4);")
@@ -149,14 +149,14 @@ fn test_insert_into_existing_table() {
         ],
         "SELECT rowid, * FROM example;",
         &test_conn,
-        &mut conn,
+        &conn,
     )
 }
 
 #[test]
 fn test_insert_rowid_conflict() {
     let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
-    let mut conn = Connection::open(file.path()).unwrap();
+    let conn = Connection::open(file.path()).unwrap();
 
     let mut stmt = conn
         .prepare("INSERT INTO example (col) VALUES (123);")
@@ -173,6 +173,41 @@ fn test_insert_rowid_conflict() {
         &[&[Value::Integer(1), Value::Integer(123)]],
         "SELECT rowid, * FROM example;",
         &test_conn,
-        &mut conn,
+        &conn,
     )
+}
+
+#[test]
+fn test_insert_multiple_statements() {
+    let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
+    let conn = Connection::open(file.path()).unwrap();
+
+    let mut stmt_i1 = conn
+        .prepare("INSERT INTO example (col) VALUES (123);")
+        .unwrap();
+    let stmt_s1 = conn.prepare("SELECT * FROM example;").unwrap();
+    let mut stmt_i2 = conn
+        .prepare("INSERT INTO example (col) VALUES (456);")
+        .unwrap();
+    let stmt_s2 = conn.prepare("SELECT * FROM example;").unwrap();
+
+    assert_eq!(stmt_i1.execute().unwrap(), 1);
+
+    let mut rows = stmt_s1.query().unwrap();
+    assert_same_result_prsqlite!(rows, [Value::Integer(123)], "");
+    assert!(rows.next_row().unwrap().is_none());
+    let mut rows = stmt_s2.query().unwrap();
+    assert_same_result_prsqlite!(rows, [Value::Integer(123)], "");
+    assert!(rows.next_row().unwrap().is_none());
+
+    assert_eq!(stmt_i2.execute().unwrap(), 1);
+
+    let mut rows = stmt_s1.query().unwrap();
+    assert_same_result_prsqlite!(rows, [Value::Integer(123)], "");
+    assert_same_result_prsqlite!(rows, [Value::Integer(456)], "");
+    assert!(rows.next_row().unwrap().is_none());
+    let mut rows = stmt_s2.query().unwrap();
+    assert_same_result_prsqlite!(rows, [Value::Integer(123)], "");
+    assert_same_result_prsqlite!(rows, [Value::Integer(456)], "");
+    assert!(rows.next_row().unwrap().is_none());
 }

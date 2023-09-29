@@ -13,7 +13,7 @@ fn main() {
         std::process::exit(1);
     }
     let file_path = args.nth(1).unwrap();
-    let mut conn = Connection::open(Path::new(&file_path)).expect("open database");
+    let conn = Connection::open(Path::new(&file_path)).expect("open database");
 
     let mut stdout = io::stdout();
     let stdin = io::stdin();

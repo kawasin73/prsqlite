@@ -474,14 +474,14 @@ mod tests {
     use crate::Expression;
 
     fn generate_schema(filepath: &Path) -> Schema {
-        let mut conn = Connection::open(filepath).unwrap();
+        let conn = Connection::open(filepath).unwrap();
         let schema_table = Schema::schema_table();
         let columns = schema_table
             .get_all_columns()
             .map(Expression::Column)
             .collect::<Vec<_>>();
         Schema::generate(
-            SelectStatement::new(&mut conn, schema_table.root_page_id, columns, None),
+            SelectStatement::new(&conn, schema_table.root_page_id, columns, None),
             schema_table,
         )
         .unwrap()

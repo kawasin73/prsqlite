@@ -24,6 +24,7 @@ mod token;
 mod utils;
 mod value;
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::fmt::Display;
 use std::fs::OpenOptions;
@@ -143,7 +144,7 @@ impl<'a> DatabaseHeader<'a> {
 pub struct Connection {
     pager: Pager,
     btree_ctx: BtreeContext,
-    schema: Option<Schema>,
+    schema: RefCell<Option<Schema>>,
 }
 
 impl Connection {
@@ -168,11 +169,11 @@ impl Connection {
         Ok(Self {
             pager,
             btree_ctx: BtreeContext::new(header.usable_size()),
-            schema: None,
+            schema: RefCell::new(None),
         })
     }
 
-    pub fn prepare<'a>(&mut self, sql: &'a str) -> Result<'a, Statement> {
+    pub fn prepare<'a>(&self, sql: &'a str) -> Result<'a, Statement> {
         let input = sql.as_bytes();
         let mut parser = Parser::new(input);
         let statement = parse_sql(&mut parser)?;
@@ -185,24 +186,25 @@ impl Connection {
         }
     }
 
-    fn load_schema(&mut self) -> anyhow::Result<()> {
+    fn load_schema(&self) -> anyhow::Result<()> {
         let schema_table = Schema::schema_table();
         let columns = schema_table
             .get_all_columns()
             .map(Expression::Column)
             .collect::<Vec<_>>();
-        self.schema = Some(Schema::generate(
+        *self.schema.borrow_mut() = Some(Schema::generate(
             SelectStatement::new(self, schema_table.root_page_id, columns, None),
             schema_table,
         )?);
         Ok(())
     }
 
-    fn prepare_select<'a>(&mut self, select: Select<'a>) -> Result<'a, SelectStatement> {
-        if self.schema.is_none() {
+    fn prepare_select<'a>(&self, select: Select<'a>) -> Result<'a, SelectStatement> {
+        if self.schema.borrow().is_none() {
             self.load_schema()?;
         }
-        let schema = self.schema.as_ref().unwrap();
+        let schema_cell = self.schema.borrow();
+        let schema = schema_cell.as_ref().unwrap();
         let table_name = select.table_name.dequote();
         let table = schema.get_table(&table_name).ok_or(anyhow::anyhow!(
             "table not found: {:?}",
@@ -290,12 +292,12 @@ impl Connection {
         }
     }
 
-    fn prepare_insert<'a>(&mut self, insert: Insert<'a>) -> Result<'a, InsertStatement> {
-        if self.schema.is_none() {
+    fn prepare_insert<'a>(&self, insert: Insert<'a>) -> Result<'a, InsertStatement> {
+        if self.schema.borrow().is_none() {
             self.load_schema()?;
         }
-
-        let schema = self.schema.as_ref().unwrap();
+        let schema_cell = self.schema.borrow();
+        let schema = schema_cell.as_ref().unwrap();
         let table_name = insert.table_name.dequote();
         let table = schema.get_table(&table_name).ok_or(anyhow::anyhow!(
             "table not found: {:?}",
@@ -657,7 +659,7 @@ impl<'conn> Statement<'conn> {
 
 // TODO: make Connection non mut and support multiple statements.
 pub struct SelectStatement<'conn> {
-    conn: &'conn mut Connection,
+    conn: &'conn Connection,
     table_page_id: PageId,
     columns: Vec<Expression>,
     filter: Option<Expression>,
@@ -667,7 +669,7 @@ pub struct SelectStatement<'conn> {
 
 impl<'conn> SelectStatement<'conn> {
     pub(crate) fn new(
-        conn: &'conn mut Connection,
+        conn: &'conn Connection,
         table_page_id: PageId,
         columns: Vec<Expression>,
         filter: Option<Expression>,
@@ -701,7 +703,7 @@ impl<'conn> SelectStatement<'conn> {
     }
 
     fn with_index(
-        conn: &'conn mut Connection,
+        conn: &'conn Connection,
         table_page_id: PageId,
         columns: Vec<Expression>,
         filter: Option<Expression>,
@@ -970,7 +972,7 @@ struct InsertRecord {
 }
 
 pub struct InsertStatement<'conn> {
-    conn: &'conn mut Connection,
+    conn: &'conn Connection,
     table_page_id: PageId,
     records: Vec<InsertRecord>,
 }

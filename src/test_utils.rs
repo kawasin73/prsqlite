@@ -67,14 +67,14 @@ pub fn buffer_to_hex(buf: &[u8]) -> String {
 }
 
 pub fn find_table_page_id(table: &str, filepath: &Path) -> PageId {
-    let mut conn = Connection::open(filepath).unwrap();
+    let conn = Connection::open(filepath).unwrap();
     let schema_table = Schema::schema_table();
     let columns = schema_table
         .get_all_columns()
         .map(Expression::Column)
         .collect::<Vec<_>>();
     let schema = Schema::generate(
-        SelectStatement::new(&mut conn, schema_table.root_page_id, columns, None),
+        SelectStatement::new(&conn, schema_table.root_page_id, columns, None),
         schema_table,
     )
     .unwrap();
@@ -82,14 +82,14 @@ pub fn find_table_page_id(table: &str, filepath: &Path) -> PageId {
 }
 
 pub fn find_index_page_id(index: &str, filepath: &Path) -> PageId {
-    let mut conn = Connection::open(filepath).unwrap();
+    let conn = Connection::open(filepath).unwrap();
     let schema_table = Schema::schema_table();
     let columns = schema_table
         .get_all_columns()
         .map(Expression::Column)
         .collect::<Vec<_>>();
     let schema = Schema::generate(
-        SelectStatement::new(&mut conn, schema_table.root_page_id, columns, None),
+        SelectStatement::new(&conn, schema_table.root_page_id, columns, None),
         schema_table,
     )
     .unwrap();
