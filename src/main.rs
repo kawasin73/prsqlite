@@ -58,7 +58,7 @@ fn main() {
                             println!();
                         }
                     }
-                    Statement::Execution(mut stmt) => {
+                    Statement::Execution(stmt) => {
                         if let Err(e) = stmt.execute() {
                             eprintln!("{e}");
                         }

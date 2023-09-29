@@ -24,6 +24,7 @@ mod token;
 mod utils;
 mod value;
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::fmt::Display;
@@ -145,6 +146,12 @@ pub struct Connection {
     pager: Pager,
     btree_ctx: BtreeContext,
     schema: RefCell<Option<Schema>>,
+    /// Number of running read or write.
+    ///
+    /// > 0 : read(s) running
+    /// 0   : no read/write
+    /// -1  : write running
+    ref_count: Cell<i64>,
 }
 
 impl Connection {
@@ -170,6 +177,7 @@ impl Connection {
             pager,
             btree_ctx: BtreeContext::new(header.usable_size()),
             schema: RefCell::new(None),
+            ref_count: Cell::new(0),
         })
     }
 
@@ -351,6 +359,43 @@ impl Connection {
             table_page_id,
             records,
         })
+    }
+
+    fn start_read(&self) -> anyhow::Result<ReadConnGuard> {
+        // TODO: Lock across processes
+        let ref_count = self.ref_count.get();
+        if ref_count >= 0 {
+            self.ref_count.set(ref_count + 1);
+            Ok(ReadConnGuard(self))
+        } else {
+            bail!("write statment running");
+        }
+    }
+
+    fn start_write(&self) -> anyhow::Result<WriteConnGuard> {
+        // TODO: Lock across processes
+        if self.ref_count.get() == 0 {
+            self.ref_count.set(-1);
+            Ok(WriteConnGuard(self))
+        } else {
+            bail!("other statments running");
+        }
+    }
+}
+
+struct ReadConnGuard<'a>(&'a Connection);
+
+impl Drop for ReadConnGuard<'_> {
+    fn drop(&mut self) {
+        self.0.ref_count.set(self.0.ref_count.get() - 1);
+    }
+}
+
+struct WriteConnGuard<'a>(&'a Connection);
+
+impl Drop for WriteConnGuard<'_> {
+    fn drop(&mut self) {
+        self.0.ref_count.set(0);
     }
 }
 
@@ -649,7 +694,7 @@ impl<'conn> Statement<'conn> {
         }
     }
 
-    pub fn execute(&'conn mut self) -> anyhow::Result<usize> {
+    pub fn execute(&'conn self) -> anyhow::Result<usize> {
         match self {
             Self::Query(_) => bail!("select statement not support execute"),
             Self::Execution(stmt) => stmt.execute(),
@@ -720,7 +765,7 @@ impl<'conn> SelectStatement<'conn> {
     }
 
     pub fn query(&'conn self) -> anyhow::Result<Rows<'conn>> {
-        // TODO: ReadLock table/schema.
+        let read_guard = self.conn.start_read()?;
         // TODO: check schema version.
         let mut cursor =
             BtreeCursor::new(self.table_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
@@ -749,6 +794,7 @@ impl<'conn> SelectStatement<'conn> {
             None
         };
         Ok(Rows {
+            _read_guard: read_guard,
             stmt: self,
             cursor,
             index_cursor,
@@ -759,6 +805,7 @@ impl<'conn> SelectStatement<'conn> {
 }
 
 pub struct Rows<'conn> {
+    _read_guard: ReadConnGuard<'conn>,
     stmt: &'conn SelectStatement<'conn>,
     cursor: BtreeCursor<'conn>,
     index_cursor: Option<BtreeCursor<'conn>>,
@@ -978,8 +1025,8 @@ pub struct InsertStatement<'conn> {
 }
 
 impl<'conn> InsertStatement<'conn> {
-    pub fn execute(&mut self) -> anyhow::Result<usize> {
-        // TODO: Lock table/schema.
+    pub fn execute(&self) -> anyhow::Result<usize> {
+        let _write_guard = self.conn.start_write()?;
         let mut cursor =
             BtreeCursor::new(self.table_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
         let mut n = 0;
