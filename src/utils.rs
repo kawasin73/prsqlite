@@ -75,15 +75,37 @@ pub fn unsafe_parse_varint(buf: &[u8]) -> (u64, usize) {
     }
 }
 
+/// Return the length of varint.
+pub fn len_varint(v: u64) -> usize {
+    let mut i = 1;
+    let mut v = v;
+    loop {
+        v >>= 7;
+        if v == 0 {
+            break;
+        }
+        i += 1;
+    }
+    if i < 10 {
+        i
+    } else {
+        // The original sqlite3VarintLen() may return 10 if the value's MSB is 1.
+        // However practically SQLite does not pass such big value to len_varint(). So
+        // They don't think it's a bug. https://sqlite-users.sqlite.narkive.com/J3jNoCns/sqlite-assertion-hit-in-sqlite3varintlen
+        assert_eq!(i, 10);
+        9
+    }
+}
+
 /// Put varint into the `buf`.
 ///
 /// Return the number of bytes written.
 ///
 /// The `buf` must have at least 9 bytes.
 pub fn put_varint(buf: &mut [u8], v: u64) -> usize {
-    assert!(buf.len() >= 9);
     let mut v = v;
     if v & (0xff000000 << 32) != 0 {
+        assert!(buf.len() >= 9);
         buf[8] = v as u8;
         v >>= 8;
         for v2 in buf[..8].iter_mut().rev() {
@@ -104,6 +126,7 @@ pub fn put_varint(buf: &mut [u8], v: u64) -> usize {
             }
         }
         reversed_buf[0] &= VARINT_VAR_MASK as u8;
+        assert!(buf.len() >= i);
         for (v1, v2) in reversed_buf[..i].iter().rev().zip(buf.iter_mut()) {
             *v2 = *v1;
         }
@@ -752,13 +775,37 @@ mod tests {
             u64::MAX,
         ] {
             let mut buf = [0; 10];
-            let n = put_varint(buf.as_mut_slice(), v);
+            let l = len_varint(v);
+            let n = put_varint(&mut buf[..l], v);
+            assert_eq!(n, l, "v: {v}");
 
             let result = parse_varint(&buf[..n]);
             assert!(result.is_some(), "v: {v}, {:?}", &buf[..n]);
             let (v2, consumed) = result.unwrap();
             assert_eq!(v2, v);
             assert_eq!(consumed, n, "v: {v}");
+        }
+    }
+
+    #[test]
+    fn test_len_varint() {
+        for (v, l) in [
+            (0, 1),
+            (1, 1),
+            (2, 1),
+            (127, 1),
+            (128, 2),
+            (0b11_1111_0111_1111, 2),
+            (0b1_1111_1011_1111_0111_1111, 3),
+            (0b1111_1101_1111_1011_1111_0111_1111, 4),
+            (
+                0b1111_1101_1111_1011_1111_0111_1110_1111_1101_1111_1011_1111_0111_1111,
+                8,
+            ),
+            (9223372036854775809, 9),
+            (u64::MAX, 9),
+        ] {
+            assert_eq!(len_varint(v), l, "{v}");
         }
     }
 

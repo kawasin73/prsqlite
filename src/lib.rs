@@ -48,8 +48,8 @@ use crate::parser::Expr;
 use crate::parser::Parser;
 use crate::parser::ResultColumn;
 use crate::parser::UnaryOp;
+use crate::record::parse_record;
 use crate::record::parse_record_header;
-use crate::record::Record;
 use crate::record::SerialType;
 use crate::schema::calc_collation;
 use crate::schema::calc_type_affinity;
@@ -682,7 +682,7 @@ impl<'conn> Rows<'conn> {
             use_local_buffer = payload.buf().len() >= (content_offset + content_size) as usize;
             if !use_local_buffer {
                 tmp_buf.resize(content_size as usize, 0);
-                let n = unsafe { payload.load(content_offset, &mut tmp_buf) }?;
+                let n = payload.load(content_offset, &mut tmp_buf)?;
                 if n != content_size as usize {
                     bail!("payload does not have enough size");
                 }
@@ -747,7 +747,7 @@ impl<'conn> Rows<'conn> {
             let Some(index_payload) = index_cursor.get_index_payload()? else {
                 return Ok(false);
             };
-            let mut record = Record::parse(&index_payload)?;
+            let mut record = parse_record(&index_payload)?;
             // self.stmt.index must be present if self.index_cursor is present.
             assert!(self.stmt.index.is_some());
             let keys = self.stmt.index.as_ref().unwrap().keys.as_slice();
