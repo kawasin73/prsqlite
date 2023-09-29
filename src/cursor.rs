@@ -36,13 +36,13 @@ use crate::utils::i64_to_u64;
 use crate::utils::put_varint;
 use crate::value::ValueCmp;
 
-pub struct BtreePayload<'a, 'pager> {
-    pager: &'pager Pager,
+pub struct BtreePayload<'a> {
+    pager: &'a Pager,
     local_payload_buffer: PageBuffer<'a>,
     payload_info: PayloadInfo,
 }
 
-impl<'a, 'pager> BtreePayload<'a, 'pager> {
+impl<'a> BtreePayload<'a> {
     /// The size of the payload.
     pub fn size(&self) -> i32 {
         self.payload_info.payload_size
@@ -139,19 +139,19 @@ impl CursorPage {
 /// This does not support creating multiple cursors for the same btree.
 /// Otherwise, [BtreeCursor::insert()] fails to get a writable buffer from the
 /// pager.
-pub struct BtreeCursor<'ctx, 'pager> {
-    pager: &'pager Pager,
-    btree_ctx: &'ctx BtreeContext,
+pub struct BtreeCursor<'a> {
+    pager: &'a Pager,
+    btree_ctx: &'a BtreeContext,
     current_page: CursorPage,
     parent_pages: Vec<CursorPage>,
     initialized: bool,
 }
 
-impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
+impl<'a> BtreeCursor<'a> {
     pub fn new(
         root_page_id: PageId,
-        pager: &'pager Pager,
-        btree_ctx: &'ctx BtreeContext,
+        pager: &'a Pager,
+        btree_ctx: &'a BtreeContext,
     ) -> anyhow::Result<Self> {
         let mem = pager.get_page(root_page_id)?;
         let page = CursorPage::new(mem);
@@ -497,9 +497,7 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
         Ok(Some(key))
     }
 
-    pub fn get_table_payload<'a>(
-        &'a self,
-    ) -> anyhow::Result<Option<(i64, BtreePayload<'a, 'pager>)>> {
+    pub fn get_table_payload(&self) -> anyhow::Result<Option<(i64, BtreePayload)>> {
         if !self.initialized {
             bail!("cursor is not initialized");
         }
@@ -528,7 +526,7 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
         )))
     }
 
-    pub fn get_index_payload<'a>(&'a self) -> anyhow::Result<Option<BtreePayload<'a, 'pager>>> {
+    pub fn get_index_payload(&self) -> anyhow::Result<Option<BtreePayload>> {
         if !self.initialized {
             bail!("cursor is not initialized");
         }

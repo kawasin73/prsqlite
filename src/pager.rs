@@ -111,7 +111,6 @@ impl Pager {
         Ok(PageBufferMut(raw_page))
     }
 
-    #[allow(dead_code)]
     pub fn commit(&self) -> anyhow::Result<()> {
         for (page_id, page) in self.cache.map.borrow().iter() {
             let raw_page = page.borrow();

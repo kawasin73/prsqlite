@@ -37,7 +37,7 @@ fn main() {
                     }
                 };
                 match stmt {
-                    Statement::Query(mut stmt) => {
+                    Statement::Query(stmt) => {
                         let mut rows = stmt.query().expect("execute statement");
                         loop {
                             let row = match rows.next_row() {

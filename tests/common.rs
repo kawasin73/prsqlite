@@ -29,7 +29,7 @@ pub fn create_sqlite_database(queries: &[&str]) -> NamedTempFile {
 
 #[allow(dead_code)]
 pub fn load_rowids(conn: &mut Connection, query: &str) -> Vec<i64> {
-    let mut stmt = conn.prepare(query).unwrap();
+    let stmt = conn.prepare(query).unwrap();
     let mut rows = stmt.query().unwrap();
     let mut results = Vec::new();
     while let Some(row) = rows.next_row().unwrap() {
@@ -55,6 +55,18 @@ pub fn load_test_rowids(conn: &rusqlite::Connection, query: &str) -> Vec<i64> {
     results
 }
 
+#[macro_export]
+macro_rules! assert_same_result_prsqlite {
+    ($rows:ident, $result:expr, $msg:expr) => {
+        let row = $rows.next_row().unwrap().unwrap();
+        let columns = row.parse().unwrap();
+        for (idx, e) in $result.iter().enumerate() {
+            assert_eq!(columns.get(idx), e, "idx: {}, {}", idx, $msg);
+        }
+        drop(row);
+    };
+}
+
 #[allow(dead_code)]
 pub fn assert_same_results(
     expected: &[&[Value]],
@@ -78,13 +90,9 @@ pub fn assert_same_results(
         }
     }
 
-    let mut stmt = conn.prepare(query).unwrap();
+    let stmt = conn.prepare(query).unwrap();
     let mut rows = stmt.query().unwrap();
     for (i, e) in expected.iter().enumerate() {
-        let row = rows.next_row().unwrap().unwrap();
-        let columns = row.parse().unwrap();
-        for (j, e) in e.iter().enumerate() {
-            assert_eq!(columns.get(j), e, "i: {}, j: {}, query: {}", i, j, query);
-        }
+        assert_same_result_prsqlite!(rows, e, format!("i: {i}, query: {query}"));
     }
 }

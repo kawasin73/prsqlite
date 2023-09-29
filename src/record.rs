@@ -132,7 +132,7 @@ pub trait RecordPayload {
 ///
 /// TODO: This abstraction was introduced for FakePayload in tests. Consider
 /// better abstraction.
-pub struct BtreeRecordPayload<'a>(&'a BtreePayload<'a, 'a>);
+pub struct BtreeRecordPayload<'a>(&'a BtreePayload<'a>);
 
 impl RecordPayload for BtreeRecordPayload<'_> {
     #[inline]
@@ -151,8 +151,8 @@ impl RecordPayload for BtreeRecordPayload<'_> {
     }
 }
 
-impl<'a> From<&'a BtreePayload<'a, 'a>> for BtreeRecordPayload<'a> {
-    fn from(payload: &'a BtreePayload<'a, 'a>) -> Self {
+impl<'a> From<&'a BtreePayload<'a>> for BtreeRecordPayload<'a> {
+    fn from(payload: &'a BtreePayload<'a>) -> Self {
         Self(payload)
     }
 }
@@ -165,7 +165,7 @@ pub struct Record<P: RecordPayload> {
 
 #[inline]
 pub fn parse_record<'a>(
-    payload: &'a BtreePayload<'a, 'a>,
+    payload: &'a BtreePayload<'a>,
 ) -> anyhow::Result<Record<BtreeRecordPayload<'a>>> {
     Record::parse(payload.into())
 }

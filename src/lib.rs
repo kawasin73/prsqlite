@@ -640,7 +640,7 @@ pub enum Statement<'conn> {
 }
 
 impl<'conn> Statement<'conn> {
-    pub fn query(&'conn mut self) -> anyhow::Result<Rows<'conn>> {
+    pub fn query(&'conn self) -> anyhow::Result<Rows<'conn>> {
         match self {
             Self::Query(stmt) => stmt.query(),
             Self::Execution(_) => bail!("execute statement not support query"),
@@ -717,7 +717,7 @@ impl<'conn> SelectStatement<'conn> {
         }
     }
 
-    pub fn query(&'conn mut self) -> anyhow::Result<Rows<'conn>> {
+    pub fn query(&'conn self) -> anyhow::Result<Rows<'conn>> {
         // TODO: ReadLock table/schema.
         // TODO: check schema version.
         let mut cursor =
@@ -758,8 +758,8 @@ impl<'conn> SelectStatement<'conn> {
 
 pub struct Rows<'conn> {
     stmt: &'conn SelectStatement<'conn>,
-    cursor: BtreeCursor<'conn, 'conn>,
-    index_cursor: Option<BtreeCursor<'conn, 'conn>>,
+    cursor: BtreeCursor<'conn>,
+    index_cursor: Option<BtreeCursor<'conn>>,
     is_first_row: bool,
     completed: bool,
 }
@@ -899,7 +899,7 @@ const STATIC_NULL_VALUE: Value = Value::Null;
 
 struct RowData<'a> {
     rowid: i64,
-    payload: BtreePayload<'a, 'a>,
+    payload: BtreePayload<'a>,
     headers: Vec<(SerialType, i32)>,
     content_offset: i32,
     use_local_buffer: bool,
@@ -975,7 +975,7 @@ pub struct InsertStatement<'conn> {
     records: Vec<InsertRecord>,
 }
 
-impl InsertStatement<'_> {
+impl<'conn> InsertStatement<'conn> {
     pub fn execute(&mut self) -> anyhow::Result<usize> {
         // TODO: Lock table/schema.
         let mut cursor =

@@ -128,7 +128,7 @@ impl Schema {
     }
 
     pub fn generate(stmt: SelectStatement, schema_table: Table) -> anyhow::Result<Schema> {
-        let mut stmt = stmt;
+        let stmt = stmt;
         let mut rows = stmt.query()?;
         let mut tables = HashMap::new();
         let mut indexes = HashMap::new();

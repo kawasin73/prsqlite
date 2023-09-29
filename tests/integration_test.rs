@@ -35,7 +35,7 @@ fn test_select_all_from_table() {
     let file = create_sqlite_database(&queries);
 
     let mut conn = Connection::open(file.path()).unwrap();
-    let mut stmt = conn.prepare("SELECT * FROM example3;").unwrap();
+    let stmt = conn.prepare("SELECT * FROM example3;").unwrap();
     let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
@@ -72,6 +72,25 @@ fn test_select_all_from_table() {
 }
 
 #[test]
+fn test_select_reuse_statement() {
+    let file = create_sqlite_database(&[
+        "CREATE TABLE example(col);",
+        "INSERT INTO example(col) VALUES (1), (2);",
+    ]);
+
+    let mut conn = Connection::open(file.path()).unwrap();
+    let stmt = conn.prepare("SELECT * FROM example;").unwrap();
+
+    let mut rows = stmt.query().unwrap();
+    assert_same_result_prsqlite!(rows, [Value::Integer(1)], "");
+    assert_same_result_prsqlite!(rows, [Value::Integer(2)], "");
+    assert!(rows.next_row().unwrap().is_none());
+
+    let mut rows = stmt.query().unwrap();
+    assert_same_result_prsqlite!(rows, [Value::Integer(1)], "");
+}
+
+#[test]
 fn test_select_partial() {
     let file = create_sqlite_database(&[
         "CREATE TABLE example(col1, col2, col3);",
@@ -81,7 +100,7 @@ fn test_select_partial() {
     ]);
 
     let mut conn = Connection::open(file.path()).unwrap();
-    let mut stmt = conn.prepare("SELECT col3, col1 FROM example;").unwrap();
+    let stmt = conn.prepare("SELECT col3, col1 FROM example;").unwrap();
     let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
@@ -120,7 +139,7 @@ fn test_select_rowid() {
     ]);
 
     let mut conn = Connection::open(file.path()).unwrap();
-    let mut stmt = conn.prepare("SELECT col, RoWid FROM example;").unwrap();
+    let stmt = conn.prepare("SELECT col, RoWid FROM example;").unwrap();
     let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
@@ -140,7 +159,7 @@ fn test_select_rowid() {
     assert!(rows.next_row().unwrap().is_none());
 
     let mut conn = Connection::open(file.path()).unwrap();
-    let mut stmt = conn.prepare("SELECT col, Rowid FROM example2;").unwrap();
+    let stmt = conn.prepare("SELECT col, Rowid FROM example2;").unwrap();
     let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
@@ -170,7 +189,7 @@ fn test_select_column_name_and_all() {
     ]);
 
     let mut conn = Connection::open(file.path()).unwrap();
-    let mut stmt = conn
+    let stmt = conn
         .prepare("SELECT col3, col3, *, col1 FROM example;")
         .unwrap();
     let mut rows = stmt.query().unwrap();
@@ -368,7 +387,8 @@ fn test_select_primary_key() {
     ]);
     let mut conn = Connection::open(file.path()).unwrap();
 
-    let mut stmt = conn.prepare("SELECT * FROM example;").unwrap();
+    let stmt = conn.prepare("SELECT * FROM example;").unwrap();
+    stmt.query().unwrap();
     let mut rows = stmt.query().unwrap();
 
     let row = rows.next_row().unwrap().unwrap();
@@ -465,7 +485,7 @@ fn test_select_type_conversions_prior_to_comparison() {
             .collect();
         assert_eq!(result, expected, "query: {}", query);
 
-        let mut stmt = conn.prepare(query).unwrap();
+        let stmt = conn.prepare(query).unwrap();
         let mut rows = stmt.query().unwrap();
         let row = rows.next_row().unwrap().unwrap();
         let columns = row.parse().unwrap();
@@ -624,7 +644,7 @@ fn test_select_filter() {
     ]);
 
     let mut conn = Connection::open(file.path()).unwrap();
-    let mut stmt = conn
+    let stmt = conn
         .prepare("SELECT * FROM example WHERE col2 == 5;")
         .unwrap();
     let mut rows = stmt.query().unwrap();
@@ -639,7 +659,7 @@ fn test_select_filter() {
 
     assert!(rows.next_row().unwrap().is_none());
 
-    let mut stmt = conn
+    let stmt = conn
         .prepare("SELECT col2 FROM example WHERE col2 >= 5;")
         .unwrap();
     let mut rows = stmt.query().unwrap();
@@ -658,7 +678,7 @@ fn test_select_filter() {
 
     assert!(rows.next_row().unwrap().is_none());
 
-    let mut stmt = conn
+    let stmt = conn
         .prepare("SELECT col2 FROM example WHERE col2 != 5;")
         .unwrap();
     let mut rows = stmt.query().unwrap();
@@ -689,7 +709,7 @@ fn test_select_filter_eq() {
     ]);
 
     let mut conn = Connection::open(file.path()).unwrap();
-    let mut stmt = conn
+    let stmt = conn
         .prepare("SELECT rowid, col1 FROM example WHERE col1 == 'hello';")
         .unwrap();
     let mut rows = stmt.query().unwrap();
@@ -710,7 +730,7 @@ fn test_select_filter_eq() {
 
     assert!(rows.next_row().unwrap().is_none());
 
-    let mut stmt = conn
+    let stmt = conn
         .prepare("SELECT rowid, col2 FROM example WHERE col2 = 2.0;")
         .unwrap();
     let mut rows = stmt.query().unwrap();
@@ -731,7 +751,7 @@ fn test_select_filter_eq() {
 
     assert!(rows.next_row().unwrap().is_none());
 
-    let mut stmt = conn
+    let stmt = conn
         .prepare("SELECT rowid, col3 FROM example WHERE col3 == 9;")
         .unwrap();
     let mut rows = stmt.query().unwrap();
@@ -752,7 +772,7 @@ fn test_select_filter_eq() {
 
     assert!(rows.next_row().unwrap().is_none());
 
-    let mut stmt = conn
+    let stmt = conn
         .prepare("SELECT rowid, col4 FROM example WHERE col4 == x'2345ab';")
         .unwrap();
     let mut rows = stmt.query().unwrap();
@@ -781,7 +801,7 @@ fn test_select_filter_ne() {
     ]);
 
     let mut conn = Connection::open(file.path()).unwrap();
-    let mut stmt = conn
+    let stmt = conn
         .prepare("SELECT rowid, col1 FROM example WHERE col1 != 'hello';")
         .unwrap();
     let mut rows = stmt.query().unwrap();
@@ -795,7 +815,7 @@ fn test_select_filter_ne() {
 
     assert!(rows.next_row().unwrap().is_none());
 
-    let mut stmt = conn
+    let stmt = conn
         .prepare("SELECT rowid, col2 FROM example WHERE col2 != 2.0;")
         .unwrap();
     let mut rows = stmt.query().unwrap();
@@ -809,7 +829,7 @@ fn test_select_filter_ne() {
 
     assert!(rows.next_row().unwrap().is_none());
 
-    let mut stmt = conn
+    let stmt = conn
         .prepare("SELECT rowid, col3 FROM example WHERE col3 != 9;")
         .unwrap();
     let mut rows = stmt.query().unwrap();
@@ -823,7 +843,7 @@ fn test_select_filter_ne() {
 
     assert!(rows.next_row().unwrap().is_none());
 
-    let mut stmt = conn
+    let stmt = conn
         .prepare("SELECT rowid, col4 FROM example WHERE col4 != x'01ef';")
         .unwrap();
     let mut rows = stmt.query().unwrap();
@@ -922,7 +942,7 @@ fn test_select_filter_with_rowid() {
     ]);
 
     let mut conn = Connection::open(file.path()).unwrap();
-    let mut stmt = conn
+    let stmt = conn
         .prepare("SELECT col, RoWid FROM example WHERE rowid = 2;")
         .unwrap();
     let mut rows = stmt.query().unwrap();
@@ -950,7 +970,7 @@ fn test_select_filter_with_primary_key() {
     ]);
     let mut conn = Connection::open(file.path()).unwrap();
 
-    let mut stmt = conn
+    let stmt = conn
         .prepare("SELECT col, RoWid FROM example WHERE id = 3;")
         .unwrap();
     let mut rows = stmt.query().unwrap();
@@ -962,7 +982,7 @@ fn test_select_filter_with_primary_key() {
     drop(row);
     assert!(rows.next_row().unwrap().is_none());
 
-    let mut stmt = conn
+    let stmt = conn
         .prepare("SELECT col, RoWid FROM example WHERE id = 4;")
         .unwrap();
     let mut rows = stmt.query().unwrap();
@@ -983,7 +1003,7 @@ fn test_select_with_index() {
     ]);
 
     let mut conn = Connection::open(file.path()).unwrap();
-    let mut stmt = conn
+    let stmt = conn
         .prepare("SELECT * FROM example WHERE col2 == 5;")
         .unwrap();
     let mut rows = stmt.query().unwrap();
@@ -1006,7 +1026,7 @@ fn test_select_with_index() {
 
     assert!(rows.next_row().unwrap().is_none());
 
-    let mut stmt = conn
+    let stmt = conn
         .prepare("SELECT * FROM example WHERE col3 == 6;")
         .unwrap();
     let mut rows = stmt.query().unwrap();
@@ -1021,7 +1041,7 @@ fn test_select_with_index() {
 
     assert!(rows.next_row().unwrap().is_none());
 
-    let mut stmt = conn
+    let stmt = conn
         .prepare("SELECT * FROM example WHERE col3 == 3;")
         .unwrap();
     let mut rows = stmt.query().unwrap();
