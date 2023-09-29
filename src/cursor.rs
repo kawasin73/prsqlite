@@ -14,7 +14,6 @@
 
 use std::cmp::Ordering;
 use std::num::NonZeroUsize;
-use std::ptr::copy_nonoverlapping;
 
 use anyhow::bail;
 
@@ -61,11 +60,7 @@ impl<'a, 'pager> BtreePayload<'a, 'pager> {
     /// Returns the number of bytes loaded.
     ///
     /// The offset must be less than the size of the payload.
-    ///
-    /// # Safety
-    ///
-    /// The buffer must not be any [MemPage] buffer.
-    pub unsafe fn load(&self, offset: i32, buf: &mut [u8]) -> anyhow::Result<usize> {
+    pub fn load(&self, offset: i32, buf: &mut [u8]) -> anyhow::Result<usize> {
         if offset < 0 {
             bail!("offset must be non-negative");
         } else if offset >= self.payload_info.payload_size {
@@ -79,12 +74,8 @@ impl<'a, 'pager> BtreePayload<'a, 'pager> {
         if offset < payload.len() as i32 {
             let local_offset = offset as usize;
             let n = std::cmp::min(payload.len() - local_offset, buf.len());
-
-            // SAFETY: n is less than buf.len() and payload.len().
-            // SAFETY: payload and buf do not overlap.
-            unsafe {
-                copy_nonoverlapping(payload[local_offset..].as_ptr(), buf.as_mut_ptr(), n);
-            }
+            // TODO: std::ptr::copy_nonoverlapping
+            buf[..n].copy_from_slice(&payload[local_offset..local_offset + n]);
             n_loaded += n;
             offset += n as i32;
             buf = &mut buf[n..];
@@ -103,12 +94,8 @@ impl<'a, 'pager> BtreePayload<'a, 'pager> {
             if offset < cur + payload.len() as i32 {
                 let local_offset = (offset - cur) as usize;
                 let n = std::cmp::min(payload.len() - local_offset, buf.len());
-
-                // SAFETY: n is less than buf.len() and payload.len().
-                // SAFETY: payload and buf do not overlap.
-                unsafe {
-                    copy_nonoverlapping(payload[local_offset..].as_ptr(), buf.as_mut_ptr(), n);
-                }
+                // TODO: std::ptr::copy_nonoverlapping
+                buf[..n].copy_from_slice(&payload[local_offset..local_offset + n]);
                 n_loaded += n;
                 offset += n as i32;
                 buf = &mut buf[n..];
@@ -634,7 +621,7 @@ impl<'ctx, 'pager> BtreeCursor<'ctx, 'pager> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::Record;
+    use crate::record::parse_record;
     use crate::test_utils::*;
     use crate::value::Collation;
     use crate::value::Value;
@@ -873,7 +860,7 @@ mod tests {
             assert_eq!(rowid, i + 1);
             assert!(payload.size() > BUFFER_SIZE as i32);
             assert_eq!(payload.size(), payload.buf().len() as i32);
-            let mut table_record = Record::parse(&payload).unwrap();
+            let mut table_record = parse_record(&payload).unwrap();
             assert_eq!(table_record.get(0).unwrap(), Value::Integer(i));
             drop(payload);
             assert_eq!(table_cursor.get_table_key().unwrap().unwrap(), i + 1);
@@ -881,7 +868,7 @@ mod tests {
 
             let payload = index1_cursor.get_index_payload().unwrap();
             let payload = payload.unwrap();
-            let mut index_record = Record::parse(&payload).unwrap();
+            let mut index_record = parse_record(&payload).unwrap();
             assert_eq!(index_record.get(1).unwrap(), Value::Integer(i + 1));
             assert!(payload.size() > BUFFER_SIZE as i32, "{}", i);
             assert_eq!(payload.size(), payload.buf().len() as i32);
@@ -890,7 +877,7 @@ mod tests {
 
             let payload = index2_cursor.get_index_payload().unwrap();
             let payload = payload.unwrap();
-            let mut index_record = Record::parse(&payload).unwrap();
+            let mut index_record = parse_record(&payload).unwrap();
             assert_eq!(index_record.get(0).unwrap(), Value::Integer(i));
             assert_eq!(index_record.get(1).unwrap(), Value::Integer(i + 1));
             assert_eq!(payload.size(), payload.buf().len() as i32);
@@ -911,7 +898,7 @@ mod tests {
 
             let payload = index1_cursor.get_index_payload().unwrap();
             let payload = payload.unwrap();
-            let mut index_record = Record::parse(&payload).unwrap();
+            let mut index_record = parse_record(&payload).unwrap();
             assert_eq!(index_record.get(1).unwrap(), Value::Integer(i + 1));
             let rowid_buf = (i as u16 + 1).to_be_bytes();
             assert_eq!(payload.buf(), &[3, 14, 2, 0xff, rowid_buf[0], rowid_buf[1]]);
@@ -921,7 +908,7 @@ mod tests {
 
             let payload = index2_cursor.get_index_payload().unwrap();
             let payload = payload.unwrap();
-            let mut index_record = Record::parse(&payload).unwrap();
+            let mut index_record = parse_record(&payload).unwrap();
             assert_eq!(index_record.get(0).unwrap(), Value::Integer(i));
             assert_eq!(index_record.get(1).unwrap(), Value::Integer(i + 1));
             assert_eq!(payload.size(), payload.buf().len() as i32);
@@ -942,7 +929,7 @@ mod tests {
         // move_to_last() for index
         index1_cursor.move_to_last().unwrap();
         assert_eq!(
-            Record::parse(&index1_cursor.get_index_payload().unwrap().unwrap())
+            parse_record(&index1_cursor.get_index_payload().unwrap().unwrap())
                 .unwrap()
                 .get(1)
                 .unwrap(),
@@ -953,7 +940,7 @@ mod tests {
             .unwrap();
         index1_cursor.move_to_last().unwrap();
         assert_eq!(
-            Record::parse(&index1_cursor.get_index_payload().unwrap().unwrap())
+            parse_record(&index1_cursor.get_index_payload().unwrap().unwrap())
                 .unwrap()
                 .get(1)
                 .unwrap(),
@@ -971,7 +958,7 @@ mod tests {
             .unwrap();
         let payload = index2_cursor.get_index_payload().unwrap();
         let payload = payload.unwrap();
-        let mut index_record = Record::parse(&payload).unwrap();
+        let mut index_record = parse_record(&payload).unwrap();
         assert_eq!(index_record.get(0).unwrap(), Value::Integer(2000));
         assert_eq!(index_record.get(1).unwrap(), Value::Integer(2001));
         assert_eq!(payload.size(), payload.buf().len() as i32);
@@ -985,7 +972,7 @@ mod tests {
             .unwrap();
         let payload = index2_cursor.get_index_payload().unwrap();
         let payload = payload.unwrap();
-        let mut index_record = Record::parse(&payload).unwrap();
+        let mut index_record = parse_record(&payload).unwrap();
         assert_eq!(index_record.get(0).unwrap(), Value::Integer(3000));
         assert_eq!(index_record.get(1).unwrap(), Value::Integer(3001));
         assert_eq!(payload.size(), payload.buf().len() as i32);
@@ -999,7 +986,7 @@ mod tests {
             .unwrap();
         let payload = index2_cursor.get_index_payload().unwrap();
         let payload = payload.unwrap();
-        let mut index_record = Record::parse(&payload).unwrap();
+        let mut index_record = parse_record(&payload).unwrap();
         assert_eq!(index_record.get(0).unwrap(), Value::Integer(3001));
         assert_eq!(index_record.get(1).unwrap(), Value::Integer(3002));
         assert_eq!(payload.size(), payload.buf().len() as i32);
@@ -1037,25 +1024,25 @@ mod tests {
         assert_eq!(payload.size(), 10004);
 
         let mut payload_buf = vec![0; 10010];
-        let n = unsafe { payload.load(0, &mut payload_buf) }.unwrap();
+        let n = payload.load(0, &mut payload_buf).unwrap();
         assert_eq!(n, 10004);
         assert_eq!(payload_buf[0..4], [0x04, 0x81, 0x9c, 0x2c]);
         assert_eq!(&payload_buf[..payload.buf().len()], payload.buf());
         assert_eq!(payload_buf[4..10004], buf);
 
-        let n = unsafe { payload.load(3000, &mut payload_buf) }.unwrap();
+        let n = payload.load(3000, &mut payload_buf).unwrap();
         assert_eq!(n, 7004);
         assert_eq!(payload_buf[..7004], buf[2996..]);
 
-        let n = unsafe { payload.load(104, &mut payload_buf[..100]) }.unwrap();
+        let n = payload.load(104, &mut payload_buf[..100]).unwrap();
         assert_eq!(n, 100);
         assert_eq!(payload_buf[..100], buf[100..200]);
 
-        let n = unsafe { payload.load(3000, &mut payload_buf[..100]) }.unwrap();
+        let n = payload.load(3000, &mut payload_buf[..100]).unwrap();
         assert_eq!(n, 100);
         assert_eq!(payload_buf[..100], buf[2996..3096]);
 
-        let result = unsafe { payload.load(10004, &mut payload_buf) };
+        let result = payload.load(10004, &mut payload_buf);
         assert!(result.is_err());
 
         let index_page_id = find_index_page_id("index1", file.path());
@@ -1071,25 +1058,25 @@ mod tests {
         assert_eq!(payload.size(), 10004 + 1);
 
         let mut payload_buf = vec![0; 10010];
-        let n = unsafe { payload.load(0, &mut payload_buf) }.unwrap();
+        let n = payload.load(0, &mut payload_buf).unwrap();
         assert_eq!(n, 10004 + 1);
         assert_eq!(payload_buf[0..5], [0x05, 0x81, 0x9c, 0x2c, 0x09]);
         assert_eq!(&payload_buf[..payload.buf().len()], payload.buf());
         assert_eq!(payload_buf[5..10005], buf);
 
-        let n = unsafe { payload.load(3001, &mut payload_buf) }.unwrap();
+        let n = payload.load(3001, &mut payload_buf).unwrap();
         assert_eq!(n, 7004);
         assert_eq!(payload_buf[..7004], buf[2996..]);
 
-        let n = unsafe { payload.load(105, &mut payload_buf[..100]) }.unwrap();
+        let n = payload.load(105, &mut payload_buf[..100]).unwrap();
         assert_eq!(n, 100);
         assert_eq!(payload_buf[..100], buf[100..200]);
 
-        let n = unsafe { payload.load(3001, &mut payload_buf[..100]) }.unwrap();
+        let n = payload.load(3001, &mut payload_buf[..100]).unwrap();
         assert_eq!(n, 100);
         assert_eq!(payload_buf[..100], buf[2996..3096]);
 
-        let result = unsafe { payload.load(10005, &mut payload_buf) };
+        let result = payload.load(10005, &mut payload_buf);
         assert!(result.is_err());
     }
 
@@ -1232,7 +1219,7 @@ mod tests {
                 .unwrap();
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some());
-            let mut record = Record::parse(payload.as_ref().unwrap()).unwrap();
+            let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
             assert_eq!(record.get(0).unwrap(), Value::Integer(2 * i + 1));
             assert_eq!(record.get(1).unwrap(), Value::Integer(2 * i + 1));
             drop(payload);
@@ -1245,7 +1232,7 @@ mod tests {
                 .unwrap();
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some());
-            let mut record = Record::parse(payload.as_ref().unwrap()).unwrap();
+            let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
             assert_eq!(record.get(0).unwrap(), Value::Integer(2 * i + 1));
             assert_eq!(record.get(1).unwrap(), Value::Integer(2 * i + 1));
         }
@@ -1255,7 +1242,7 @@ mod tests {
             .unwrap();
         let payload = cursor.get_index_payload().unwrap();
         assert!(payload.is_some());
-        let mut record = Record::parse(payload.as_ref().unwrap()).unwrap();
+        let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
         assert_eq!(record.get(0).unwrap(), Value::Integer(10));
         // If there are multiple entries with the same key, one of the entries is
         // returned (not necessarily the first or last one).
@@ -1271,7 +1258,7 @@ mod tests {
                 .unwrap();
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some());
-            let mut record = Record::parse(payload.as_ref().unwrap()).unwrap();
+            let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
             assert_eq!(record.get(0).unwrap(), Value::Integer(10));
             assert_eq!(record.get(1).unwrap(), Value::Integer(i));
         }
@@ -1284,7 +1271,7 @@ mod tests {
             .unwrap();
         let payload = cursor.get_index_payload().unwrap();
         assert!(payload.is_some());
-        let mut record = Record::parse(payload.as_ref().unwrap()).unwrap();
+        let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
         assert_eq!(record.get(0).unwrap(), Value::Integer(11));
         assert_eq!(record.get(1).unwrap(), Value::Integer(14));
         drop(payload);
@@ -1506,7 +1493,7 @@ mod tests {
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some());
             let payload = payload.unwrap();
-            let mut record = Record::parse(&payload).unwrap();
+            let mut record = parse_record(&payload).unwrap();
             if let Value::Integer(rowid) = record.get(record.len() - 1).unwrap() {
                 assert_eq!(rowid, expected, "{:?}", keys);
             } else {
@@ -1560,7 +1547,7 @@ mod tests {
             let payload = cursor1.get_index_payload().unwrap();
             assert!(payload.is_some());
             let payload = payload.unwrap();
-            let mut record = Record::parse(&payload).unwrap();
+            let mut record = parse_record(&payload).unwrap();
             if let Value::Integer(rowid) = record.get(record.len() - 1).unwrap() {
                 assert_eq!(rowid, expected[0], "{:?}", keys);
             } else {
@@ -1575,7 +1562,7 @@ mod tests {
             let payload = cursor2.get_index_payload().unwrap();
             assert!(payload.is_some());
             let payload = payload.unwrap();
-            let mut record = Record::parse(&payload).unwrap();
+            let mut record = parse_record(&payload).unwrap();
             if let Value::Integer(rowid) = record.get(record.len() - 1).unwrap() {
                 assert_eq!(rowid, expected[1], "{:?}", keys);
             } else {
@@ -1590,7 +1577,7 @@ mod tests {
             let payload = cursor3.get_index_payload().unwrap();
             assert!(payload.is_some());
             let payload = payload.unwrap();
-            let mut record = Record::parse(&payload).unwrap();
+            let mut record = parse_record(&payload).unwrap();
             if let Value::Integer(rowid) = record.get(record.len() - 1).unwrap() {
                 assert_eq!(rowid, expected[2], "{:?}", keys);
             } else {
@@ -1663,7 +1650,7 @@ mod tests {
                 .unwrap();
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some(), "i = {}", i);
-            let mut record = Record::parse(payload.as_ref().unwrap()).unwrap();
+            let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
             assert_eq!(record.get(0).unwrap(), Value::Integer(2 * i + 1));
             assert_eq!(record.get(2).unwrap(), Value::Integer(i));
             drop(payload);
@@ -1679,7 +1666,7 @@ mod tests {
                 .unwrap();
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some(), "i = {}", i);
-            let mut record = Record::parse(payload.as_ref().unwrap()).unwrap();
+            let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
             assert_eq!(record.get(0).unwrap(), Value::Integer(2 * i + 1));
             assert_eq!(record.get(2).unwrap(), Value::Integer(i));
             drop(payload);
@@ -1809,7 +1796,7 @@ mod tests {
         let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
         assert_eq!(key, 1);
         assert_eq!(
-            Record::parse(&payload).unwrap().get(0).unwrap(),
+            parse_record(&payload).unwrap().get(0).unwrap(),
             Value::Integer(1)
         );
         drop(payload);
@@ -1818,7 +1805,7 @@ mod tests {
         let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
         assert_eq!(key, 2);
         assert_eq!(
-            Record::parse(&payload).unwrap().get(0).unwrap(),
+            parse_record(&payload).unwrap().get(0).unwrap(),
             Value::Integer(2)
         );
         drop(payload);
@@ -1833,7 +1820,7 @@ mod tests {
         let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
         assert_eq!(key, 5);
         assert_eq!(
-            Record::parse(&payload).unwrap().get(0).unwrap(),
+            parse_record(&payload).unwrap().get(0).unwrap(),
             Value::Integer(5)
         );
         drop(payload);
