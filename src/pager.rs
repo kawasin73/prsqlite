@@ -27,7 +27,7 @@ use anyhow::bail;
 
 use crate::DATABASE_HEADER_SIZE;
 
-pub const MAX_BUFFER_SIZE: usize = 65536;
+pub const MAX_PAGE_SIZE: usize = 65536;
 
 pub type PageId = u32;
 
@@ -66,7 +66,7 @@ pub struct Pager {
 }
 
 impl Pager {
-    pub fn new(file: File, pagesize: usize) -> anyhow::Result<Self> {
+    pub fn new(file: File, pagesize: u32) -> anyhow::Result<Self> {
         let file_len = file.metadata()?.len();
         assert!(file_len % pagesize as u64 == 0);
         let n_pages = file_len / (pagesize as u64);
@@ -85,8 +85,8 @@ impl Pager {
                 let (page, is_new) = self.cache.get_page(id);
                 if is_new {
                     let mut raw_page = page.borrow_mut();
-                    let offset = (id - 1) as usize * self.cache.pagesize;
-                    self.file.read_exact_at(&mut raw_page.buf, offset as u64)?;
+                    self.file
+                        .read_exact_at(&mut raw_page.buf, self.page_offset(id))?;
                 }
                 let header_offset = if id == 1 { DATABASE_HEADER_SIZE } else { 0 };
                 Ok(MemPage {
@@ -115,8 +115,8 @@ impl Pager {
         for (page_id, page) in self.cache.map.borrow().iter() {
             let raw_page = page.borrow();
             if raw_page.is_dirty {
-                let offset = (*page_id - 1) as usize * self.cache.pagesize;
-                self.file.write_all_at(&raw_page.buf, offset as u64)?;
+                self.file
+                    .write_all_at(&raw_page.buf, self.page_offset(*page_id))?;
                 drop(raw_page);
                 // TODO: How to guarantee page is not referenced?
                 page.borrow_mut().is_dirty = false;
@@ -129,6 +129,11 @@ impl Pager {
     #[allow(dead_code)]
     pub fn num_pages(&self) -> u32 {
         self.n_pages
+    }
+
+    #[inline]
+    fn page_offset(&self, page_id: PageId) -> u64 {
+        (page_id - 1) as u64 * self.cache.pagesize as u64
     }
 }
 
@@ -149,9 +154,9 @@ struct RawPage {
 }
 
 impl RawPage {
-    fn new(pagesize: usize) -> Self {
+    fn new(pagesize: u32) -> Self {
         Self {
-            buf: vec![0_u8; pagesize],
+            buf: vec![0_u8; pagesize as usize],
             is_dirty: false,
         }
     }
@@ -159,11 +164,11 @@ impl RawPage {
 
 struct PageCache {
     map: RefCell<HashMap<PageId, Rc<RefCell<RawPage>>>>,
-    pagesize: usize,
+    pagesize: u32,
 }
 
 impl PageCache {
-    fn new(pagesize: usize) -> Self {
+    fn new(pagesize: u32) -> Self {
         Self {
             map: RefCell::new(HashMap::new()),
             pagesize,

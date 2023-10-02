@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
-use std::num::NonZeroUsize;
 
 use anyhow::bail;
 
@@ -31,6 +30,7 @@ use crate::pager::MemPage;
 use crate::pager::PageBuffer;
 use crate::pager::PageId;
 use crate::pager::Pager;
+use crate::pager::MAX_PAGE_SIZE;
 use crate::record::compare_record;
 use crate::utils::i64_to_u64;
 use crate::utils::put_varint;
@@ -412,13 +412,27 @@ impl<'a> BtreeCursor<'a> {
                 // TODO: Support freeblock.
                 assert_eq!(page_header.first_freeblock_offset(), 0);
                 assert_eq!(page_header.fragmented_free_bytes(), 0);
-                let cell_content_area_offset = page_header.cell_content_area_offset().get();
                 let header_size = page_header.header_size();
                 let unallocated_space_offset = cell_pointer_offset(
                     &self.current_page.mem,
                     self.current_page.n_cells,
                     header_size,
                 );
+                assert!(unallocated_space_offset > 0);
+                let mut cell_content_area_offset = page_header.cell_content_area_offset() as usize;
+                if cell_content_area_offset < unallocated_space_offset {
+                    if self.btree_ctx.usable_size as usize == MAX_PAGE_SIZE
+                        && cell_content_area_offset == 0
+                    {
+                        // If cell_content_area_offset is zero, it always goes this pass and be
+                        // translated into MAX_PAGE_SIZE because unallocated_space_offset is bigger
+                        // than zero.
+                        cell_content_area_offset = MAX_PAGE_SIZE;
+                    } else {
+                        bail!("invalid cell content area offset");
+                    }
+                }
+
                 let free_size = cell_content_area_offset - unallocated_space_offset;
                 if free_size < cell_size + 2 {
                     // TODO: balance the btree.
@@ -444,13 +458,16 @@ impl<'a> BtreeCursor<'a> {
                 let offset = cell_content_area_offset - cell_size;
                 // cell_content_area_offset is less than or equal to 65536. data is not empty.
                 // The offset must be less than 65536 and safe to cast into u16.
-                assert!(offset < u16::MAX as usize);
+                assert!(offset <= u16::MAX as usize);
 
                 // Update the page header.
                 let mut page_header =
                     BtreePageHeaderMut::from_page(&self.current_page.mem, &mut buffer);
                 assert!(offset > 0);
-                page_header.set_cell_content_area_offset(NonZeroUsize::new(offset).unwrap());
+                // New cell content area offset must not be less than the tail of cell pointers.
+                assert!(offset >= unallocated_space_offset + 2);
+                // offset <= u16::MAX is asserted above.
+                page_header.set_cell_content_area_offset(offset as u16);
                 self.current_page.n_cells += 1;
                 page_header.set_n_cells(self.current_page.n_cells);
 
@@ -1827,6 +1844,42 @@ mod tests {
         let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
         assert_eq!(key, 6);
         assert_eq!(payload.buf(), &[6]);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let payload = cursor.get_table_payload().unwrap();
+        assert!(payload.is_none());
+        drop(payload);
+    }
+
+    #[test]
+    fn test_insert_max_page_size() {
+        let file =
+            create_sqlite_database(&["PRAGMA page_size = 65536;", "CREATE TABLE example(col);"]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let table_page_id = find_table_page_id("example", file.path());
+
+        let page_1 = pager.get_page(1).unwrap();
+        assert_eq!(page_1.buffer().len(), MAX_PAGE_SIZE);
+        assert_eq!(bctx.usable_size as usize, MAX_PAGE_SIZE);
+        drop(page_1);
+        let page_2 = pager.get_page(table_page_id).unwrap();
+        let buffer = page_2.buffer();
+        let header = BtreePageHeader::from_page(&page_2, &buffer);
+        assert_eq!(header.cell_content_area_offset(), 0);
+        drop(buffer);
+        drop(page_2);
+
+        let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
+
+        // cell_content_area_offset zero must be translated as 65536 and inserting must
+        // succeed.
+        cursor.insert(1, &[1]).unwrap();
+        cursor.move_to_first().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 1);
+        assert_eq!(payload.buf(), &[1]);
         drop(payload);
 
         cursor.move_next().unwrap();

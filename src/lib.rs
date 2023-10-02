@@ -137,8 +137,10 @@ impl<'a> DatabaseHeader<'a> {
         self.0[20]
     }
 
-    pub fn usable_size(&self) -> i32 {
-        self.pagesize() as i32 - self.reserved() as i32
+    pub fn usable_size(&self) -> u32 {
+        // pagesize is bigger than or equal to 512.
+        // reserved is smaller than or equal to 255.
+        self.pagesize() - self.reserved() as u32
     }
 }
 
@@ -172,7 +174,7 @@ impl Connection {
         } else if !header.validate_reserved() {
             bail!("invalid reserved");
         }
-        let pager = Pager::new(file, header.pagesize() as usize)?;
+        let pager = Pager::new(file, header.pagesize())?;
         Ok(Self {
             pager,
             btree_ctx: BtreeContext::new(header.usable_size()),

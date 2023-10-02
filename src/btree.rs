@@ -13,14 +13,12 @@
 // limitations under the License.
 
 use std::num::NonZeroU32;
-use std::num::NonZeroUsize;
 use std::ops::Range;
 
 use crate::pager::MemPage;
 use crate::pager::PageBuffer;
 use crate::pager::PageBufferMut;
 use crate::pager::PageId;
-use crate::pager::MAX_BUFFER_SIZE;
 use crate::utils::parse_varint;
 use crate::utils::u64_to_i64;
 
@@ -84,14 +82,9 @@ impl<'page> BtreePageHeader<'page> {
 
     /// The offset of the cell content area
     ///
-    /// zero is interpreted as 65536.
-    pub fn cell_content_area_offset(&self) -> NonZeroUsize {
-        let v = u16::from_be_bytes(self.0[5..7].try_into().unwrap()) as usize;
-        if v == 0 {
-            NonZeroUsize::new(MAX_BUFFER_SIZE).unwrap()
-        } else {
-            NonZeroUsize::new(v).unwrap()
-        }
+    /// zero should be interpreted as 65536.
+    pub fn cell_content_area_offset(&self) -> u16 {
+        u16::from_be_bytes(self.0[5..7].try_into().unwrap())
     }
 
     /// Fragmented free bytes in the cell content area.
@@ -140,14 +133,9 @@ impl<'a> BtreePageHeaderMut<'a> {
 
     /// Set offset of the cell content area.
     ///
-    /// The offset must be less than or equal to 65536.
-    pub fn set_cell_content_area_offset(&mut self, offset: NonZeroUsize) {
-        let mut offset = offset.get();
-        assert!(offset <= MAX_BUFFER_SIZE);
-        if offset == MAX_BUFFER_SIZE {
-            offset = 0;
-        }
-        let offset = offset as u16;
+    /// The offset must be less than 65536. If the actual offset is 65536, it
+    /// must be set to 0.
+    pub fn set_cell_content_area_offset(&mut self, offset: u16) {
         self.0[5..7].copy_from_slice(offset.to_be_bytes().as_slice());
     }
 }
@@ -263,14 +251,18 @@ pub struct BtreeContext {
     /// for table pages.
     max_local: [u16; 2],
     min_local: u16,
-    usable_minus_4: u16,
+    /// Usable size is less than or equal to 65536.
+    ///
+    /// TODO: Improve the visibility of this field. we may need to re-consider
+    /// to merge btree.rs and cursor.rs.
+    pub usable_size: u32,
 }
 
 impl BtreeContext {
     /// Creates a new context.
     ///
     /// usable_size is at most 65536.
-    pub fn new(usable_size: i32) -> Self {
+    pub fn new(usable_size: u32) -> Self {
         assert!(usable_size <= 65536);
         Self {
             max_local: [
@@ -278,7 +270,7 @@ impl BtreeContext {
                 (usable_size - 35).try_into().unwrap(),
             ],
             min_local: ((usable_size - 12) * 32 / 255 - 23).try_into().unwrap(),
-            usable_minus_4: (usable_size - 4).try_into().unwrap(),
+            usable_size,
         }
     }
 
@@ -290,7 +282,7 @@ impl BtreeContext {
     #[inline]
     fn n_local(&self, is_table: bool, payload_size: i32) -> u16 {
         let surplus = self.min_local as i32
-            + ((payload_size - self.min_local as i32) % self.usable_minus_4 as i32);
+            + ((payload_size - self.min_local as i32) % (self.usable_size - 4) as i32);
         if surplus <= self.max_local[is_table as usize] as i32 {
             surplus as u16
         } else {
@@ -526,7 +518,7 @@ mod tests {
         // page 2 has 100 for cell 0 offset.
         content[MAX_PAGESIZE + header_size..MAX_PAGESIZE + header_size + 2]
             .copy_from_slice(&1000_u16.to_be_bytes());
-        let pager = create_empty_pager(&content, MAX_PAGESIZE);
+        let pager = create_empty_pager(&content, MAX_PAGESIZE as u32);
         let page = pager.get_page(1).unwrap();
         let buffer = page.buffer();
         // offset 0 is translated to 1 << 16.

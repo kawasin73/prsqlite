@@ -82,6 +82,32 @@ fn test_insert() {
 }
 
 #[test]
+fn test_insert_per_pagesize() {
+    // TODO: Other page sizes 512 ~ 65536.
+    for pagesize in [512, 4096, 65536] {
+        let pagesize_pragma = format!("PRAGMA page_size = {};", pagesize);
+        let file = create_sqlite_database(&[&pagesize_pragma, "CREATE TABLE example(col);"]);
+        let conn = Connection::open(file.path()).unwrap();
+
+        let stmt = conn
+            .prepare("INSERT INTO example (col) VALUES (123);")
+            .unwrap();
+        assert_eq!(stmt.execute().unwrap(), 1);
+
+        // TODO: overflow
+        // TODO: balance pages
+
+        let test_conn = rusqlite::Connection::open(file.path()).unwrap();
+        assert_same_results(
+            &[&[Value::Integer(123)]],
+            "SELECT col FROM example;",
+            &test_conn,
+            &conn,
+        )
+    }
+}
+
+#[test]
 fn test_insert_with_rowid() {
     let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
     let conn = Connection::open(file.path()).unwrap();
