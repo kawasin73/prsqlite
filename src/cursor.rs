@@ -26,6 +26,7 @@ use crate::btree::BtreePageType;
 use crate::btree::IndexCellKeyParser;
 use crate::btree::PayloadInfo;
 use crate::btree::TableCellKeyParser;
+use crate::btree::BTREE_OVERFLOW_PAGE_ID_BYTES;
 use crate::pager::MemPage;
 use crate::pager::PageBuffer;
 use crate::pager::PageId;
@@ -38,6 +39,7 @@ use crate::value::ValueCmp;
 
 pub struct BtreePayload<'a> {
     pager: &'a Pager,
+    bctx: &'a BtreeContext,
     local_payload_buffer: PageBuffer<'a>,
     payload_info: PayloadInfo,
 }
@@ -89,7 +91,7 @@ impl<'a> BtreePayload<'a> {
             let page = self.pager.get_page(overflow_page.page_id())?;
             let buffer = page.buffer();
             let (payload, next_overflow) = overflow_page
-                .parse(&buffer)
+                .parse(self.bctx, &buffer)
                 .map_err(|e| anyhow::anyhow!("parse overflow: {:?}", e))?;
             if offset < cur + payload.len() as i32 {
                 let local_offset = (offset - cur) as usize;
@@ -245,6 +247,7 @@ impl<'a> BtreeCursor<'a> {
                     .map_err(|e| anyhow::anyhow!("parse index cell key: {:?}", e))?;
                 let key_payload = BtreePayload {
                     pager: self.pager,
+                    bctx: self.btree_ctx,
                     local_payload_buffer: self.current_page.mem.buffer(),
                     payload_info,
                 };
@@ -394,9 +397,57 @@ impl<'a> BtreeCursor<'a> {
         let current_cell_key = self.table_move_to(key)?;
 
         let mut cell_header = [0; 18];
-        let mut cell_header_size = put_varint(cell_header.as_mut_slice(), payload.len() as u64);
+        let payload_size: i32 = payload.len().try_into()?;
+        let mut cell_header_size = put_varint(cell_header.as_mut_slice(), payload_size as u64);
         cell_header_size += put_varint(&mut cell_header[cell_header_size..], i64_to_u64(key));
-        let cell_size = cell_header_size + payload.len();
+        let is_table = true;
+        let (cell_size, n_local, overflow_page_id) = if payload_size
+            <= self.btree_ctx.max_local(is_table) as i32
+        {
+            (
+                cell_header_size + payload_size as usize,
+                payload_size as usize,
+                None,
+            )
+        } else {
+            // Split the payload into local and overflow pages.
+            let n_local = self.btree_ctx.n_local(is_table, payload_size) as usize;
+            let mut i_overflow_payload = n_local;
+            let usable_size_overflow =
+                self.btree_ctx.usable_size as usize - BTREE_OVERFLOW_PAGE_ID_BYTES;
+            let (first_overflow_page_id, mut page) = self.pager.allocate_page()?;
+            while i_overflow_payload + usable_size_overflow < payload.len() {
+                let (next_page_id, next_page) = self.pager.allocate_page()?;
+                let mut buffer = self.pager.make_page_mut(&page)?;
+                let next_page_id = next_page_id.to_be_bytes();
+                assert_eq!(next_page_id.len(), BTREE_OVERFLOW_PAGE_ID_BYTES);
+                buffer[..next_page_id.len()].copy_from_slice(&next_page_id);
+                buffer[next_page_id.len()..self.btree_ctx.usable_size as usize].copy_from_slice(
+                    &payload[i_overflow_payload..i_overflow_payload + usable_size_overflow],
+                );
+                drop(buffer);
+                i_overflow_payload += usable_size_overflow;
+                page = next_page;
+            }
+            let mut buffer = self.pager.make_page_mut(&page)?;
+            let last_overflow_size = payload.len() - i_overflow_payload;
+            buffer[..BTREE_OVERFLOW_PAGE_ID_BYTES].fill(0);
+            buffer[BTREE_OVERFLOW_PAGE_ID_BYTES..BTREE_OVERFLOW_PAGE_ID_BYTES + last_overflow_size]
+                .copy_from_slice(&payload[i_overflow_payload..]);
+            drop(buffer);
+
+            (
+                cell_header_size + n_local + BTREE_OVERFLOW_PAGE_ID_BYTES,
+                n_local,
+                Some(first_overflow_page_id.to_be_bytes()),
+            )
+        };
+        // Allocate 4 bytes or more to be compatible to allocateSpace() of SQLite.
+        // Otherwise freeSpace() of SQLite corrupts the database file (e.g. on updating
+        // or deleting records). 4 bytes allocation is introduced in order to make
+        // spaces easier to reused as freeblock. 1 ~ 3 bytes spaces are counted as
+        // fragmented and never reused. cell_size can be less than 4 on index pages.
+        let cell_size = if cell_size < 4 { 4 } else { cell_size };
 
         // TODO: split the payload into overflow page if it is too large.
 
@@ -492,7 +543,13 @@ impl<'a> BtreeCursor<'a> {
                 // Copy payload to the btree page.
                 let payload_offset = offset + cell_header_size;
                 buffer[offset..payload_offset].copy_from_slice(&cell_header[..cell_header_size]);
-                buffer[payload_offset..payload_offset + payload.len()].copy_from_slice(payload);
+                let payload_tail_offset = payload_offset + n_local;
+                buffer[payload_offset..payload_tail_offset].copy_from_slice(&payload[..n_local]);
+                if let Some(overflow_page_id) = overflow_page_id {
+                    assert_eq!(overflow_page_id.len(), 4);
+                    buffer[payload_tail_offset..payload_tail_offset + overflow_page_id.len()]
+                        .copy_from_slice(&overflow_page_id);
+                }
             }
         }
         Ok(())
@@ -540,6 +597,7 @@ impl<'a> BtreeCursor<'a> {
             key,
             BtreePayload {
                 pager: self.pager,
+                bctx: self.btree_ctx,
                 local_payload_buffer: buffer,
                 payload_info,
             },
@@ -564,6 +622,7 @@ impl<'a> BtreeCursor<'a> {
             .map_err(|e| anyhow::anyhow!("parse btree leaf index cell: {:?}", e))?;
         Ok(Some(BtreePayload {
             pager: self.pager,
+            bctx: self.btree_ctx,
             local_payload_buffer: buffer,
             payload_info,
         }))
@@ -1719,7 +1778,7 @@ mod tests {
         drop(payload);
 
         cursor.insert(2, &[2, 3]).unwrap();
-        cursor.insert(4, &[4, 5, 6]).unwrap();
+        cursor.insert(4, &[4, 5, 6, 7]).unwrap();
 
         cursor.move_to_first().unwrap();
         let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
@@ -1736,7 +1795,7 @@ mod tests {
         cursor.move_next().unwrap();
         let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
         assert_eq!(key, 4);
-        assert_eq!(payload.buf(), &[4, 5, 6]);
+        assert_eq!(payload.buf(), &[4, 5, 6, 7]);
         drop(payload);
 
         cursor.move_next().unwrap();
@@ -1774,7 +1833,7 @@ mod tests {
         cursor.move_next().unwrap();
         let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
         assert_eq!(key, 4);
-        assert_eq!(payload.buf(), &[4, 5, 6]);
+        assert_eq!(payload.buf(), &[4, 5, 6, 7]);
         drop(payload);
 
         cursor.move_next().unwrap();
@@ -1886,5 +1945,96 @@ mod tests {
         let payload = cursor.get_table_payload().unwrap();
         assert!(payload.is_none());
         drop(payload);
+    }
+
+    #[test]
+    fn test_insert_overflow() {
+        let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
+
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let table_page_id = find_table_page_id("example", file.path());
+        let max_local = bctx.max_local(true) as usize;
+        let usable_size = bctx.usable_size as usize;
+
+        let mut data = Vec::with_capacity(usable_size * 2);
+        for _ in 0..usable_size * 2 {
+            data.push(rand::random::<u8>());
+        }
+
+        // Not overflow
+        {
+            let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
+            cursor.insert(1, &data[..max_local]).unwrap();
+            cursor.table_move_to(1).unwrap();
+            let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+            assert_eq!(key, 1);
+            assert_eq!(payload.size() as usize, max_local);
+            assert_eq!(payload.buf().len(), max_local);
+            assert_eq!(payload.buf(), &data[..max_local]);
+        }
+        pager.abort();
+
+        // Overflows
+        let payload_size = max_local + 1;
+        {
+            let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
+            cursor.insert(2, &data[..payload_size]).unwrap();
+            cursor.table_move_to(2).unwrap();
+            let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+            assert_eq!(key, 2);
+            assert_eq!(payload.size() as usize, payload_size);
+            assert!(payload.buf().len() < payload_size);
+            let mut buf = vec![0; payload_size + 1];
+            let loaded = payload.load(0, &mut buf).unwrap();
+            assert_eq!(loaded, payload_size);
+            assert_eq!(&buf[..payload_size], &data[..payload_size]);
+        }
+        pager.abort();
+
+        // Overflows with exact overflow page size
+        let mut size_exact_overflow_page_size = -1;
+        for i in 1..4096 {
+            let p_size = max_local + i;
+            let n_local = bctx.n_local(true, p_size as i32) as usize;
+            if (p_size - n_local) % (bctx.usable_size as usize - 4) == 0 {
+                size_exact_overflow_page_size = p_size as i32;
+                break;
+            }
+        }
+        assert!(size_exact_overflow_page_size > 0);
+        assert_eq!(size_exact_overflow_page_size, 4581);
+        let payload_size = size_exact_overflow_page_size as usize;
+        {
+            let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
+            cursor.insert(3, &data[..payload_size]).unwrap();
+            cursor.table_move_to(3).unwrap();
+            let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+            assert_eq!(key, 3);
+            assert_eq!(payload.size() as usize, payload_size);
+            assert!(payload.buf().len() < payload_size);
+            let mut buf = vec![0; payload_size + 1];
+            let loaded = payload.load(0, &mut buf).unwrap();
+            assert_eq!(loaded, payload_size);
+            assert_eq!(&buf[..payload_size], &data[..payload_size]);
+        }
+        pager.abort();
+
+        // Overflow with multiple overflow pages.
+        let payload_size = usable_size * 2;
+        {
+            let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
+            cursor.insert(4, &data[..payload_size]).unwrap();
+            cursor.table_move_to(4).unwrap();
+            let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+            assert_eq!(key, 4);
+            assert_eq!(payload.size() as usize, payload_size);
+            assert!(payload.buf().len() < payload_size);
+            let mut buf = vec![0; payload_size + 1];
+            let loaded = payload.load(0, &mut buf).unwrap();
+            assert_eq!(loaded, payload_size);
+            assert_eq!(&buf[..payload_size], &data[..payload_size]);
+        }
+        pager.abort();
     }
 }

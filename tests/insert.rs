@@ -282,3 +282,29 @@ fn test_insert_reuse_statement() {
         &conn,
     )
 }
+
+#[test]
+fn test_insert_overflow() {
+    let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
+    let conn = Connection::open(file.path()).unwrap();
+
+    let mut long_text = String::new();
+    for _ in 0..1000 {
+        long_text.push_str("hello world ");
+    }
+
+    let stmt = conn
+        .prepare(&format!(
+            "INSERT INTO example (col) VALUES ('{long_text}');"
+        ))
+        .unwrap();
+    assert_eq!(stmt.execute().unwrap(), 1);
+
+    let test_conn = rusqlite::Connection::open(file.path()).unwrap();
+    assert_same_results(
+        &[&[Value::Text(long_text.as_bytes().into())]],
+        "SELECT * FROM example;",
+        &test_conn,
+        &conn,
+    )
+}

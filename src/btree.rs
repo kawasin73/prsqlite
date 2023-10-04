@@ -33,6 +33,8 @@ const LEAF_FLAG: u8 = 0x08;
 const INDEX_FLAG: u8 = 0x02;
 const TABLE_FLAG: u8 = 0x05;
 
+pub const BTREE_OVERFLOW_PAGE_ID_BYTES: usize = 4;
+
 pub struct BtreePageType(u8);
 
 impl BtreePageType {
@@ -275,14 +277,16 @@ impl BtreeContext {
     }
 
     #[inline]
-    fn max_local(&self, is_table: bool) -> u16 {
+    pub fn max_local(&self, is_table: bool) -> u16 {
         self.max_local[is_table as usize]
     }
 
     #[inline]
-    fn n_local(&self, is_table: bool, payload_size: i32) -> u16 {
+    pub fn n_local(&self, is_table: bool, payload_size: i32) -> u16 {
+        assert!(payload_size >= 0);
         let surplus = self.min_local as i32
-            + ((payload_size - self.min_local as i32) % (self.usable_size - 4) as i32);
+            + ((payload_size - self.min_local as i32)
+                % (self.usable_size - BTREE_OVERFLOW_PAGE_ID_BYTES as u32) as i32);
         if surplus <= self.max_local[is_table as usize] as i32 {
             surplus as u16
         } else {
@@ -304,24 +308,26 @@ impl OverflowPage {
 
     pub fn parse<'a>(
         &self,
+        ctx: &BtreeContext,
         buffer: &'a PageBuffer<'a>,
     ) -> ParseResult<(&'a [u8], Option<OverflowPage>)> {
-        let next_page_id = PageId::from_be_bytes(buffer[..4].try_into().unwrap());
+        let next_page_id =
+            PageId::from_be_bytes(buffer[..BTREE_OVERFLOW_PAGE_ID_BYTES].try_into().unwrap());
         if next_page_id == 0 {
-            let tail = 4 + self.remaining_size as usize;
+            let tail = BTREE_OVERFLOW_PAGE_ID_BYTES + self.remaining_size as usize;
             if buffer.len() >= tail {
-                Ok((&buffer[4..tail], None))
+                Ok((&buffer[BTREE_OVERFLOW_PAGE_ID_BYTES..tail], None))
             } else {
                 Err("overflow payload does not have next page id")
             }
         } else {
-            let payload = &buffer[4..];
+            let payload = &buffer[BTREE_OVERFLOW_PAGE_ID_BYTES..ctx.usable_size as usize];
             if self.remaining_size > payload.len() as i32 {
                 Ok((
                     payload,
                     Some(Self {
-                        // Safe because it already checks next_page_id != 0.
-                        page_id: unsafe { NonZeroU32::new_unchecked(next_page_id) },
+                        // next_page_id is not zero here.
+                        page_id: NonZeroU32::new(next_page_id).unwrap(),
                         remaining_size: self.remaining_size - payload.len() as i32,
                     }),
                 ))
@@ -367,18 +373,21 @@ impl PayloadInfo {
         } else {
             let payload_size_in_cell = ctx.n_local(is_table, payload_size);
             let tail_payload = offset + payload_size_in_cell as usize;
-            if tail_payload + 4 > buffer.len() {
+            if tail_payload + BTREE_OVERFLOW_PAGE_ID_BYTES > buffer.len() {
                 return Err("next page id out of range");
             }
-            let next_page_id =
-                PageId::from_be_bytes(buffer[tail_payload..tail_payload + 4].try_into().unwrap());
+            let next_page_id = PageId::from_be_bytes(
+                buffer[tail_payload..tail_payload + BTREE_OVERFLOW_PAGE_ID_BYTES]
+                    .try_into()
+                    .unwrap(),
+            );
             if next_page_id > 0 {
                 Ok(Self {
                     payload_size,
                     local_range: offset..tail_payload,
                     overflow: Some(OverflowPage {
-                        // Safe because next_page_id != 0 is asserted.
-                        page_id: unsafe { NonZeroU32::new_unchecked(next_page_id) },
+                        // next_page_id > 0 is asserted.
+                        page_id: NonZeroU32::new(next_page_id).unwrap(),
                         remaining_size: payload_size - payload_size_in_cell as i32,
                     }),
                 })
@@ -592,7 +601,7 @@ mod tests {
                 .get_page(overflow.as_ref().unwrap().page_id())
                 .unwrap();
             let buffer = page.buffer();
-            (payload, overflow) = overflow.as_ref().unwrap().parse(&buffer).unwrap();
+            (payload, overflow) = overflow.as_ref().unwrap().parse(&bctx, &buffer).unwrap();
             assert_eq!(payload, &buf[cur..cur + payload.len()]);
             cur += payload.len();
         }

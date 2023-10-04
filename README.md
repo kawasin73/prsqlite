@@ -19,7 +19,7 @@ This is WIP and my hobby project.
   in the file while parsing.
   * `trust-file` feature will be added to disable the file validation.
 * No unsafe
-  * Will be supported in the future.
+  * Will provide `unsafe` feature for better performance.
 
 NOTE: This repository is not stable yet. I may force-push commit tree even on
 the main branch.

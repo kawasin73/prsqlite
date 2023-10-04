@@ -142,6 +142,10 @@ impl<'a> DatabaseHeader<'a> {
         // reserved is smaller than or equal to 255.
         self.pagesize() - self.reserved() as u32
     }
+
+    pub fn n_pages(&self) -> u32 {
+        u32::from_be_bytes(self.0[28..32].try_into().unwrap())
+    }
 }
 
 pub struct Connection {
@@ -174,7 +178,7 @@ impl Connection {
         } else if !header.validate_reserved() {
             bail!("invalid reserved");
         }
-        let pager = Pager::new(file, header.pagesize())?;
+        let pager = Pager::new(file, header.n_pages(), header.pagesize())?;
         Ok(Self {
             pager,
             btree_ctx: BtreeContext::new(header.usable_size()),
@@ -363,41 +367,67 @@ impl Connection {
         })
     }
 
-    fn start_read(&self) -> anyhow::Result<ReadConnGuard> {
+    fn start_read(&self) -> anyhow::Result<ReadTransaction> {
         // TODO: Lock across processes
         let ref_count = self.ref_count.get();
         if ref_count >= 0 {
             self.ref_count.set(ref_count + 1);
-            Ok(ReadConnGuard(self))
+            Ok(ReadTransaction(self))
         } else {
             bail!("write statment running");
         }
     }
 
-    fn start_write(&self) -> anyhow::Result<WriteConnGuard> {
+    fn start_write(&self) -> anyhow::Result<WriteTransaction> {
         // TODO: Lock across processes
         if self.ref_count.get() == 0 {
             self.ref_count.set(-1);
-            Ok(WriteConnGuard(self))
+            Ok(WriteTransaction {
+                conn: self,
+                do_commit: false,
+            })
         } else {
             bail!("other statments running");
         }
     }
 }
 
-struct ReadConnGuard<'a>(&'a Connection);
+struct ReadTransaction<'a>(&'a Connection);
 
-impl Drop for ReadConnGuard<'_> {
+impl Drop for ReadTransaction<'_> {
     fn drop(&mut self) {
         self.0.ref_count.set(self.0.ref_count.get() - 1);
     }
 }
 
-struct WriteConnGuard<'a>(&'a Connection);
+struct WriteTransaction<'a> {
+    conn: &'a Connection,
+    do_commit: bool,
+}
 
-impl Drop for WriteConnGuard<'_> {
+impl WriteTransaction<'_> {
+    fn commit(mut self) -> anyhow::Result<()> {
+        if self.conn.pager.is_file_size_changed() {
+            let page1 = self.conn.pager.get_page(1)?;
+            let mut buffer = self.conn.pager.make_page_mut(&page1)?;
+            // TODO: Write database header in a formal way.
+            buffer[28..32].copy_from_slice(&self.conn.pager.num_pages().to_be_bytes());
+            drop(buffer);
+            drop(page1);
+        }
+
+        self.conn.pager.commit()?;
+        self.do_commit = true;
+        Ok(())
+    }
+}
+
+impl Drop for WriteTransaction<'_> {
     fn drop(&mut self) {
-        self.0.ref_count.set(0);
+        if !self.do_commit {
+            self.conn.pager.abort();
+        }
+        self.conn.ref_count.set(0);
     }
 }
 
@@ -767,7 +797,7 @@ impl<'conn> SelectStatement<'conn> {
     }
 
     pub fn query(&'conn self) -> anyhow::Result<Rows<'conn>> {
-        let read_guard = self.conn.start_read()?;
+        let read_txn = self.conn.start_read()?;
         // TODO: check schema version.
         let mut cursor =
             BtreeCursor::new(self.table_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
@@ -796,7 +826,7 @@ impl<'conn> SelectStatement<'conn> {
             None
         };
         Ok(Rows {
-            _read_guard: read_guard,
+            _read_txn: read_txn,
             stmt: self,
             cursor,
             index_cursor,
@@ -807,7 +837,7 @@ impl<'conn> SelectStatement<'conn> {
 }
 
 pub struct Rows<'conn> {
-    _read_guard: ReadConnGuard<'conn>,
+    _read_txn: ReadTransaction<'conn>,
     stmt: &'conn SelectStatement<'conn>,
     cursor: BtreeCursor<'conn>,
     index_cursor: Option<BtreeCursor<'conn>>,
@@ -1028,7 +1058,8 @@ pub struct InsertStatement<'conn> {
 
 impl<'conn> InsertStatement<'conn> {
     pub fn execute(&self) -> anyhow::Result<usize> {
-        let _write_guard = self.conn.start_write()?;
+        let write_txn = self.conn.start_write()?;
+
         let mut cursor =
             BtreeCursor::new(self.table_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
         let mut n = 0;
@@ -1081,7 +1112,8 @@ impl<'conn> InsertStatement<'conn> {
             n += 1;
         }
 
-        self.conn.pager.commit()?;
+        write_txn.commit()?;
+
         Ok(n)
     }
 }
@@ -1115,6 +1147,16 @@ mod tests {
         let header = DatabaseHeader::from(&buf);
 
         assert_eq!(header.pagesize(), 65536);
+    }
+
+    #[test]
+    fn n_pages() {
+        let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
+        let buf = fs::read(file.path()).unwrap();
+
+        let header = DatabaseHeader::from(buf[0..DATABASE_HEADER_SIZE].try_into().unwrap());
+
+        assert_eq!(header.n_pages(), 2);
     }
 
     #[test]

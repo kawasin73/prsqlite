@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cell::Cell;
 use std::cell::Ref;
 use std::cell::RefCell;
 use std::cell::RefMut;
@@ -61,26 +62,50 @@ pub const ROOT_PAGE_ID: PageId = 1;
 
 pub struct Pager {
     file: File,
-    n_pages: u32,
+    n_pages: Cell<u32>,
+    n_pages_stable: Cell<u32>,
     cache: PageCache,
 }
 
 impl Pager {
-    pub fn new(file: File, pagesize: u32) -> anyhow::Result<Self> {
+    pub fn new(file: File, n_pages: u32, pagesize: u32) -> anyhow::Result<Self> {
         let file_len = file.metadata()?.len();
-        assert!(file_len % pagesize as u64 == 0);
-        let n_pages = file_len / (pagesize as u64);
+        if file_len % pagesize as u64 != 0 {
+            todo!("file size mismatch");
+        } else if file_len / (pagesize as u64) != n_pages as u64 {
+            todo!("file size mismatch");
+        }
         Ok(Self {
             file,
             cache: PageCache::new(pagesize),
-            n_pages: n_pages.try_into()?,
+            n_pages: Cell::new(n_pages),
+            n_pages_stable: Cell::new(n_pages),
         })
+    }
+
+    pub fn allocate_page(&self) -> anyhow::Result<(PageId, MemPage)> {
+        // TODO: Use a page from free list.
+
+        let page_id = self.n_pages.get() + 1;
+        self.n_pages.set(page_id);
+        let (page, is_new) = self.cache.get_page(page_id);
+        assert!(is_new);
+        page.borrow_mut().is_dirty = true;
+        // TODO: setup journal
+
+        Ok((
+            page_id,
+            MemPage {
+                page,
+                header_offset: 0,
+            },
+        ))
     }
 
     pub fn get_page(&self, id: PageId) -> anyhow::Result<MemPage> {
         match id {
             0 => bail!("page id starts from 1"),
-            id if id > self.n_pages => bail!("page id exceeds file size"),
+            id if id > self.n_pages.get() => bail!("page id exceeds file size"),
             id => {
                 let (page, is_new) = self.cache.get_page(id);
                 if is_new {
@@ -122,13 +147,28 @@ impl Pager {
                 page.borrow_mut().is_dirty = false;
             }
         }
+        self.n_pages_stable.set(self.n_pages.get());
         Ok(())
     }
 
-    // TODO: this is currently only used for testing.
-    #[allow(dead_code)]
+    pub fn abort(&self) {
+        self.n_pages.set(self.n_pages_stable.get());
+
+        // Drop all dirty pages.
+        self.cache
+            .map
+            .borrow_mut()
+            .retain(|_, page| !page.borrow().is_dirty);
+
+        // TODO: rollback journal
+    }
+
+    pub fn is_file_size_changed(&self) -> bool {
+        self.n_pages.get() != self.n_pages_stable.get()
+    }
+
     pub fn num_pages(&self) -> u32 {
-        self.n_pages
+        self.n_pages.get()
     }
 
     #[inline]
