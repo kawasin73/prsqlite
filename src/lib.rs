@@ -14,6 +14,7 @@
 
 mod btree;
 mod cursor;
+mod header;
 mod pager;
 mod parser;
 mod record;
@@ -34,44 +35,43 @@ use std::path::Path;
 
 use anyhow::bail;
 use anyhow::Context;
+use btree::BtreeContext;
+use cursor::BtreeCursor;
+use cursor::BtreePayload;
+use header::DatabaseHeader;
+use header::DatabaseHeaderMut;
+use header::DATABASE_HEADER_SIZE;
+use pager::PageId;
+use pager::Pager;
+use parser::expect_no_more_token;
+use parser::expect_semicolon;
+use parser::parse_sql;
+use parser::BinaryOp;
+use parser::CompareOp;
+use parser::Error as ParseError;
+use parser::Expr;
+use parser::Insert;
+use parser::Parser;
+use parser::ResultColumn;
+use parser::Select;
+use parser::Stmt;
+use parser::UnaryOp;
+use record::build_record;
+use record::parse_record;
+use record::parse_record_header;
+use record::SerialType;
+use schema::calc_collation;
+use schema::calc_type_affinity;
+use schema::ColumnNumber;
+use schema::Schema;
+use schema::Table;
+pub use value::Buffer;
+use value::Collation;
+use value::TypeAffinity;
+pub use value::Value;
+use value::ValueCmp;
+use value::DEFAULT_COLLATION;
 
-use crate::btree::BtreeContext;
-use crate::cursor::BtreeCursor;
-use crate::cursor::BtreePayload;
-use crate::pager::PageId;
-use crate::pager::Pager;
-use crate::parser::expect_no_more_token;
-use crate::parser::expect_semicolon;
-use crate::parser::parse_sql;
-use crate::parser::BinaryOp;
-use crate::parser::CompareOp;
-use crate::parser::Error as ParseError;
-use crate::parser::Expr;
-use crate::parser::Insert;
-use crate::parser::Parser;
-use crate::parser::ResultColumn;
-use crate::parser::Select;
-use crate::parser::Stmt;
-use crate::parser::UnaryOp;
-use crate::record::build_record;
-use crate::record::parse_record;
-use crate::record::parse_record_header;
-use crate::record::SerialType;
-use crate::schema::calc_collation;
-use crate::schema::calc_type_affinity;
-use crate::schema::ColumnNumber;
-use crate::schema::Schema;
-use crate::schema::Table;
-pub use crate::value::Buffer;
-use crate::value::Collation;
-use crate::value::TypeAffinity;
-pub use crate::value::Value;
-use crate::value::ValueCmp;
-use crate::value::DEFAULT_COLLATION;
-
-const SQLITE_MAX_PAGE_SIZE: u32 = 65536;
-pub const DATABASE_HEADER_SIZE: usize = 100;
-const MAGIC_HEADER: &[u8; 16] = b"SQLite format 3\0";
 // Original SQLite support both 32-bit or 64-bit rowid. prsqlite only support
 // 64-bit rowid.
 const MAX_ROWID: i64 = i64::MAX;
@@ -107,47 +107,6 @@ impl Display for Error<'_> {
 
 pub type Result<'a, T> = std::result::Result<T, Error<'a>>;
 
-pub struct DatabaseHeader<'a>(&'a [u8; DATABASE_HEADER_SIZE]);
-
-impl<'a> DatabaseHeader<'a> {
-    pub fn from(buf: &'a [u8; DATABASE_HEADER_SIZE]) -> Self {
-        Self(buf)
-    }
-
-    pub fn validate_magic_header(&self) -> bool {
-        let magic_header: &[u8; 16] = self.0[0..16].try_into().unwrap();
-        magic_header == MAGIC_HEADER
-    }
-
-    pub fn validate_pagesize(&self) -> bool {
-        let pagesize = self.pagesize();
-        (512..=SQLITE_MAX_PAGE_SIZE).contains(&pagesize) && (pagesize - 1) & pagesize == 0
-    }
-
-    pub fn validate_reserved(&self) -> bool {
-        self.pagesize() > self.reserved() as u32
-    }
-
-    pub fn pagesize(&self) -> u32 {
-        // If the original big endian value is 1, it means 65536.
-        (self.0[16] as u32) << 8 | (self.0[17] as u32) << 16
-    }
-
-    pub fn reserved(&self) -> u8 {
-        self.0[20]
-    }
-
-    pub fn usable_size(&self) -> u32 {
-        // pagesize is bigger than or equal to 512.
-        // reserved is smaller than or equal to 255.
-        self.pagesize() - self.reserved() as u32
-    }
-
-    pub fn n_pages(&self) -> u32 {
-        u32::from_be_bytes(self.0[28..32].try_into().unwrap())
-    }
-}
-
 pub struct Connection {
     pager: Pager,
     btree_ctx: BtreeContext,
@@ -171,13 +130,9 @@ impl Connection {
         let mut buf = [0; DATABASE_HEADER_SIZE];
         file.read_exact_at(&mut buf, 0)?;
         let header = DatabaseHeader::from(&buf);
-        if !header.validate_magic_header() {
-            bail!("invalid magic header");
-        } else if !header.validate_pagesize() {
-            bail!("invalid pagesize");
-        } else if !header.validate_reserved() {
-            bail!("invalid reserved");
-        }
+        header
+            .validate()
+            .map_err(|e| anyhow::anyhow!("database header invalid: {e}"))?;
         let pager = Pager::new(file, header.n_pages(), header.pagesize())?;
         Ok(Self {
             pager,
@@ -410,8 +365,9 @@ impl WriteTransaction<'_> {
         if self.conn.pager.is_file_size_changed() {
             let page1 = self.conn.pager.get_page(1)?;
             let mut buffer = self.conn.pager.make_page_mut(&page1)?;
-            // TODO: Write database header in a formal way.
-            buffer[28..32].copy_from_slice(&self.conn.pager.num_pages().to_be_bytes());
+            let header_buf = &mut buffer[..DATABASE_HEADER_SIZE];
+            let mut header = DatabaseHeaderMut::from(header_buf.try_into().unwrap());
+            header.set_n_pages(self.conn.pager.num_pages());
             drop(buffer);
             drop(page1);
         }
@@ -1115,60 +1071,5 @@ impl<'conn> InsertStatement<'conn> {
         write_txn.commit()?;
 
         Ok(n)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use super::*;
-    use crate::test_utils::*;
-
-    #[test]
-    fn pagesize() {
-        for shift in 9..16 {
-            // 512 ~ 32768
-            let size: u16 = 1 << shift;
-            let bytes = size.to_be_bytes();
-            let mut buf = [0_u8; DATABASE_HEADER_SIZE];
-            buf[16] = bytes[0];
-            buf[17] = bytes[1];
-            let header = DatabaseHeader::from(&buf);
-
-            assert_eq!(header.pagesize(), size as u32);
-        }
-
-        // the pagesize "1" means 65536
-        let bytes = 1_u16.to_be_bytes();
-        let mut buf = [0_u8; DATABASE_HEADER_SIZE];
-        buf[16] = bytes[0];
-        buf[17] = bytes[1];
-        let header = DatabaseHeader::from(&buf);
-
-        assert_eq!(header.pagesize(), 65536);
-    }
-
-    #[test]
-    fn n_pages() {
-        let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
-        let buf = fs::read(file.path()).unwrap();
-
-        let header = DatabaseHeader::from(buf[0..DATABASE_HEADER_SIZE].try_into().unwrap());
-
-        assert_eq!(header.n_pages(), 2);
-    }
-
-    #[test]
-    fn validate_database_header() {
-        let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
-        let buf = fs::read(file.path()).unwrap();
-
-        let header = DatabaseHeader::from(buf[0..DATABASE_HEADER_SIZE].try_into().unwrap());
-
-        assert!(header.validate_magic_header());
-        assert_eq!(header.pagesize(), 4096);
-        assert!(header.validate_pagesize());
-        assert!(header.validate_reserved());
     }
 }
