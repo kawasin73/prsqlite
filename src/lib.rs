@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod btree;
+pub mod btree;
 mod cursor;
 mod header;
 mod pager;
 mod parser;
 mod record;
 mod schema;
-#[cfg(test)]
+// #[cfg(test)]
 pub mod test_utils;
 mod token;
 mod utils;

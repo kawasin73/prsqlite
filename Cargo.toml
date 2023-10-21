@@ -21,10 +21,16 @@ path = "src/lib.rs"
 name = "prsqlite"
 path = "src/main.rs"
 
+[[bin]]
+name = "main2"
+path = "src/main2.rs"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 anyhow = "1"
+rusqlite = "0.28.0"
+tempfile = "3"
 
 [dev-dependencies]
 rand = "*"
