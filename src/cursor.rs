@@ -31,7 +31,6 @@ use crate::pager::MemPage;
 use crate::pager::PageBuffer;
 use crate::pager::PageId;
 use crate::pager::Pager;
-use crate::pager::MAX_PAGE_SIZE;
 use crate::record::compare_record;
 use crate::utils::i64_to_u64;
 use crate::utils::put_varint;
@@ -470,18 +469,10 @@ impl<'a> BtreeCursor<'a> {
                     header_size,
                 );
                 assert!(unallocated_space_offset > 0);
-                let mut cell_content_area_offset = page_header.cell_content_area_offset() as usize;
+                let cell_content_area_offset =
+                    page_header.cell_content_area_offset().get() as usize;
                 if cell_content_area_offset < unallocated_space_offset {
-                    if self.btree_ctx.usable_size as usize == MAX_PAGE_SIZE
-                        && cell_content_area_offset == 0
-                    {
-                        // If cell_content_area_offset is zero, it always goes this pass and be
-                        // translated into MAX_PAGE_SIZE because unallocated_space_offset is bigger
-                        // than zero.
-                        cell_content_area_offset = MAX_PAGE_SIZE;
-                    } else {
-                        bail!("invalid cell content area offset");
-                    }
+                    bail!("invalid cell content area offset");
                 }
 
                 let free_size = cell_content_area_offset - unallocated_space_offset;
@@ -514,7 +505,6 @@ impl<'a> BtreeCursor<'a> {
                 // Update the page header.
                 let mut page_header =
                     BtreePageHeaderMut::from_page(&self.current_page.mem, &mut buffer);
-                assert!(offset > 0);
                 // New cell content area offset must not be less than the tail of cell pointers.
                 assert!(offset >= unallocated_space_offset + 2);
                 // offset <= u16::MAX is asserted above.
@@ -525,9 +515,11 @@ impl<'a> BtreeCursor<'a> {
                 // Update cell pointer.
                 let cell_pointer_offset = if current_cell_key.is_some() {
                     // Insert the new cell between cells.
-                    let cell_pointer_offset = self.current_page.mem.header_offset
-                        + header_size as usize
-                        + (self.current_page.idx_cell << 1) as usize;
+                    let cell_pointer_offset = cell_pointer_offset(
+                        &self.current_page.mem,
+                        self.current_page.idx_cell,
+                        header_size,
+                    );
                     buffer.copy_within(
                         cell_pointer_offset..unallocated_space_offset,
                         cell_pointer_offset + 2,
@@ -695,6 +687,7 @@ impl<'a> BtreeCursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pager::MAX_PAGE_SIZE;
     use crate::record::parse_record;
     use crate::test_utils::*;
     use crate::value::Collation;
@@ -1926,7 +1919,10 @@ mod tests {
         let page_2 = pager.get_page(table_page_id).unwrap();
         let buffer = page_2.buffer();
         let header = BtreePageHeader::from_page(&page_2, &buffer);
-        assert_eq!(header.cell_content_area_offset(), 0);
+        assert_eq!(
+            header.cell_content_area_offset().get() as usize,
+            MAX_PAGE_SIZE
+        );
         drop(buffer);
         drop(page_2);
 

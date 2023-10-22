@@ -33,6 +33,18 @@ const LEAF_FLAG: u8 = 0x08;
 const INDEX_FLAG: u8 = 0x02;
 const TABLE_FLAG: u8 = 0x05;
 
+/// Parse 2 bytes big endian value.
+///
+/// If the value is zero, it is interpreted as 65536.
+///
+/// This is the same as get2byteNotZero() macro in btree.c of SQLite.
+#[inline]
+fn parse_non_zero_u16(buf: [u8; 2]) -> NonZeroU32 {
+    let v = ((((u16::from_be_bytes(buf) as i32) - 1) & 0xffff) + 1) as u32;
+    // TODO: new_unchecked() is safe because v is not zero.
+    NonZeroU32::new(v).unwrap()
+}
+
 pub const BTREE_OVERFLOW_PAGE_ID_BYTES: usize = 4;
 
 pub struct BtreePageType(u8);
@@ -84,9 +96,9 @@ impl<'page> BtreePageHeader<'page> {
 
     /// The offset of the cell content area
     ///
-    /// zero should be interpreted as 65536.
-    pub fn cell_content_area_offset(&self) -> u16 {
-        u16::from_be_bytes(self.0[5..7].try_into().unwrap())
+    /// zero is interpreted as 65536 in this method.
+    pub fn cell_content_area_offset(&self) -> NonZeroU32 {
+        parse_non_zero_u16(self.0[5..7].try_into().unwrap())
     }
 
     /// Fragmented free bytes in the cell content area.
@@ -498,6 +510,22 @@ mod tests {
 
             assert_eq!(header.header_size(), 8);
         }
+    }
+
+    #[test]
+    fn cell_content_area_offset() {
+        let mut buf = [0_u8; 12];
+
+        let header = BtreePageHeader(&buf);
+        assert_eq!(header.cell_content_area_offset().get(), 65536);
+
+        buf[6] = 100;
+        let header = BtreePageHeader(&buf);
+        assert_eq!(header.cell_content_area_offset().get(), 100);
+
+        buf[5] = 100;
+        let header = BtreePageHeader(&buf);
+        assert_eq!(header.cell_content_area_offset().get(), 25700);
     }
 
     #[test]
