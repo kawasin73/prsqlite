@@ -308,3 +308,74 @@ fn test_insert_overflow() {
         &conn,
     )
 }
+
+#[test]
+fn test_insert_freeblock() {
+    let file = create_sqlite_database(&[
+        "CREATE TABLE example(col);",
+        "INSERT INTO example (col) VALUES (x'01');",
+        "INSERT INTO example (col) VALUES (x'0202');",
+        "INSERT INTO example (col) VALUES (x'030303');",
+        "INSERT INTO example (col) VALUES (x'04040404');",
+        "INSERT INTO example (col) VALUES (x'0505050505');",
+        "INSERT INTO example (col) VALUES (x'060606060606');",
+        "INSERT INTO example (col) VALUES (x'07070707070707');",
+        "INSERT INTO example (col) VALUES (x'0808080808080808');",
+        "INSERT INTO example (col) VALUES (x'090909090909090909');",
+        "INSERT INTO example (col) VALUES (x'0a0a0a0a0a0a0a0a0a0a');",
+        "DELETE FROM example WHERE rowid IN (1, 3, 5, 7, 9);",
+    ]);
+    let conn = Connection::open(file.path()).unwrap();
+
+    let stmt = conn
+        .prepare("INSERT INTO example (col) VALUES (x'0b0b0b0b0b0b0b0b0b0b0b');")
+        .unwrap();
+    assert_eq!(stmt.execute().unwrap(), 1);
+
+    let stmt = conn
+        .prepare("INSERT INTO example (col) VALUES (x'090909090909090909');")
+        .unwrap();
+    assert_eq!(stmt.execute().unwrap(), 1);
+
+    let stmt = conn
+        .prepare("INSERT INTO example (col) VALUES (x'01');")
+        .unwrap();
+    assert_eq!(stmt.execute().unwrap(), 1);
+
+    let test_conn = rusqlite::Connection::open(file.path()).unwrap();
+    assert_same_results(
+        &[
+            &[Value::Blob([0x02, 0x02].as_slice().into())],
+            &[Value::Blob([0x04, 0x04, 0x04, 0x04].as_slice().into())],
+            &[Value::Blob(
+                [0x06, 0x06, 0x06, 0x06, 0x06, 0x06].as_slice().into(),
+            )],
+            &[Value::Blob(
+                [0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08]
+                    .as_slice()
+                    .into(),
+            )],
+            &[Value::Blob(
+                [0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a]
+                    .as_slice()
+                    .into(),
+            )],
+            &[Value::Blob(
+                [
+                    0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
+                ]
+                .as_slice()
+                .into(),
+            )],
+            &[Value::Blob(
+                [0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09]
+                    .as_slice()
+                    .into(),
+            )],
+            &[Value::Blob([0x01].as_slice().into())],
+        ],
+        "SELECT col FROM example;",
+        &test_conn,
+        &conn,
+    )
+}

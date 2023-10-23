@@ -152,6 +152,46 @@ impl<'a> BtreePageHeaderMut<'a> {
     pub fn set_cell_content_area_offset(&mut self, offset: u16) {
         self.0[5..7].copy_from_slice(offset.to_be_bytes().as_slice());
     }
+
+    pub fn set_first_freeblock_offset(&mut self, offset: [u8; 2]) {
+        self.0[1..3].copy_from_slice(&offset);
+    }
+
+    pub fn add_fragmented_free_bytes(&mut self, size: u8) {
+        self.0[7] += size;
+    }
+}
+
+pub struct FreeblockIterator<'a> {
+    offset: usize,
+    buffer: &'a [u8],
+}
+
+impl<'a> FreeblockIterator<'a> {
+    pub fn new(first_freeblock_offset: u16, buffer: &'a [u8]) -> Self {
+        Self {
+            offset: first_freeblock_offset as usize,
+            buffer,
+        }
+    }
+}
+
+impl<'a> Iterator for FreeblockIterator<'a> {
+    type Item = (usize, u16);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.offset == 0 {
+            None
+        } else {
+            let offset = self.offset;
+            assert!(offset + 4 <= self.buffer.len());
+            self.offset =
+                u16::from_be_bytes(self.buffer[offset..offset + 2].try_into().unwrap()) as usize;
+            let size = u16::from_be_bytes(self.buffer[offset + 2..offset + 4].try_into().unwrap());
+
+            Some((offset, size))
+        }
+    }
 }
 
 pub struct TableCellKeyParser<'a> {
@@ -529,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_btree_page_header() {
+    fn test_btree_page_header() {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
 
@@ -544,6 +584,78 @@ mod tests {
         assert_eq!(page2_header.page_type().0, BTREE_PAGE_TYPE_LEAF_TABLE);
         assert_eq!(page1_header.n_cells(), 1);
         assert_eq!(page2_header.n_cells(), 0);
+        assert_eq!(page1_header.header_size(), 8);
+        assert_eq!(page2_header.header_size(), 8);
+        assert_eq!(page1_header.cell_content_area_offset().get(), 4043);
+        assert_eq!(page2_header.cell_content_area_offset().get(), 4096);
+        assert_eq!(page1_header.first_freeblock_offset(), 0);
+        assert_eq!(page2_header.first_freeblock_offset(), 0);
+        assert_eq!(page1_header.fragmented_free_bytes(), 0);
+        assert_eq!(page2_header.fragmented_free_bytes(), 0);
+    }
+
+    #[test]
+    fn test_btree_page_header_freeblock() {
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col);",
+            "INSERT INTO example(col) VALUES (1);",
+            "INSERT INTO example(col) VALUES (2);",
+            "INSERT INTO example(col) VALUES (3);",
+            "INSERT INTO example(col) VALUES (4);",
+            "DELETE FROM example WHERE col = 1;",
+            "DELETE FROM example WHERE col = 3;",
+        ]);
+        let page_id = find_table_page_id("example", file.path());
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+
+        let page = pager.get_page(page_id).unwrap();
+        let buffer = page.buffer();
+        let page_header = BtreePageHeader::from_page(&page, &buffer);
+
+        assert_eq!(page_header.first_freeblock_offset(), 4082);
+        assert_eq!(page_header.fragmented_free_bytes(), 0);
+
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col);",
+            "INSERT INTO example(col) VALUES (2);",
+            "INSERT INTO example(col) VALUES (3);",
+            "DELETE FROM example WHERE col = 2;",
+            "INSERT INTO example(col) VALUES (1);",
+        ]);
+        let page_id = find_table_page_id("example", file.path());
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+
+        let page = pager.get_page(page_id).unwrap();
+        let buffer = page.buffer();
+        let page_header = BtreePageHeader::from_page(&page, &buffer);
+
+        assert_eq!(page_header.first_freeblock_offset(), 0);
+        assert_eq!(page_header.fragmented_free_bytes(), 1);
+    }
+
+    #[test]
+    fn test_freeblock_iterator() {
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col);",
+            "INSERT INTO example(col) VALUES (1);",
+            "INSERT INTO example(col) VALUES (2);",
+            "INSERT INTO example(col) VALUES (3);",
+            "INSERT INTO example(col) VALUES (4);",
+            "DELETE FROM example WHERE col = 1;",
+            "DELETE FROM example WHERE col = 3;",
+        ]);
+        let page_id = find_table_page_id("example", file.path());
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+
+        let page = pager.get_page(page_id).unwrap();
+        let buffer = page.buffer();
+        let page_header = BtreePageHeader::from_page(&page, &buffer);
+
+        let mut iter = FreeblockIterator::new(page_header.first_freeblock_offset(), &buffer);
+
+        assert_eq!(iter.next(), Some((4082, 5)));
+        assert_eq!(iter.next(), Some((4092, 4)));
+        assert_eq!(iter.next(), None);
     }
 
     #[test]

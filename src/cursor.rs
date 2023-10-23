@@ -23,6 +23,7 @@ use crate::btree::BtreeContext;
 use crate::btree::BtreePageHeader;
 use crate::btree::BtreePageHeaderMut;
 use crate::btree::BtreePageType;
+use crate::btree::FreeblockIterator;
 use crate::btree::IndexCellKeyParser;
 use crate::btree::PayloadInfo;
 use crate::btree::TableCellKeyParser;
@@ -397,21 +398,22 @@ impl<'a> BtreeCursor<'a> {
 
         let mut cell_header = [0; 18];
         let payload_size: i32 = payload.len().try_into()?;
-        let mut cell_header_size = put_varint(cell_header.as_mut_slice(), payload_size as u64);
-        cell_header_size += put_varint(&mut cell_header[cell_header_size..], i64_to_u64(key));
+        let mut cell_header_size =
+            put_varint(cell_header.as_mut_slice(), payload_size as u64) as u16;
+        cell_header_size += put_varint(
+            &mut cell_header[cell_header_size as usize..],
+            i64_to_u64(key),
+        ) as u16;
         let is_table = true;
         let (cell_size, n_local, overflow_page_id) = if payload_size
             <= self.btree_ctx.max_local(is_table) as i32
         {
-            (
-                cell_header_size + payload_size as usize,
-                payload_size as usize,
-                None,
-            )
+            let payload_size = payload_size as u16;
+            (cell_header_size + payload_size, payload_size, None)
         } else {
             // Split the payload into local and overflow pages.
-            let n_local = self.btree_ctx.n_local(is_table, payload_size) as usize;
-            let mut i_overflow_payload = n_local;
+            let n_local = self.btree_ctx.n_local(is_table, payload_size);
+            let mut i_overflow_payload = n_local as usize;
             let usable_size_overflow =
                 self.btree_ctx.usable_size as usize - BTREE_OVERFLOW_PAGE_ID_BYTES;
             let (first_overflow_page_id, mut page) = self.pager.allocate_page()?;
@@ -436,7 +438,7 @@ impl<'a> BtreeCursor<'a> {
             drop(buffer);
 
             (
-                cell_header_size + n_local + BTREE_OVERFLOW_PAGE_ID_BYTES,
+                cell_header_size + n_local + BTREE_OVERFLOW_PAGE_ID_BYTES as u16,
                 n_local,
                 Some(first_overflow_page_id.to_be_bytes()),
             )
@@ -448,8 +450,6 @@ impl<'a> BtreeCursor<'a> {
         // fragmented and never reused. cell_size can be less than 4 on index pages.
         let cell_size = if cell_size < 4 { 4 } else { cell_size };
 
-        // TODO: split the payload into overflow page if it is too large.
-
         match current_cell_key {
             Some(current_cell_key) if current_cell_key == key => {
                 // TODO: Update the payload
@@ -459,9 +459,6 @@ impl<'a> BtreeCursor<'a> {
                 let buffer = self.current_page.mem.buffer();
                 let page_header = BtreePageHeader::from_page(&self.current_page.mem, &buffer);
 
-                // TODO: Support freeblock.
-                assert_eq!(page_header.first_freeblock_offset(), 0);
-                assert_eq!(page_header.fragmented_free_bytes(), 0);
                 let header_size = page_header.header_size();
                 let unallocated_space_offset = cell_pointer_offset(
                     &self.current_page.mem,
@@ -475,7 +472,17 @@ impl<'a> BtreeCursor<'a> {
                     bail!("invalid cell content area offset");
                 }
 
-                let free_size = cell_content_area_offset - unallocated_space_offset;
+                let unallocated_size = (cell_content_area_offset - unallocated_space_offset) as u16;
+                let first_freeblock_offset = page_header.first_freeblock_offset();
+                let fragmented_free_bytes = page_header.fragmented_free_bytes();
+
+                // TODO: Cache free size.
+                let mut free_size = unallocated_size;
+                for (_, size) in FreeblockIterator::new(first_freeblock_offset, &buffer) {
+                    free_size += size;
+                }
+                free_size += fragmented_free_bytes as u16;
+
                 if free_size < cell_size + 2 {
                     // TODO: balance the btree.
                     todo!("balance the btree");
@@ -492,25 +499,95 @@ impl<'a> BtreeCursor<'a> {
                 //   which is mutable method.
                 let mut buffer = self.pager.make_page_mut(&self.current_page.mem)?;
 
-                // TODO: allocateSpace().
+                // Allocate space
+                //
                 // 1. Search freeblock first.
-                // 2. Defragmentation if needed
+                // 2. Defragmentation if needed.
                 // 3. Allocate space from unallocated space.
+                let allocated_offset = {
+                    let mut allocated_offset = None;
+                    // Search freeblock first.
+                    if unallocated_size >= 2
+                    && first_freeblock_offset != 0
+                    // Total fragments may not exceed 60 bytes. Otherwise Give up seeking freeblocks
+                    // and try defragmentation.
+                    && fragmented_free_bytes <= 57
+                    {
+                        let mut previous_freeblock_offset = 0;
+                        for (freeblock_offset, size) in
+                            FreeblockIterator::new(first_freeblock_offset, &buffer)
+                        {
+                            if size >= cell_size {
+                                let remaining_size = size - cell_size;
+                                let new_freeblock_offset = if remaining_size < 4 {
+                                    BtreePageHeaderMut::from_page(
+                                        &self.current_page.mem,
+                                        &mut buffer,
+                                    )
+                                    .add_fragmented_free_bytes(remaining_size as u8);
 
-                let offset = cell_content_area_offset - cell_size;
-                // cell_content_area_offset is less than or equal to 65536. data is not empty.
-                // The offset must be less than 65536 and safe to cast into u16.
-                assert!(offset <= u16::MAX as usize);
+                                    buffer[freeblock_offset..freeblock_offset + 2]
+                                        .try_into()
+                                        .unwrap()
+                                } else {
+                                    // Split the freeblock.
+                                    let new_freeblock_offset =
+                                        freeblock_offset + cell_size as usize;
+                                    buffer.copy_within(
+                                        freeblock_offset..freeblock_offset + 2,
+                                        new_freeblock_offset,
+                                    );
+                                    buffer[new_freeblock_offset + 2..new_freeblock_offset + 4]
+                                        .copy_from_slice(&remaining_size.to_be_bytes());
 
-                // Update the page header.
-                let mut page_header =
-                    BtreePageHeaderMut::from_page(&self.current_page.mem, &mut buffer);
-                // New cell content area offset must not be less than the tail of cell pointers.
-                assert!(offset >= unallocated_space_offset + 2);
-                // offset <= u16::MAX is asserted above.
-                page_header.set_cell_content_area_offset(offset as u16);
+                                    (new_freeblock_offset as u16).to_be_bytes()
+                                };
+                                if previous_freeblock_offset == 0 {
+                                    BtreePageHeaderMut::from_page(
+                                        &self.current_page.mem,
+                                        &mut buffer,
+                                    )
+                                    .set_first_freeblock_offset(new_freeblock_offset);
+                                } else {
+                                    buffer
+                                        [previous_freeblock_offset..previous_freeblock_offset + 2]
+                                        .copy_from_slice(&new_freeblock_offset);
+                                }
+                                allocated_offset = Some(freeblock_offset);
+                                break;
+                            }
+                            previous_freeblock_offset = freeblock_offset;
+                        }
+                    }
+
+                    if let Some(offset) = allocated_offset {
+                        // 1. Allocated from freeblock.
+                        offset
+                    } else {
+                        // 2. Defragmentation if needed.
+                        if unallocated_size < cell_size + 2 {
+                            todo!("defragmentation");
+                        }
+
+                        // 3. Allocate space from unallocated space.
+                        let allocated_offset = cell_content_area_offset - cell_size as usize;
+                        // cell_content_area_offset is less than or equal to 65536. data is not
+                        // empty. The offset must be less than 65536 and
+                        // safe to cast into u16.
+                        assert!(allocated_offset <= u16::MAX as usize);
+
+                        // New cell content area offset must not be less than the tail of cell
+                        // pointers.
+                        assert!(allocated_offset >= unallocated_space_offset + 2);
+                        BtreePageHeaderMut::from_page(&self.current_page.mem, &mut buffer)
+                            .set_cell_content_area_offset(allocated_offset as u16);
+                        allocated_offset
+                    }
+                };
+
                 self.current_page.n_cells += 1;
-                page_header.set_n_cells(self.current_page.n_cells);
+                BtreePageHeaderMut::from_page(&self.current_page.mem, &mut buffer)
+                    .set_n_cells(self.current_page.n_cells);
 
                 // Update cell pointer.
                 let cell_pointer_offset = if current_cell_key.is_some() {
@@ -530,13 +607,15 @@ impl<'a> BtreeCursor<'a> {
                     unallocated_space_offset
                 };
                 buffer[cell_pointer_offset..cell_pointer_offset + 2]
-                    .copy_from_slice(&(offset as u16).to_be_bytes());
+                    .copy_from_slice(&(allocated_offset as u16).to_be_bytes());
 
                 // Copy payload to the btree page.
-                let payload_offset = offset + cell_header_size;
-                buffer[offset..payload_offset].copy_from_slice(&cell_header[..cell_header_size]);
-                let payload_tail_offset = payload_offset + n_local;
-                buffer[payload_offset..payload_tail_offset].copy_from_slice(&payload[..n_local]);
+                let payload_offset = allocated_offset + cell_header_size as usize;
+                buffer[allocated_offset..payload_offset]
+                    .copy_from_slice(&cell_header[..cell_header_size as usize]);
+                let payload_tail_offset = payload_offset + n_local as usize;
+                buffer[payload_offset..payload_tail_offset]
+                    .copy_from_slice(&payload[..n_local as usize]);
                 if let Some(overflow_page_id) = overflow_page_id {
                     assert_eq!(overflow_page_id.len(), 4);
                     buffer[payload_tail_offset..payload_tail_offset + overflow_page_id.len()]
@@ -2032,5 +2111,284 @@ mod tests {
             assert_eq!(&buf[..payload_size], &data[..payload_size]);
         }
         pager.abort();
+    }
+
+    fn assert_all_local_in_cursor(cursor: &mut BtreeCursor, values: &[(i64, &[u8])]) {
+        for (expected_key, expected_buf) in values {
+            let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+            assert_eq!(key, *expected_key);
+            assert_eq!(payload.buf(), *expected_buf);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        assert!(cursor.get_table_payload().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_insert_from_freeblock_split() {
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col);",
+            "INSERT INTO example(rowid, col) VALUES (1, x'01');",
+            "INSERT INTO example(rowid, col) VALUES (2, x'0202');",
+            "INSERT INTO example(rowid, col) VALUES (3, x'ffffffffffffffff');", // 8 bytes
+            "INSERT INTO example(rowid, col) VALUES (4, x'04');",
+            "DELETE FROM example WHERE rowid = 1;",
+            "DELETE FROM example WHERE rowid = 3;",
+        ]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let table_page_id = find_table_page_id("example", file.path());
+
+        let page = pager.get_page(table_page_id).unwrap();
+        let buffer = page.buffer();
+        let page_header = BtreePageHeader::from_page(&page, &buffer);
+        assert_eq!(page_header.first_freeblock_offset(), 4073);
+        assert_eq!(page_header.fragmented_free_bytes(), 0);
+        assert_eq!(page_header.cell_content_area_offset().get(), 4068);
+        drop(buffer);
+
+        let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
+
+        cursor.insert(5, &[2, 20, 5, 5, 5, 5]).unwrap();
+
+        cursor.move_to_first().unwrap();
+        assert_all_local_in_cursor(
+            &mut cursor,
+            &[
+                (2, &[2, 16, 2, 2]),
+                (4, &[2, 14, 4]),
+                (5, &[2, 20, 5, 5, 5, 5]),
+            ],
+        );
+
+        let page = pager.get_page(table_page_id).unwrap();
+        let buffer = page.buffer();
+        let page_header = BtreePageHeader::from_page(&page, &buffer);
+        assert_eq!(page_header.first_freeblock_offset(), 4081);
+        assert_eq!(page_header.fragmented_free_bytes(), 0);
+        assert_eq!(page_header.cell_content_area_offset().get(), 4068);
+
+        let mut freeblocks = FreeblockIterator::new(page_header.first_freeblock_offset(), &buffer);
+
+        assert_eq!(freeblocks.next(), Some((4081, 4)));
+        assert_eq!(freeblocks.next(), Some((4091, 5)));
+        assert_eq!(freeblocks.next(), None);
+    }
+
+    #[test]
+    fn test_insert_from_freeblock_skipping_small_freeblock() {
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col);",
+            "INSERT INTO example(rowid, col) VALUES (1, x'ffffffffffffffff');", // 8 bytes
+            "INSERT INTO example(rowid, col) VALUES (2, x'0202');",
+            "INSERT INTO example(rowid, col) VALUES (3, x'03');",
+            "INSERT INTO example(rowid, col) VALUES (4, x'04');",
+            "DELETE FROM example WHERE rowid = 1;",
+            "DELETE FROM example WHERE rowid = 3;",
+        ]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let table_page_id = find_table_page_id("example", file.path());
+
+        let page = pager.get_page(table_page_id).unwrap();
+        let buffer = page.buffer();
+        let page_header = BtreePageHeader::from_page(&page, &buffer);
+        assert_eq!(page_header.first_freeblock_offset(), 4073);
+        assert_eq!(page_header.fragmented_free_bytes(), 0);
+        assert_eq!(page_header.cell_content_area_offset().get(), 4068);
+        drop(buffer);
+
+        let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
+
+        cursor.insert(5, &[2, 20, 5, 5, 5, 5]).unwrap();
+
+        cursor.move_to_first().unwrap();
+        assert_all_local_in_cursor(
+            &mut cursor,
+            &[
+                (2, &[2, 16, 2, 2]),
+                (4, &[2, 14, 4]),
+                (5, &[2, 20, 5, 5, 5, 5]),
+            ],
+        );
+
+        let page = pager.get_page(table_page_id).unwrap();
+        let buffer = page.buffer();
+        let page_header = BtreePageHeader::from_page(&page, &buffer);
+        assert_eq!(page_header.first_freeblock_offset(), 4073);
+        assert_eq!(page_header.fragmented_free_bytes(), 0);
+        assert_eq!(page_header.cell_content_area_offset().get(), 4068);
+
+        let mut freeblocks = FreeblockIterator::new(page_header.first_freeblock_offset(), &buffer);
+
+        assert_eq!(freeblocks.next(), Some((4073, 5)));
+        assert_eq!(freeblocks.next(), Some((4092, 4)));
+        assert_eq!(freeblocks.next(), None);
+    }
+
+    #[test]
+    fn test_insert_from_freeblock_fragmented() {
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col);",
+            "INSERT INTO example(rowid, col) VALUES (1, x'01');",
+            "INSERT INTO example(rowid, col) VALUES (2, x'0202');",
+            "INSERT INTO example(rowid, col) VALUES (3, x'ffffffffffffffff');", // 8 bytes
+            "INSERT INTO example(rowid, col) VALUES (4, x'04');",
+            "DELETE FROM example WHERE rowid = 1;",
+            "DELETE FROM example WHERE rowid = 3;",
+        ]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let table_page_id = find_table_page_id("example", file.path());
+
+        let page = pager.get_page(table_page_id).unwrap();
+        let buffer = page.buffer();
+        let page_header = BtreePageHeader::from_page(&page, &buffer);
+        assert_eq!(page_header.first_freeblock_offset(), 4073);
+        assert_eq!(page_header.fragmented_free_bytes(), 0);
+        assert_eq!(page_header.cell_content_area_offset().get(), 4068);
+        drop(buffer);
+
+        let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
+
+        cursor.insert(5, &[2, 22, 5, 5, 5, 5, 5]).unwrap();
+
+        cursor.move_to_first().unwrap();
+        assert_all_local_in_cursor(
+            &mut cursor,
+            &[
+                (2, &[2, 16, 2, 2]),
+                (4, &[2, 14, 4]),
+                (5, &[2, 22, 5, 5, 5, 5, 5]),
+            ],
+        );
+
+        let page = pager.get_page(table_page_id).unwrap();
+        let buffer = page.buffer();
+        let page_header = BtreePageHeader::from_page(&page, &buffer);
+        assert_eq!(page_header.first_freeblock_offset(), 4091);
+        assert_eq!(page_header.fragmented_free_bytes(), 3);
+        assert_eq!(page_header.cell_content_area_offset().get(), 4068);
+
+        let mut freeblocks = FreeblockIterator::new(page_header.first_freeblock_offset(), &buffer);
+
+        assert_eq!(freeblocks.next(), Some((4091, 5)));
+        assert_eq!(freeblocks.next(), None);
+    }
+
+    #[test]
+    fn test_insert_from_freeblock_fragment_threshold() {
+        let mut stmts = vec!["CREATE TABLE example(col);"];
+        // Create total 57 bytes fragments.
+        for _ in 0..57 {
+            // all rowid is bigger than 200 which takes 2 bytes as varint.
+            stmts.push("INSERT INTO example(rowid, col) VALUES (200, x'0102030405060708');");
+            stmts.push("INSERT INTO example(col) VALUES (NULL);");
+            stmts.push("DELETE FROM example WHERE rowid = 200;");
+            // Adds 1 byte of fragment.
+            stmts.push("INSERT INTO example(col) VALUES (x'01020304050607');");
+        }
+        // Create 2 freeblocks.
+        stmts.push("INSERT INTO example(rowid, col) VALUES (200, x'0102030405060708');");
+        stmts.push("INSERT INTO example(col) VALUES (NULL);");
+        stmts.push("DELETE FROM example WHERE rowid = 200;");
+        stmts.push("INSERT INTO example(rowid, col) VALUES (200, x'010203040506070809');");
+        stmts.push("INSERT INTO example(col) VALUES (x'01020304050607080a');");
+        stmts.push("DELETE FROM example WHERE rowid = 200;");
+        let file = create_sqlite_database(&stmts);
+
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let table_page_id = find_table_page_id("example", file.path());
+
+        let page = pager.get_page(table_page_id).unwrap();
+        let buffer = page.buffer();
+        let page_header = BtreePageHeader::from_page(&page, &buffer);
+        assert_eq!(page_header.first_freeblock_offset(), 3038);
+        assert_eq!(page_header.fragmented_free_bytes(), 57);
+        assert_eq!(page_header.cell_content_area_offset().get(), 3024);
+        drop(buffer);
+
+        let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
+
+        cursor
+            .insert(400, &[2, 28, 1, 2, 3, 4, 5, 6, 7, 8])
+            .unwrap();
+
+        let page = pager.get_page(table_page_id).unwrap();
+        let buffer = page.buffer();
+        let page_header = BtreePageHeader::from_page(&page, &buffer);
+        for (offset, size) in FreeblockIterator::new(page_header.first_freeblock_offset(), &buffer)
+        {
+            println!("offset = {}, size = {}", offset, size);
+        }
+        assert_eq!(page_header.first_freeblock_offset(), 3057);
+        assert_eq!(page_header.fragmented_free_bytes(), 58);
+        assert_eq!(page_header.cell_content_area_offset().get(), 3024);
+        drop(buffer);
+
+        cursor.insert(401, &[2, 0]).unwrap();
+
+        // Use unallocated space while there is a freeblock because fragment size is
+        // bigger than 57.
+        let page = pager.get_page(table_page_id).unwrap();
+        let buffer = page.buffer();
+        let page_header = BtreePageHeader::from_page(&page, &buffer);
+        assert_eq!(page_header.first_freeblock_offset(), 3057);
+        assert_eq!(page_header.fragmented_free_bytes(), 58);
+        assert_eq!(page_header.cell_content_area_offset().get(), 3019);
+    }
+
+    #[test]
+    fn test_insert_skipping_all_freeblock() {
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col);",
+            "INSERT INTO example(rowid, col) VALUES (1, x'01');",
+            "INSERT INTO example(rowid, col) VALUES (2, x'0202');",
+            "INSERT INTO example(rowid, col) VALUES (3, x'ffffffffffffffff');", // 8 bytes
+            "INSERT INTO example(rowid, col) VALUES (4, x'04');",
+            "DELETE FROM example WHERE rowid = 1;",
+            "DELETE FROM example WHERE rowid = 3;",
+        ]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let table_page_id = find_table_page_id("example", file.path());
+
+        let page = pager.get_page(table_page_id).unwrap();
+        let buffer = page.buffer();
+        let page_header = BtreePageHeader::from_page(&page, &buffer);
+        assert_eq!(page_header.first_freeblock_offset(), 4073);
+        assert_eq!(page_header.fragmented_free_bytes(), 0);
+        assert_eq!(page_header.cell_content_area_offset().get(), 4068);
+        drop(buffer);
+
+        let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
+
+        cursor
+            .insert(5, &[2, 32, 9, 9, 9, 9, 9, 9, 9, 9, 9])
+            .unwrap();
+
+        cursor.move_to_first().unwrap();
+        assert_all_local_in_cursor(
+            &mut cursor,
+            &[
+                (2, &[2, 16, 2, 2]),
+                (4, &[2, 14, 4]),
+                (5, &[2, 32, 9, 9, 9, 9, 9, 9, 9, 9, 9]),
+            ],
+        );
+
+        let page = pager.get_page(table_page_id).unwrap();
+        let buffer = page.buffer();
+        let page_header = BtreePageHeader::from_page(&page, &buffer);
+        assert_eq!(page_header.first_freeblock_offset(), 4073);
+        assert_eq!(page_header.fragmented_free_bytes(), 0);
+        assert_eq!(page_header.cell_content_area_offset().get(), 4055);
+
+        let mut freeblocks = FreeblockIterator::new(page_header.first_freeblock_offset(), &buffer);
+
+        assert_eq!(freeblocks.next(), Some((4073, 12)));
+        assert_eq!(freeblocks.next(), Some((4091, 5)));
+        assert_eq!(freeblocks.next(), None);
     }
 }
