@@ -32,6 +32,22 @@ pub const MAX_PAGE_SIZE: usize = 65536;
 
 pub type PageId = u32;
 
+pub struct TemporaryPage(Vec<u8>);
+
+impl Deref for TemporaryPage {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for TemporaryPage {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 // The size of a page is more than 512.
 pub struct PageBuffer<'a>(Ref<'a, RawPage>);
 
@@ -43,6 +59,12 @@ impl<'a> Deref for PageBuffer<'a> {
     }
 }
 pub struct PageBufferMut<'a>(RefMut<'a, RawPage>);
+
+impl PageBufferMut<'_> {
+    pub fn swap(&mut self, buffer: &mut TemporaryPage) {
+        std::mem::swap(&mut self.0.buf, &mut buffer.0);
+    }
+}
 
 impl<'a> Deref for PageBufferMut<'a> {
     type Target = [u8];
@@ -100,6 +122,10 @@ impl Pager {
                 header_offset: 0,
             },
         ))
+    }
+
+    pub fn allocate_tmp_page(&self) -> TemporaryPage {
+        TemporaryPage(vec![0_u8; self.cache.pagesize as usize])
     }
 
     pub fn get_page(&self, id: PageId) -> anyhow::Result<MemPage> {

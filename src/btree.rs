@@ -19,6 +19,7 @@ use crate::pager::MemPage;
 use crate::pager::PageBuffer;
 use crate::pager::PageBufferMut;
 use crate::pager::PageId;
+use crate::pager::TemporaryPage;
 use crate::utils::parse_varint;
 use crate::utils::u64_to_i64;
 
@@ -45,6 +46,11 @@ fn parse_non_zero_u16(buf: [u8; 2]) -> NonZeroU32 {
     NonZeroU32::new(v).unwrap()
 }
 
+#[inline(always)]
+pub fn set_u16(buf: &mut [u8], offset: usize, value: u16) {
+    buf[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+}
+
 pub const BTREE_OVERFLOW_PAGE_ID_BYTES: usize = 4;
 
 pub struct BtreePageType(u8);
@@ -63,6 +69,20 @@ impl BtreePageType {
     #[inline]
     pub fn is_index(&self) -> bool {
         self.0 & INDEX_FLAG != 0
+    }
+
+    /// The btree page header size.
+    ///
+    /// * Returns 8 if this is a leaf page.
+    /// * Returns 12 if this is an interior page.
+    ///
+    /// This does not invoke conditional branch.
+    pub fn header_size(&self) -> u8 {
+        // 0(leaf) or 8(interior)
+        let is_interior = (!self.0) & LEAF_FLAG;
+        // 0(leaf) or 4(interior)
+        let additional_size = is_interior >> 1;
+        8 + additional_size
     }
 }
 
@@ -112,20 +132,6 @@ impl<'page> BtreePageHeader<'page> {
     pub fn right_page_id(&self) -> PageId {
         u32::from_be_bytes(self.0[8..12].try_into().unwrap())
     }
-
-    /// The btree page header size.
-    ///
-    /// * Returns 8 if this is a leaf page.
-    /// * Returns 12 if this is an interior page.
-    ///
-    /// This does not invoke conditional branch.
-    pub fn header_size(&self) -> u8 {
-        // 0(leaf) or 8(interior)
-        let is_interior = (!self.0[0]) & LEAF_FLAG;
-        // 0(leaf) or 4(interior)
-        let additional_size = is_interior >> 1;
-        8 + additional_size
-    }
 }
 
 pub struct BtreePageHeaderMut<'a>(&'a mut [u8; BTREE_PAGE_HEADER_MAX_SIZE]);
@@ -140,9 +146,22 @@ impl<'a> BtreePageHeaderMut<'a> {
         )
     }
 
+    pub fn from_tmp(page: &MemPage, tmp: &'a mut TemporaryPage) -> Self {
+        // SAFETY: TemporaryPage is always more than 512 bytes.
+        Self(
+            (&mut tmp[page.header_offset..page.header_offset + BTREE_PAGE_HEADER_MAX_SIZE])
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    pub fn set_page_type(&mut self, page_type: BtreePageType) {
+        self.0[0] = page_type.0;
+    }
+
     /// Set number of cells in this page
     pub fn set_n_cells(&mut self, n_cells: u16) {
-        self.0[3..5].copy_from_slice(n_cells.to_be_bytes().as_slice());
+        set_u16(self.0, 3, n_cells);
     }
 
     /// Set offset of the cell content area.
@@ -150,7 +169,7 @@ impl<'a> BtreePageHeaderMut<'a> {
     /// The offset must be less than 65536. If the actual offset is 65536, it
     /// must be set to 0.
     pub fn set_cell_content_area_offset(&mut self, offset: u16) {
-        self.0[5..7].copy_from_slice(offset.to_be_bytes().as_slice());
+        set_u16(self.0, 5, offset);
     }
 
     pub fn set_first_freeblock_offset(&mut self, offset: [u8; 2]) {
@@ -159,6 +178,10 @@ impl<'a> BtreePageHeaderMut<'a> {
 
     pub fn add_fragmented_free_bytes(&mut self, size: u8) {
         self.0[7] += size;
+    }
+
+    pub fn clear_fragmented_free_bytes(&mut self) {
+        self.0[7] = 0;
     }
 }
 
@@ -203,12 +226,12 @@ pub struct TableCellKeyParser<'a> {
 
 impl<'a> TableCellKeyParser<'a> {
     pub fn new(page: &'a MemPage, buffer: &'a PageBuffer<'a>) -> Self {
-        let header = BtreePageHeader::from_page(page, buffer);
+        let page_type = BtreePageHeader::from_page(page, buffer).page_type();
         Self {
             page,
             buffer,
-            is_leaf: header.page_type().is_leaf(),
-            header_size: header.header_size(),
+            is_leaf: page_type.is_leaf(),
+            header_size: page_type.header_size(),
         }
     }
 
@@ -238,14 +261,14 @@ pub struct IndexCellKeyParser<'a> {
 
 impl<'a> IndexCellKeyParser<'a> {
     pub fn new(ctx: &'a BtreeContext, page: &'a MemPage, buffer: &'a PageBuffer<'a>) -> Self {
-        let header = BtreePageHeader::from_page(page, buffer);
-        let offset_in_cell = (!header.page_type().is_leaf() as u8) << 2;
+        let page_type = BtreePageHeader::from_page(page, buffer).page_type();
+        let offset_in_cell = (!page_type.is_leaf() as u8) << 2;
         Self {
             ctx,
             page,
             buffer,
             offset_in_cell,
-            header_size: header.header_size(),
+            header_size: page_type.header_size(),
         }
     }
 
@@ -272,9 +295,10 @@ pub fn cell_pointer_offset(page: &MemPage, cell_idx: u16, header_size: u8) -> us
 /// Returns the offset of the cell in the buffer.
 ///
 /// Returned cell offset is in the range of the buffer.
-fn get_cell_offset(
+pub fn get_cell_offset(
     page: &MemPage,
-    buffer: &PageBuffer,
+    // TODO: How to accept both PageBuffer and PageBufferMut?
+    buffer: &[u8],
     cell_idx: u16,
     header_size: u8,
 ) -> ParseResult<usize> {
@@ -282,17 +306,12 @@ fn get_cell_offset(
     if cell_pointer_offset + 2 > buffer.len() {
         return Err("cell pointer out of range");
     }
-    let cell_offset = u16::from_be_bytes(
+    let cell_offset = parse_non_zero_u16(
         buffer[cell_pointer_offset..cell_pointer_offset + 2]
             .try_into()
             .unwrap(),
-    ) as usize;
-    // offset 0 is used for 65536.
-    let cell_offset = if cell_offset == 0 {
-        1 << 16
-    } else {
-        cell_offset
-    };
+    )
+    .get() as usize;
     if cell_offset > buffer.len() {
         return Err("cell offset out of range");
     }
@@ -534,21 +553,14 @@ mod tests {
 
     #[test]
     fn headersize() {
-        let mut buf = [0_u8; 12];
         for t in [
             BTREE_PAGE_TYPE_INTERIOR_INDEX,
             BTREE_PAGE_TYPE_INTERIOR_TABLE,
         ] {
-            buf[0] = t;
-            let header = BtreePageHeader(&buf);
-
-            assert_eq!(header.header_size(), 12);
+            assert_eq!(BtreePageType(t).header_size(), 12);
         }
         for t in [BTREE_PAGE_TYPE_LEAF_INDEX, BTREE_PAGE_TYPE_LEAF_TABLE] {
-            buf[0] = t;
-            let header = BtreePageHeader(&buf);
-
-            assert_eq!(header.header_size(), 8);
+            assert_eq!(BtreePageType(t).header_size(), 8);
         }
     }
 
@@ -584,8 +596,8 @@ mod tests {
         assert_eq!(page2_header.page_type().0, BTREE_PAGE_TYPE_LEAF_TABLE);
         assert_eq!(page1_header.n_cells(), 1);
         assert_eq!(page2_header.n_cells(), 0);
-        assert_eq!(page1_header.header_size(), 8);
-        assert_eq!(page2_header.header_size(), 8);
+        assert_eq!(page1_header.page_type().header_size(), 8);
+        assert_eq!(page2_header.page_type().header_size(), 8);
         assert_eq!(page1_header.cell_content_area_offset().get(), 4043);
         assert_eq!(page2_header.cell_content_area_offset().get(), 4096);
         assert_eq!(page1_header.first_freeblock_offset(), 0);
