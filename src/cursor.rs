@@ -16,6 +16,7 @@ use std::cmp::Ordering;
 
 use anyhow::bail;
 
+use crate::btree::allocate_from_freeblocks;
 use crate::btree::cell_pointer_offset;
 use crate::btree::get_cell_offset;
 use crate::btree::parse_btree_interior_cell_page_id;
@@ -512,60 +513,22 @@ impl<'a> BtreeCursor<'a> {
                 // 2. Defragmentation if needed.
                 // 3. Allocate space from unallocated space.
                 let allocated_offset = {
-                    let mut allocated_offset = None;
                     // Search freeblock first.
-                    if unallocated_size >= 2
+                    let allocated_offset = if unallocated_size >= 2
                     && first_freeblock_offset != 0
                     // Total fragments may not exceed 60 bytes. Otherwise Give up seeking freeblocks
                     // and try defragmentation.
                     && fragmented_free_bytes <= 57
                     {
-                        let mut previous_freeblock_offset = 0;
-                        for (freeblock_offset, size) in
-                            FreeblockIterator::new(first_freeblock_offset, &buffer)
-                        {
-                            if size >= cell_size {
-                                let remaining_size = size - cell_size;
-                                let new_freeblock_offset = if remaining_size < 4 {
-                                    BtreePageHeaderMut::from_page(
-                                        &self.current_page.mem,
-                                        &mut buffer,
-                                    )
-                                    .add_fragmented_free_bytes(remaining_size as u8);
-
-                                    buffer[freeblock_offset..freeblock_offset + 2]
-                                        .try_into()
-                                        .unwrap()
-                                } else {
-                                    // Split the freeblock.
-                                    let new_freeblock_offset =
-                                        freeblock_offset + cell_size as usize;
-                                    buffer.copy_within(
-                                        freeblock_offset..freeblock_offset + 2,
-                                        new_freeblock_offset,
-                                    );
-                                    buffer[new_freeblock_offset + 2..new_freeblock_offset + 4]
-                                        .copy_from_slice(&remaining_size.to_be_bytes());
-
-                                    (new_freeblock_offset as u16).to_be_bytes()
-                                };
-                                if previous_freeblock_offset == 0 {
-                                    BtreePageHeaderMut::from_page(
-                                        &self.current_page.mem,
-                                        &mut buffer,
-                                    )
-                                    .set_first_freeblock_offset(new_freeblock_offset);
-                                } else {
-                                    buffer
-                                        [previous_freeblock_offset..previous_freeblock_offset + 2]
-                                        .copy_from_slice(&new_freeblock_offset);
-                                }
-                                allocated_offset = Some(freeblock_offset);
-                                break;
-                            }
-                            previous_freeblock_offset = freeblock_offset;
-                        }
-                    }
+                        allocate_from_freeblocks(
+                            &self.current_page.mem,
+                            &mut buffer,
+                            first_freeblock_offset,
+                            cell_size,
+                        )
+                    } else {
+                        None
+                    };
 
                     if let Some(offset) = allocated_offset {
                         // 1. Allocated from freeblock.
@@ -583,7 +546,7 @@ impl<'a> BtreeCursor<'a> {
                             let mut new_page_header =
                                 BtreePageHeaderMut::from_tmp(&self.current_page.mem, &mut tmp_page);
                             new_page_header.set_page_type(page_type);
-                            new_page_header.set_first_freeblock_offset([0; 2]);
+                            new_page_header.set_first_freeblock_offset(0);
                             new_page_header.clear_fragmented_free_bytes();
                             // cell_content_area_offset and n_cells will be set later.
                             cell_content_area_offset = self.btree_ctx.usable_size as usize;
@@ -2559,7 +2522,7 @@ mod tests {
         set_u16(&mut buffer, freeblock_offset, 0);
         set_u16(&mut buffer, freeblock_offset + 2, 10);
         let mut page_header = BtreePageHeaderMut::from_page(&page, &mut buffer);
-        page_header.set_first_freeblock_offset((freeblock_offset as u16).to_be_bytes());
+        page_header.set_first_freeblock_offset(freeblock_offset as u16);
         page_header.add_fragmented_free_bytes(3);
         page_header.set_cell_content_area_offset(
             cell_pointer_offset(&page, 1, page_type.header_size()) as u16 + 10,

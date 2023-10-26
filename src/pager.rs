@@ -115,11 +115,16 @@ impl Pager {
         page.borrow_mut().is_dirty = true;
         // TODO: setup journal
 
+        let header_offset = if page_id == 1 {
+            DATABASE_HEADER_SIZE
+        } else {
+            0
+        };
         Ok((
             page_id,
             MemPage {
                 page,
-                header_offset: 0,
+                header_offset,
             },
         ))
     }

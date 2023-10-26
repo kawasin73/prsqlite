@@ -91,6 +91,19 @@ pub struct BtreePageHeader<'page>(&'page [u8; BTREE_PAGE_HEADER_MAX_SIZE]);
 impl<'page> BtreePageHeader<'page> {
     pub fn from_page(page: &MemPage, buffer: &'page PageBuffer<'page>) -> Self {
         // SAFETY: PageBuffer is always more than 512 bytes.
+        Self::new(page, buffer)
+    }
+
+    /// This is used by tests.
+    #[allow(dead_code)]
+    pub fn from_page_mut(page: &MemPage, buffer: &'page PageBufferMut<'page>) -> Self {
+        // SAFETY: PageBufferMut is always more than 512 bytes.
+        Self::new(page, buffer)
+    }
+
+    // The buffer must from page and more than 512 bytes.
+    #[inline(always)]
+    fn new(page: &MemPage, buffer: &'page [u8]) -> Self {
         Self(
             buffer[page.header_offset..page.header_offset + BTREE_PAGE_HEADER_MAX_SIZE]
                 .try_into()
@@ -172,8 +185,8 @@ impl<'a> BtreePageHeaderMut<'a> {
         set_u16(self.0, 5, offset);
     }
 
-    pub fn set_first_freeblock_offset(&mut self, offset: [u8; 2]) {
-        self.0[1..3].copy_from_slice(&offset);
+    pub fn set_first_freeblock_offset(&mut self, offset: u16) {
+        set_u16(self.0, 1, offset);
     }
 
     pub fn add_fragmented_free_bytes(&mut self, size: u8) {
@@ -524,6 +537,52 @@ pub fn parse_btree_interior_cell_page_id(
     Ok(page_id)
 }
 
+/// Find the first freeblock which is larger than or equal to the given size.
+///
+/// Remove the freeblock from the freeblock list and returns the offset of the
+/// space.
+///
+/// If the freeblock is 4 byte or more larger than the given size, split the
+/// freeblock.
+///
+/// Returns [None] if there is no freeblocks that matches the size.
+pub fn allocate_from_freeblocks(
+    page: &MemPage,
+    buffer: &mut PageBufferMut,
+    first_freeblock_offset: u16,
+    size: u16,
+) -> Option<usize> {
+    // first_freeblock_offset in the header is at offset 1.
+    let mut previous_freeblock_offset = page.header_offset + 1;
+    for (freeblock_offset, freeblock_size) in FreeblockIterator::new(first_freeblock_offset, buffer)
+    {
+        if freeblock_size >= size {
+            let remaining_size = freeblock_size - size;
+            let new_freeblock_offset = if remaining_size < 4 {
+                BtreePageHeaderMut::from_page(page, buffer)
+                    .add_fragmented_free_bytes(remaining_size as u8);
+
+                buffer[freeblock_offset..freeblock_offset + 2]
+                    .try_into()
+                    .unwrap()
+            } else {
+                // Split the freeblock.
+                let new_freeblock_offset = freeblock_offset + size as usize;
+                buffer.copy_within(freeblock_offset..freeblock_offset + 2, new_freeblock_offset);
+                buffer[new_freeblock_offset + 2..new_freeblock_offset + 4]
+                    .copy_from_slice(&remaining_size.to_be_bytes());
+
+                (new_freeblock_offset as u16).to_be_bytes()
+            };
+            buffer[previous_freeblock_offset..previous_freeblock_offset + 2]
+                .copy_from_slice(&new_freeblock_offset);
+            return Some(freeblock_offset);
+        }
+        previous_freeblock_offset = freeblock_offset;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -756,6 +815,100 @@ mod tests {
             (payload, overflow) = overflow.as_ref().unwrap().parse(&bctx, &buffer).unwrap();
             assert_eq!(payload, &buf[cur..cur + payload.len()]);
             cur += payload.len();
+        }
+    }
+
+    #[test]
+    fn test_allocate_from_freeblocks() {
+        let pager = create_empty_pager(&[], 4096 * 2);
+
+        let (page_id, _) = pager.allocate_page().unwrap();
+        assert_eq!(page_id, 1);
+        let (page_id, _) = pager.allocate_page().unwrap();
+        assert_eq!(page_id, 2);
+
+        for page_id in [1, 2] {
+            let page = pager.get_page(page_id).unwrap();
+            let mut buffer = pager.make_page_mut(&page).unwrap();
+
+            let mut header = BtreePageHeaderMut::from_page(&page, &mut buffer);
+            header.set_first_freeblock_offset(1000);
+            let freeblocks = vec![(1000, 10), (1020, 10), (1030, 20), (1050, 50)];
+            for i in 0..freeblocks.len() {
+                let (offset, size) = freeblocks[i];
+                let next_offset = if i + 1 < freeblocks.len() {
+                    freeblocks[i + 1].0
+                } else {
+                    0
+                };
+                // next freeblock offset
+                set_u16(&mut buffer, offset, next_offset as u16);
+                // freeblock size
+                set_u16(&mut buffer, offset + 2, size);
+            }
+
+            assert_eq!(
+                FreeblockIterator::new(
+                    BtreePageHeader::from_page_mut(&page, &buffer).first_freeblock_offset(),
+                    &buffer
+                )
+                .collect::<Vec<_>>(),
+                freeblocks
+            );
+
+            assert!(allocate_from_freeblocks(&page, &mut buffer, 1000, 51).is_none());
+            assert_eq!(
+                allocate_from_freeblocks(&page, &mut buffer, 1000, 25).unwrap(),
+                1050
+            );
+
+            let page_header = BtreePageHeader::from_page_mut(&page, &buffer);
+            assert_eq!(
+                FreeblockIterator::new(page_header.first_freeblock_offset(), &buffer)
+                    .collect::<Vec<_>>(),
+                vec![(1000, 10), (1020, 10), (1030, 20), (1075, 25)]
+            );
+            assert_eq!(page_header.fragmented_free_bytes(), 0);
+
+            assert_eq!(
+                allocate_from_freeblocks(&page, &mut buffer, 1000, 25).unwrap(),
+                1075
+            );
+
+            let page_header = BtreePageHeader::from_page_mut(&page, &buffer);
+            assert_eq!(
+                FreeblockIterator::new(page_header.first_freeblock_offset(), &buffer)
+                    .collect::<Vec<_>>(),
+                vec![(1000, 10), (1020, 10), (1030, 20)]
+            );
+            assert_eq!(page_header.fragmented_free_bytes(), 0);
+
+            assert_eq!(
+                allocate_from_freeblocks(&page, &mut buffer, 1000, 6).unwrap(),
+                1000
+            );
+
+            let page_header = BtreePageHeader::from_page_mut(&page, &buffer);
+            assert_eq!(page_header.first_freeblock_offset(), 1006);
+            assert_eq!(
+                FreeblockIterator::new(page_header.first_freeblock_offset(), &buffer)
+                    .collect::<Vec<_>>(),
+                vec![(1006, 4), (1020, 10), (1030, 20)]
+            );
+            assert_eq!(page_header.fragmented_free_bytes(), 0);
+
+            assert_eq!(
+                allocate_from_freeblocks(&page, &mut buffer, 1006, 7).unwrap(),
+                1020
+            );
+
+            let page_header = BtreePageHeader::from_page_mut(&page, &buffer);
+            assert_eq!(
+                FreeblockIterator::new(page_header.first_freeblock_offset(), &buffer)
+                    .collect::<Vec<_>>(),
+                vec![(1006, 4), (1030, 20)]
+            );
+            assert_eq!(page_header.fragmented_free_bytes(), 3);
         }
     }
 }
