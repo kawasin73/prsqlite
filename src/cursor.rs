@@ -120,7 +120,6 @@ struct CursorPage {
     idx_cell: u16,
     n_cells: u16,
     page_type: BtreePageType,
-    is_leaf: bool,
 }
 
 impl CursorPage {
@@ -129,14 +128,12 @@ impl CursorPage {
         let page_header = BtreePageHeader::from_page(&mem, &buffer);
         let n_cells = page_header.n_cells();
         let page_type = page_header.page_type();
-        let is_leaf = page_type.is_leaf();
         drop(buffer);
         Self {
             mem,
             idx_cell: 0,
             n_cells,
             page_type,
-            is_leaf,
         }
     }
 }
@@ -209,7 +206,7 @@ impl<'a> BtreeCursor<'a> {
                 }
             }
             self.current_page.idx_cell = i_min as u16;
-            if self.current_page.is_leaf {
+            if self.current_page.page_type.is_leaf() {
                 self.initialized = true;
                 return Ok(max_cell_key);
             }
@@ -271,7 +268,7 @@ impl<'a> BtreeCursor<'a> {
                 }
             }
             self.current_page.idx_cell = i_min as u16;
-            if self.current_page.is_leaf {
+            if self.current_page.page_type.is_leaf() {
                 drop(buffer);
                 // If the key is between the last key of the index leaf page and the parent key,
                 // we need to adjust the cursor to parent cell.
@@ -311,7 +308,7 @@ impl<'a> BtreeCursor<'a> {
     pub fn move_to_first(&mut self) -> anyhow::Result<()> {
         self.move_to_root()?;
         self.current_page.idx_cell = 0;
-        if !self.current_page.is_leaf {
+        if !self.current_page.page_type.is_leaf() {
             self.move_to_left_most()?;
         }
         self.initialized = true;
@@ -323,7 +320,7 @@ impl<'a> BtreeCursor<'a> {
         if self.current_page.n_cells == 0 {
             self.current_page.idx_cell = 0;
         } else {
-            while !self.current_page.is_leaf {
+            while !self.current_page.page_type.is_leaf() {
                 let buffer = self.current_page.mem.buffer();
                 let page_header = BtreePageHeader::from_page(&self.current_page.mem, &buffer);
                 let page_id = page_header.right_page_id();
@@ -348,13 +345,15 @@ impl<'a> BtreeCursor<'a> {
         }
 
         self.current_page.idx_cell += 1;
-        if self.current_page.is_leaf && self.current_page.idx_cell < self.current_page.n_cells {
+        if self.current_page.page_type.is_leaf()
+            && self.current_page.idx_cell < self.current_page.n_cells
+        {
             return Ok(());
         }
 
         if self.current_page.page_type.is_table() {
             // table page never stops in the middle of the interior page.
-            assert!(self.current_page.is_leaf);
+            assert!(self.current_page.page_type.is_leaf());
             assert!(self.current_page.idx_cell == self.current_page.n_cells);
             loop {
                 if !self.back_to_parent()? {
@@ -368,12 +367,13 @@ impl<'a> BtreeCursor<'a> {
                 }
             }
         } else if self.current_page.page_type.is_index() {
-            if !self.current_page.is_leaf && self.current_page.idx_cell <= self.current_page.n_cells
+            if !self.current_page.page_type.is_leaf()
+                && self.current_page.idx_cell <= self.current_page.n_cells
             {
                 assert!(self.move_to_left_most()?);
             } else {
                 assert!(
-                    self.current_page.is_leaf
+                    self.current_page.page_type.is_leaf()
                         && self.current_page.idx_cell == self.current_page.n_cells
                 );
                 loop {
@@ -668,7 +668,7 @@ impl<'a> BtreeCursor<'a> {
         if self.current_page.idx_cell >= self.current_page.n_cells {
             return Ok(None);
         }
-        assert!(self.current_page.is_leaf);
+        assert!(self.current_page.page_type.is_leaf());
         let buffer = self.current_page.mem.buffer();
         let cell_key_parser = TableCellKeyParser::new(&self.current_page.mem, &buffer);
         let key = cell_key_parser
@@ -687,7 +687,7 @@ impl<'a> BtreeCursor<'a> {
         if self.current_page.idx_cell >= self.current_page.n_cells {
             return Ok(None);
         }
-        assert!(self.current_page.is_leaf);
+        assert!(self.current_page.page_type.is_leaf());
         let buffer = self.current_page.mem.buffer();
         let (key, payload_info) = parse_btree_leaf_table_cell(
             self.btree_ctx,
@@ -736,7 +736,7 @@ impl<'a> BtreeCursor<'a> {
     /// The cursor must points to a interior page.
     /// If cursor is completed, return `Ok(false)`.
     fn move_to_left_most(&mut self) -> anyhow::Result<bool> {
-        assert!(!self.current_page.is_leaf);
+        assert!(!self.current_page.page_type.is_leaf());
         let buffer = self.current_page.mem.buffer();
         let page_id = match self.current_page.idx_cell.cmp(&self.current_page.n_cells) {
             Ordering::Less => parse_btree_interior_cell_page_id(
@@ -758,7 +758,7 @@ impl<'a> BtreeCursor<'a> {
         self.move_to_child(page_id)?;
         self.current_page.idx_cell = 0;
         loop {
-            if self.current_page.is_leaf {
+            if self.current_page.page_type.is_leaf() {
                 break;
             }
             let buffer = self.current_page.mem.buffer();
