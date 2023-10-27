@@ -17,6 +17,7 @@ use std::cmp::Ordering;
 use anyhow::bail;
 
 use crate::btree::allocate_from_freeblocks;
+use crate::btree::allocate_from_unallocated_space;
 use crate::btree::cell_pointer_offset;
 use crate::btree::get_cell_offset;
 use crate::btree::parse_btree_interior_cell_page_id;
@@ -540,23 +541,24 @@ impl<'a> BtreeCursor<'a> {
                             // TODO: Optimization: Move cell block of the size of a freeblock if
                             // there is only a few freeblocks. See defragmentPage() of SQLite.
                             let mut tmp_page = self.pager.allocate_tmp_page();
+                            buffer.swap(&mut tmp_page);
                             // Copy database header if the page is page 1.
-                            tmp_page[..self.current_page.mem.header_offset]
-                                .copy_from_slice(&buffer[..self.current_page.mem.header_offset]);
-                            let mut new_page_header =
-                                BtreePageHeaderMut::from_tmp(&self.current_page.mem, &mut tmp_page);
-                            new_page_header.set_page_type(page_type);
-                            new_page_header.set_first_freeblock_offset(0);
-                            new_page_header.clear_fragmented_free_bytes();
+                            buffer[..self.current_page.mem.header_offset]
+                                .copy_from_slice(&tmp_page[..self.current_page.mem.header_offset]);
+                            let mut page_header =
+                                BtreePageHeaderMut::from_page(&self.current_page.mem, &mut buffer);
+                            page_header.set_page_type(page_type);
+                            page_header.set_first_freeblock_offset(0);
+                            page_header.clear_fragmented_free_bytes();
                             // cell_content_area_offset and n_cells will be set later.
                             cell_content_area_offset = self.btree_ctx.usable_size as usize;
                             // Copy reserved area.
-                            tmp_page[cell_content_area_offset..]
-                                .copy_from_slice(&buffer[cell_content_area_offset..]);
+                            buffer[cell_content_area_offset..]
+                                .copy_from_slice(&tmp_page[cell_content_area_offset..]);
                             for i in 0..self.current_page.n_cells {
                                 let offset = get_cell_offset(
                                     &self.current_page.mem,
-                                    &buffer,
+                                    &tmp_page,
                                     i,
                                     header_size,
                                 )
@@ -565,29 +567,35 @@ impl<'a> BtreeCursor<'a> {
                                 })?;
                                 // Compute cell size.
                                 let (payload_size, payload_size_length) =
-                                    parse_varint(&buffer[offset..])
+                                    parse_varint(&tmp_page[offset..])
                                         .ok_or_else(|| anyhow::anyhow!("parse payload size"))?;
                                 let key_length =
-                                    len_varint_buffer(&buffer[offset + payload_size_length..]);
+                                    len_varint_buffer(&tmp_page[offset + payload_size_length..])
+                                        as u16;
                                 let n_local =
                                     if payload_size <= self.btree_ctx.max_local(is_table) as u64 {
                                         payload_size as u16
                                     } else {
                                         self.btree_ctx.n_local(is_table, payload_size as i32)
                                     };
-                                let cell_size = payload_size_length + key_length + n_local as usize;
-                                cell_content_area_offset -= cell_size;
+                                let cell_size = payload_size_length as u16 + key_length + n_local;
 
-                                let cell_pointer_offset =
-                                    cell_pointer_offset(&self.current_page.mem, i, header_size);
-                                set_u16(
-                                    &mut tmp_page,
-                                    cell_pointer_offset,
-                                    cell_content_area_offset as u16,
+                                // There must be enough size of unallocated space before
+                                // cell_content_area_offset because all cells have fit in the page
+                                // before defragmentation.
+                                let new_cell_content_area_offset = allocate_from_unallocated_space(
+                                    &self.current_page.mem,
+                                    &mut buffer,
+                                    header_size,
+                                    cell_content_area_offset,
+                                    i,
+                                    cell_size,
                                 );
-                                tmp_page[cell_content_area_offset
-                                    ..cell_content_area_offset + cell_size]
-                                    .copy_from_slice(&buffer[offset..offset + cell_size]);
+                                buffer[new_cell_content_area_offset..cell_content_area_offset]
+                                    .copy_from_slice(
+                                        &tmp_page[offset..offset + cell_size as usize],
+                                    );
+                                cell_content_area_offset = new_cell_content_area_offset;
                             }
                             // unallocated_space_offset does not change because n_cell is not
                             // changed.
@@ -596,10 +604,9 @@ impl<'a> BtreeCursor<'a> {
                                     <= cell_content_area_offset - cell_size as usize
                             );
                             // Clear the unallocated space.
-                            tmp_page[unallocated_space_offset + 2
+                            buffer[unallocated_space_offset + 2
                                 ..cell_content_area_offset - cell_size as usize]
                                 .fill(0);
-                            buffer.swap(&mut tmp_page);
                         }
 
                         // 3. Allocate space from unallocated space.

@@ -19,7 +19,6 @@ use crate::pager::MemPage;
 use crate::pager::PageBuffer;
 use crate::pager::PageBufferMut;
 use crate::pager::PageId;
-use crate::pager::TemporaryPage;
 use crate::utils::parse_varint;
 use crate::utils::u64_to_i64;
 
@@ -154,15 +153,6 @@ impl<'a> BtreePageHeaderMut<'a> {
         // SAFETY: PageBuffer is always more than 512 bytes.
         Self(
             (&mut buffer[page.header_offset..page.header_offset + BTREE_PAGE_HEADER_MAX_SIZE])
-                .try_into()
-                .unwrap(),
-        )
-    }
-
-    pub fn from_tmp(page: &MemPage, tmp: &'a mut TemporaryPage) -> Self {
-        // SAFETY: TemporaryPage is always more than 512 bytes.
-        Self(
-            (&mut tmp[page.header_offset..page.header_offset + BTREE_PAGE_HEADER_MAX_SIZE])
                 .try_into()
                 .unwrap(),
         )
@@ -583,6 +573,30 @@ pub fn allocate_from_freeblocks(
     None
 }
 
+/// Allocate a space for idx-th cell from the unallocated space.
+///
+/// This also update cell pointer. Even if a cell of idx exists, it is
+/// overwritten.
+///
+/// NOTE: This does not check if the cell is actually fit in the page.
+pub fn allocate_from_unallocated_space(
+    page: &MemPage,
+    buffer: &mut PageBufferMut,
+    header_size: u8,
+    cell_content_area_offset: usize,
+    idx: u16,
+    cell_size: u16,
+) -> usize {
+    let new_cell_content_area_offset = cell_content_area_offset - cell_size as usize;
+    let cell_pointer_offset = cell_pointer_offset(page, idx, header_size);
+    set_u16(
+        buffer,
+        cell_pointer_offset,
+        new_cell_content_area_offset as u16,
+    );
+    new_cell_content_area_offset
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -910,5 +924,70 @@ mod tests {
             );
             assert_eq!(page_header.fragmented_free_bytes(), 3);
         }
+    }
+
+    #[test]
+    fn test_allocate_from_unallocated_space() {
+        let pager = create_empty_pager(&[], 2 * 4096);
+        let page_type = BtreePageType(BTREE_PAGE_TYPE_LEAF_TABLE);
+        let header_size = page_type.header_size();
+
+        // Tests for page 1.
+        let (page_id, page) = pager.allocate_page().unwrap();
+        assert_eq!(page_id, 1);
+        let mut buffer = pager.make_page_mut(&page).unwrap();
+        let offset = allocate_from_unallocated_space(&page, &mut buffer, header_size, 4096, 0, 100);
+        buffer[offset..offset + 100].copy_from_slice(&[1; 100]);
+        let offset =
+            allocate_from_unallocated_space(&page, &mut buffer, header_size, offset, 2, 200);
+        buffer[offset..offset + 200].copy_from_slice(&[3; 200]);
+        let offset =
+            allocate_from_unallocated_space(&page, &mut buffer, header_size, offset, 1, 300);
+        buffer[offset..offset + 300].copy_from_slice(&[2; 300]);
+        assert_eq!(offset, 4096 - 600);
+        assert_eq!(
+            get_cell_offset(&page, &buffer, 0, header_size).unwrap(),
+            3996
+        );
+        assert_eq!(&buffer[3996..4096], &[1; 100]);
+        assert_eq!(
+            get_cell_offset(&page, &buffer, 2, header_size).unwrap(),
+            3796
+        );
+        assert_eq!(&buffer[3796..3996], &[3; 200]);
+        assert_eq!(
+            get_cell_offset(&page, &buffer, 1, header_size).unwrap(),
+            3496
+        );
+        assert_eq!(&buffer[3496..3796], &[2; 300]);
+
+        // Test for page non-one.
+        let (page_id, page) = pager.allocate_page().unwrap();
+        assert_ne!(page_id, 1);
+        let mut buffer = pager.make_page_mut(&page).unwrap();
+        let offset = allocate_from_unallocated_space(&page, &mut buffer, header_size, 3000, 0, 100);
+        buffer[offset..offset + 100].copy_from_slice(&[1; 100]);
+        let offset =
+            allocate_from_unallocated_space(&page, &mut buffer, header_size, offset, 2, 200);
+        buffer[offset..offset + 200].copy_from_slice(&[3; 200]);
+        let offset =
+            allocate_from_unallocated_space(&page, &mut buffer, header_size, offset, 1, 300);
+        buffer[offset..offset + 300].copy_from_slice(&[2; 300]);
+        assert_eq!(offset, 3000 - 600);
+        assert_eq!(
+            get_cell_offset(&page, &buffer, 0, header_size).unwrap(),
+            2900
+        );
+        assert_eq!(&buffer[2900..3000], &[1; 100]);
+        assert_eq!(
+            get_cell_offset(&page, &buffer, 2, header_size).unwrap(),
+            2700
+        );
+        assert_eq!(&buffer[2700..2900], &[3; 200]);
+        assert_eq!(
+            get_cell_offset(&page, &buffer, 1, header_size).unwrap(),
+            2400
+        );
+        assert_eq!(&buffer[2400..2700], &[2; 300]);
     }
 }
