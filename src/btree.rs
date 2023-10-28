@@ -19,6 +19,7 @@ use crate::pager::MemPage;
 use crate::pager::PageBuffer;
 use crate::pager::PageBufferMut;
 use crate::pager::PageId;
+use crate::utils::len_varint_buffer;
 use crate::utils::parse_varint;
 use crate::utils::u64_to_i64;
 
@@ -28,6 +29,7 @@ type ParseResult<T> = std::result::Result<T, ParseError>;
 pub const BTREE_PAGE_INTERIOR_HEADER_SIZE: usize = 12;
 pub const BTREE_PAGE_LEAF_HEADER_SIZE: usize = 8;
 pub const BTREE_PAGE_HEADER_MAX_SIZE: usize = BTREE_PAGE_INTERIOR_HEADER_SIZE;
+pub const BTREE_PAGE_CELL_POINTER_SIZE: usize = 2;
 
 const LEAF_FLAG: u8 = 0x08;
 const INDEX_FLAG: u8 = 0x02;
@@ -45,6 +47,15 @@ fn parse_non_zero_u16(buf: [u8; 2]) -> NonZeroU32 {
     NonZeroU32::new(v).unwrap()
 }
 
+/// TODO: Find non conditional branch way.
+pub fn non_zero_to_u16(v: u32) -> u16 {
+    if v == 65536 {
+        0
+    } else {
+        v as u16
+    }
+}
+
 #[inline(always)]
 pub fn set_u16(buf: &mut [u8], offset: usize, value: u16) {
     buf[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
@@ -56,6 +67,11 @@ pub const BTREE_OVERFLOW_PAGE_ID_BYTES: usize = 4;
 pub struct BtreePageType(u8);
 
 impl BtreePageType {
+    #[inline]
+    pub fn interior_type(&self) -> Self {
+        Self(self.0 & !LEAF_FLAG)
+    }
+
     #[inline]
     pub fn is_leaf(&self) -> bool {
         self.0 & LEAF_FLAG != 0
@@ -83,6 +99,17 @@ impl BtreePageType {
         // 0(leaf) or 4(interior)
         let additional_size = is_interior >> 1;
         8 + additional_size
+    }
+
+    pub fn compute_cell_size_fn(&self) -> fn(&BtreeContext, &[u8], usize) -> ParseResult<u16> {
+        if self.is_index() {
+            todo!("index cell size");
+        }
+        if self.is_leaf() {
+            compute_table_leaf_cell_size
+        } else {
+            compute_table_interior_cell_size
+        }
     }
 }
 
@@ -186,6 +213,10 @@ impl<'a> BtreePageHeaderMut<'a> {
 
     pub fn clear_fragmented_free_bytes(&mut self) {
         self.0[7] = 0;
+    }
+
+    pub fn set_right_page_id(&mut self, page_id: PageId) {
+        self.0[8..12].copy_from_slice(&page_id.to_be_bytes());
     }
 }
 
@@ -320,6 +351,33 @@ pub fn get_cell_offset(
         return Err("cell offset out of range");
     }
     Ok(cell_offset)
+}
+
+fn compute_table_leaf_cell_size(
+    ctx: &BtreeContext,
+    // TODO: How to accept both PageBufferMut and TemporaryPage?
+    buffer: &[u8],
+    offset: usize,
+) -> ParseResult<u16> {
+    let (payload_size, payload_size_length) =
+        parse_varint(&buffer[offset..]).ok_or("parse payload size")?;
+    let key_length = len_varint_buffer(&buffer[offset + payload_size_length..]);
+    let n_local = if payload_size <= ctx.max_local(true) as u64 {
+        payload_size as u16
+    } else {
+        ctx.n_local(true, payload_size as i32)
+    };
+    Ok(payload_size_length as u16 + key_length as u16 + n_local)
+}
+
+fn compute_table_interior_cell_size(
+    _ctx: &BtreeContext,
+    // TODO: How to accept both PageBufferMut and TemporaryPage?
+    buffer: &[u8],
+    offset: usize,
+) -> ParseResult<u16> {
+    let key_length = len_varint_buffer(&buffer[offset + 4..]);
+    Ok(4 + key_length as u16)
 }
 
 /// Context containing constant values to parse btree page.
@@ -596,6 +654,26 @@ pub fn allocate_from_unallocated_space(
         new_cell_content_area_offset as u16,
     );
     new_cell_content_area_offset
+}
+
+/// Write a table leaf cell to the specified offset.
+pub fn write_table_leaf_cell(
+    buffer: &mut PageBufferMut,
+    offset: usize,
+    cell_header: &[u8],
+    local_payload: &[u8],
+    overflow_page_id: Option<PageId>,
+) {
+    // Copy payload to the btree page.
+    let payload_offset = offset + cell_header.len();
+    buffer[offset..payload_offset].copy_from_slice(cell_header);
+    let payload_tail_offset = payload_offset + local_payload.len();
+    buffer[payload_offset..payload_tail_offset].copy_from_slice(local_payload);
+    if let Some(overflow_page_id) = overflow_page_id {
+        let overflow_page_id = overflow_page_id.to_be_bytes();
+        buffer[payload_tail_offset..payload_tail_offset + overflow_page_id.len()]
+            .copy_from_slice(&overflow_page_id);
+    }
 }
 
 /// Compute the free size of the page.

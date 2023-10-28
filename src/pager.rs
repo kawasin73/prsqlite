@@ -61,7 +61,7 @@ impl<'a> Deref for PageBuffer<'a> {
 pub struct PageBufferMut<'a>(RefMut<'a, RawPage>);
 
 impl PageBufferMut<'_> {
-    pub fn swap(&mut self, buffer: &mut TemporaryPage) {
+    pub fn swap_tmp(&mut self, buffer: &mut TemporaryPage) {
         std::mem::swap(&mut self.0.buf, &mut buffer.0);
     }
 }
@@ -78,6 +78,10 @@ impl<'a> DerefMut for PageBufferMut<'a> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0.buf
     }
+}
+
+pub fn swap_page_buffer(a: &mut PageBufferMut, b: &mut PageBufferMut) {
+    std::mem::swap(&mut a.0.buf, &mut b.0.buf);
 }
 
 pub const ROOT_PAGE_ID: PageId = 1;

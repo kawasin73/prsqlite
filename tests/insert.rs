@@ -379,3 +379,46 @@ fn test_insert_freeblock() {
         &conn,
     )
 }
+
+#[test]
+fn test_insert_split() {
+    let file = create_sqlite_database(&["PRAGMA page_size = 512;", "CREATE TABLE example(col);"]);
+    let conn = Connection::open(file.path()).unwrap();
+    let magic_v = "abc".repeat(50);
+
+    for i in 0..5 {
+        for j in 0..3 {
+            for k in 0..500 {
+                let rowid = 15 * k + 5 * j + i;
+                conn.prepare(&format!(
+                    "INSERT INTO example (rowid, col) VALUES ({}, '{}{}{}');",
+                    rowid, rowid, &magic_v, rowid
+                ))
+                .unwrap()
+                .execute()
+                .unwrap();
+            }
+        }
+    }
+
+    let test_conn = rusqlite::Connection::open(file.path()).unwrap();
+    let sql = "SELECT rowid, col FROM example;";
+    let mut test_stmt = test_conn.prepare(sql).unwrap();
+    let mut test_rows = test_stmt.query([]).unwrap();
+    let stmt = conn.prepare(sql).unwrap();
+    let mut rows = stmt.query().unwrap();
+    for i in 0..3 * 5 * 500 {
+        let expected = format!("{}{}{}", i, &magic_v, i);
+        let test_row = test_rows.next().unwrap().unwrap();
+        assert_eq!(test_row.get::<_, i64>(0).unwrap(), i);
+        assert_eq!(&test_row.get::<_, String>(1).unwrap(), &expected);
+
+        let row = rows.next_row().unwrap().unwrap();
+        let columns = row.parse().unwrap();
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns.get(0), &Value::Integer(i));
+        assert_eq!(columns.get(1), &Value::Text(expected.as_bytes().into()));
+    }
+    assert!(test_rows.next().unwrap().is_none());
+    assert!(rows.next_row().unwrap().is_none());
+}
