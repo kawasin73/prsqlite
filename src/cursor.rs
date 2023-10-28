@@ -19,6 +19,7 @@ use anyhow::bail;
 use crate::btree::allocate_from_freeblocks;
 use crate::btree::allocate_from_unallocated_space;
 use crate::btree::cell_pointer_offset;
+use crate::btree::compute_free_size;
 use crate::btree::get_cell_offset;
 use crate::btree::parse_btree_interior_cell_page_id;
 use crate::btree::parse_btree_leaf_table_cell;
@@ -27,7 +28,6 @@ use crate::btree::BtreeContext;
 use crate::btree::BtreePageHeader;
 use crate::btree::BtreePageHeaderMut;
 use crate::btree::BtreePageType;
-use crate::btree::FreeblockIterator;
 use crate::btree::IndexCellKeyParser;
 use crate::btree::PayloadInfo;
 use crate::btree::TableCellKeyParser;
@@ -462,43 +462,9 @@ impl<'a> BtreeCursor<'a> {
                 todo!("update the payload");
             }
             _ => {
-                let buffer = self.current_page.mem.buffer();
-                let page_header = BtreePageHeader::from_page(&self.current_page.mem, &buffer);
-                let page_type = page_header.page_type();
-                assert!(page_type.is_table());
-                assert!(page_type.is_leaf());
+                assert!(self.current_page.page_type.is_table());
+                assert!(self.current_page.page_type.is_leaf());
 
-                let header_size = page_type.header_size();
-                let unallocated_space_offset = cell_pointer_offset(
-                    &self.current_page.mem,
-                    self.current_page.n_cells,
-                    header_size,
-                );
-                assert!(unallocated_space_offset > 0);
-                let cell_content_area_offset =
-                    page_header.cell_content_area_offset().get() as usize;
-                if cell_content_area_offset < unallocated_space_offset {
-                    bail!("invalid cell content area offset");
-                }
-
-                let unallocated_size = (cell_content_area_offset - unallocated_space_offset) as u16;
-                let first_freeblock_offset = page_header.first_freeblock_offset();
-                let fragmented_free_bytes = page_header.fragmented_free_bytes();
-
-                // TODO: Cache free size.
-                let mut free_size = unallocated_size;
-                for (_, size) in FreeblockIterator::new(first_freeblock_offset, &buffer) {
-                    free_size += size;
-                }
-                free_size += fragmented_free_bytes as u16;
-
-                if free_size < cell_size + 2 {
-                    // TODO: balance the btree.
-                    todo!("balance the btree");
-                }
-
-                // Upgrade the buffer to writable.
-                drop(buffer);
                 // Upgrading should be success because there must be no buffer reference of the
                 // page. We can guarantee it because:
                 //
@@ -507,6 +473,34 @@ impl<'a> BtreeCursor<'a> {
                 //   get_table_payload(). However the payload is dropped before calling insert()
                 //   which is mutable method.
                 let mut buffer = self.pager.make_page_mut(&self.current_page.mem)?;
+
+                // TODO: Cache free size.
+                let free_size =
+                    compute_free_size(&self.current_page.mem, &buffer, self.current_page.n_cells)
+                        .map_err(|e| anyhow::anyhow!("compute free size: {:?}", e))?;
+
+                if free_size < cell_size + 2 {
+                    // TODO: balance the btree.
+                    todo!("balance the btree");
+                }
+
+                let page_header = BtreePageHeader::from_page_mut(&self.current_page.mem, &buffer);
+                let page_type = self.current_page.page_type;
+                let header_size = page_type.header_size();
+                let first_freeblock_offset = page_header.first_freeblock_offset();
+                let cell_content_area_offset =
+                    page_header.cell_content_area_offset().get() as usize;
+                let unallocated_space_offset = cell_pointer_offset(
+                    &self.current_page.mem,
+                    self.current_page.n_cells,
+                    header_size,
+                );
+                let fragmented_free_bytes = page_header.fragmented_free_bytes();
+                // unallocated_size must fit in u16 because cell_content_area_offset is at most
+                // 65536 and unallocated_space_offset must be bigger than 0.
+                // cell_content_area_offset < unallocated_space_offset is asserted in
+                // compute_free_size().
+                let unallocated_size = (cell_content_area_offset - unallocated_space_offset) as u16;
 
                 // Allocate space
                 //
@@ -805,6 +799,7 @@ impl<'a> BtreeCursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::btree::FreeblockIterator;
     use crate::header::DATABASE_HEADER_SIZE;
     use crate::pager::MAX_PAGE_SIZE;
     use crate::record::parse_record;

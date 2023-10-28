@@ -52,6 +52,7 @@ pub fn set_u16(buf: &mut [u8], offset: usize, value: u16) {
 
 pub const BTREE_OVERFLOW_PAGE_ID_BYTES: usize = 4;
 
+#[derive(Debug, Clone, Copy)]
 pub struct BtreePageType(u8);
 
 impl BtreePageType {
@@ -597,6 +598,37 @@ pub fn allocate_from_unallocated_space(
     new_cell_content_area_offset
 }
 
+/// Compute the free size of the page.
+///
+/// n_cells is an argument because this is cached in cursor.
+pub fn compute_free_size(page: &MemPage, buffer: &PageBufferMut, n_cells: u16) -> ParseResult<u16> {
+    let page_header = BtreePageHeader::from_page_mut(page, buffer);
+    let header_size = page_header.page_type().header_size();
+    let first_freeblock_offset = page_header.first_freeblock_offset();
+    let cell_content_area_offset = page_header.cell_content_area_offset().get() as usize;
+    let fragmented_free_bytes = page_header.fragmented_free_bytes();
+    let unallocated_space_offset = cell_pointer_offset(page, n_cells, header_size);
+
+    if cell_content_area_offset < unallocated_space_offset {
+        return Err("invalid cell content area offset");
+    }
+
+    // unallocated_size must fit in u16 because cell_content_area_offset is at most
+    // 65536 and unallocated_space_offset must be bigger than 0.
+    let unallocated_size = (cell_content_area_offset - unallocated_space_offset) as u16;
+
+    let mut free_size = unallocated_size;
+    for (freeblock_offset, size) in FreeblockIterator::new(first_freeblock_offset, buffer) {
+        if freeblock_offset < cell_content_area_offset {
+            return Err("invalid freeblock offset");
+        }
+        free_size += size;
+    }
+    free_size += fragmented_free_bytes as u16;
+
+    Ok(free_size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -989,5 +1021,65 @@ mod tests {
             2400
         );
         assert_eq!(&buffer[2400..2700], &[2; 300]);
+    }
+
+    #[test]
+    fn test_compute_free_size() {
+        let pager = create_empty_pager(&[], 2 * 4096);
+        let page_type = BtreePageType(BTREE_PAGE_TYPE_LEAF_TABLE);
+
+        let (page_id, page) = pager.allocate_page().unwrap();
+        assert_eq!(page_id, 1);
+        let mut buffer = pager.make_page_mut(&page).unwrap();
+        let mut page_header = BtreePageHeaderMut::from_page(&page, &mut buffer);
+        page_header.set_page_type(page_type);
+        page_header.set_cell_content_area_offset(4096);
+        page_header.set_first_freeblock_offset(0);
+        page_header.clear_fragmented_free_bytes();
+        assert_eq!(compute_free_size(&page, &buffer, 0).unwrap(), 3988);
+
+        let mut page_header = BtreePageHeaderMut::from_page(&page, &mut buffer);
+        page_header.set_cell_content_area_offset(4000);
+        page_header.add_fragmented_free_bytes(3);
+        assert_eq!(compute_free_size(&page, &buffer, 0).unwrap(), 3895);
+        assert_eq!(compute_free_size(&page, &buffer, 10).unwrap(), 3875);
+
+        let mut page_header = BtreePageHeaderMut::from_page(&page, &mut buffer);
+        page_header.set_cell_content_area_offset(2000);
+        page_header.set_first_freeblock_offset(3000);
+        // freeblock 3000 ~ 3010
+        set_u16(&mut buffer, 3000, 3100);
+        set_u16(&mut buffer, 3002, 10);
+        // freeblock 3100 ~ 3200
+        set_u16(&mut buffer, 3100, 0);
+        set_u16(&mut buffer, 3102, 100);
+        assert_eq!(compute_free_size(&page, &buffer, 10).unwrap(), 1985);
+
+        let (page_id, page) = pager.allocate_page().unwrap();
+        assert_ne!(page_id, 1);
+        let mut buffer = pager.make_page_mut(&page).unwrap();
+        let mut page_header = BtreePageHeaderMut::from_page(&page, &mut buffer);
+        page_header.set_page_type(page_type);
+        page_header.set_cell_content_area_offset(4096);
+        page_header.set_first_freeblock_offset(0);
+        page_header.clear_fragmented_free_bytes();
+        assert_eq!(compute_free_size(&page, &buffer, 0).unwrap(), 4088);
+
+        let mut page_header = BtreePageHeaderMut::from_page(&page, &mut buffer);
+        page_header.set_cell_content_area_offset(4000);
+        page_header.add_fragmented_free_bytes(3);
+        assert_eq!(compute_free_size(&page, &buffer, 0).unwrap(), 3995);
+        assert_eq!(compute_free_size(&page, &buffer, 10).unwrap(), 3975);
+
+        let mut page_header = BtreePageHeaderMut::from_page(&page, &mut buffer);
+        page_header.set_cell_content_area_offset(2000);
+        page_header.set_first_freeblock_offset(3000);
+        // freeblock 3000 ~ 3010
+        set_u16(&mut buffer, 3000, 3100);
+        set_u16(&mut buffer, 3002, 10);
+        // freeblock 3100 ~ 3200
+        set_u16(&mut buffer, 3100, 0);
+        set_u16(&mut buffer, 3102, 100);
+        assert_eq!(compute_free_size(&page, &buffer, 10).unwrap(), 2085);
     }
 }
