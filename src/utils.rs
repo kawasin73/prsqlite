@@ -76,12 +76,27 @@ pub fn unsafe_parse_varint(buf: &[u8]) -> (u64, usize) {
 }
 
 /// Length of varint in the buffer.
-pub fn len_varint_buffer(buf: &[u8]) -> usize {
+pub fn len_varint_buffer(buf: &[u8]) -> Option<usize> {
+    for (i, v2) in buf.iter().enumerate().take(8) {
+        if *v2 & VARINT_FLAG_MASK == 0 {
+            return Some(i + 1);
+        }
+    }
+    if buf.len() >= 9 {
+        Some(9)
+    } else {
+        None
+    }
+}
+
+#[allow(dead_code)]
+pub fn unsafe_len_varint_buffer(buf: &[u8]) -> usize {
     for (i, v2) in buf.iter().enumerate().take(8) {
         if *v2 & VARINT_FLAG_MASK == 0 {
             return i + 1;
         }
     }
+    assert!(buf.len() >= 9);
     9
 }
 
@@ -737,7 +752,8 @@ mod tests {
             // valid as varint
             assert!(parse_varint(buf).is_some());
 
-            assert_eq!(len_varint_buffer(buf), buf.len());
+            assert_eq!(len_varint_buffer(buf).unwrap(), buf.len());
+            assert_eq!(unsafe_len_varint_buffer(buf), buf.len());
         }
     }
 
@@ -745,15 +761,21 @@ mod tests {
     fn test_parse_varint_consume() {
         let (_, consumed) = unsafe_parse_varint(&[0, 0]);
         assert_eq!(consumed, 1);
-        assert_eq!(len_varint_buffer(&[0, 0]), 1);
+        assert_eq!(len_varint_buffer(&[0, 0]).unwrap(), 1);
+        assert_eq!(unsafe_len_varint_buffer(&[0, 0]), 1);
         let (_, consumed) = unsafe_parse_varint(&[129, 0, 0]);
         assert_eq!(consumed, 2);
-        assert_eq!(len_varint_buffer(&[129, 0, 0]), 2);
+        assert_eq!(len_varint_buffer(&[129, 0, 0]).unwrap(), 2);
+        assert_eq!(unsafe_len_varint_buffer(&[129, 0, 0]), 2);
         let (_, consumed) =
             unsafe_parse_varint(&[255, 255, 255, 255, 255, 255, 255, 255, 255, 255]);
         assert_eq!(consumed, 9);
         assert_eq!(
-            len_varint_buffer(&[255, 255, 255, 255, 255, 255, 255, 255, 255, 255]),
+            len_varint_buffer(&[255, 255, 255, 255, 255, 255, 255, 255, 255, 255]).unwrap(),
+            9
+        );
+        assert_eq!(
+            unsafe_len_varint_buffer(&[255, 255, 255, 255, 255, 255, 255, 255, 255, 255]),
             9
         );
     }
@@ -774,6 +796,7 @@ mod tests {
         ] as [&[u8]; 10]
         {
             assert!(parse_varint(buf).is_none());
+            assert!(len_varint_buffer(buf).is_none());
         }
     }
 

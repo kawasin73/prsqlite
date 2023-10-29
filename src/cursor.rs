@@ -863,6 +863,7 @@ impl<'a> BtreeCursor<'a> {
                     let key_offset_in_cell = if current_page.page_type.is_leaf() {
                         // payload_size_length
                         len_varint_buffer(&left_buffer[cell_offset..])
+                            .ok_or_else(|| anyhow::anyhow!("payload size len"))?
                     } else {
                         // Set the right page id of the left page.
                         // No header offset calibration because both pages must not page 1
@@ -875,7 +876,8 @@ impl<'a> BtreeCursor<'a> {
                         4
                     };
                     let key_offset = cell_offset + key_offset_in_cell;
-                    let key_length = len_varint_buffer(&left_buffer[key_offset..]);
+                    let key_length = len_varint_buffer(&left_buffer[key_offset..])
+                        .ok_or_else(|| anyhow::anyhow!("key length"))?;
                     interior_cell_buf[4..4 + key_length]
                         .copy_from_slice(&left_buffer[key_offset..key_offset + key_length]);
                     key_length as u16

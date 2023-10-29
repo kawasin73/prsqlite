@@ -361,7 +361,8 @@ fn compute_table_leaf_cell_size(
 ) -> ParseResult<u16> {
     let (payload_size, payload_size_length) =
         parse_varint(&buffer[offset..]).ok_or("parse payload size")?;
-    let key_length = len_varint_buffer(&buffer[offset + payload_size_length..]);
+    let key_length =
+        len_varint_buffer(&buffer[offset + payload_size_length..]).ok_or("key length")?;
     let n_local = if payload_size <= ctx.max_local(true) as u64 {
         payload_size as u16
     } else {
@@ -376,7 +377,7 @@ fn compute_table_interior_cell_size(
     buffer: &[u8],
     offset: usize,
 ) -> ParseResult<u16> {
-    let key_length = len_varint_buffer(&buffer[offset + 4..]);
+    let key_length = len_varint_buffer(&buffer[offset + 4..]).ok_or("key length")?;
     Ok(4 + key_length as u16)
 }
 
