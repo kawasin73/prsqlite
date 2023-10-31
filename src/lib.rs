@@ -43,6 +43,7 @@ use header::DatabaseHeaderMut;
 use header::DATABASE_HEADER_SIZE;
 use pager::PageId;
 use pager::Pager;
+use pager::PAGE_ID_1;
 use parser::expect_no_more_token;
 use parser::expect_semicolon;
 use parser::parse_sql;
@@ -363,7 +364,7 @@ struct WriteTransaction<'a> {
 impl WriteTransaction<'_> {
     fn commit(mut self) -> anyhow::Result<()> {
         if self.conn.pager.is_file_size_changed() {
-            let page1 = self.conn.pager.get_page(1)?;
+            let page1 = self.conn.pager.get_page(PAGE_ID_1)?;
             let mut buffer = self.conn.pager.make_page_mut(&page1)?;
             let header_buf = &mut buffer[..DATABASE_HEADER_SIZE];
             let mut header = DatabaseHeaderMut::from(header_buf.try_into().unwrap());

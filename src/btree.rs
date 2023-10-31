@@ -180,8 +180,9 @@ impl<'page> BtreePageHeader<'page> {
     /// The right-most pointer
     ///
     /// This is only valid when the page is a interior page.
-    pub fn right_page_id(&self) -> PageId {
-        u32::from_be_bytes(self.0[8..12].try_into().unwrap())
+    pub fn right_page_id(&self) -> ParseResult<PageId> {
+        PageId::new(u32::from_be_bytes(self.0[8..12].try_into().unwrap()))
+            .ok_or(FileCorrupt("right page id is zero"))
     }
 }
 
@@ -227,7 +228,7 @@ impl<'a> BtreePageHeaderMut<'a> {
     }
 
     pub fn set_right_page_id(&mut self, page_id: PageId) {
-        self.0[8..12].copy_from_slice(&page_id.to_be_bytes());
+        self.0[8..12].copy_from_slice(&page_id.get().to_be_bytes());
     }
 }
 
@@ -446,7 +447,7 @@ pub struct OverflowPage {
 
 impl OverflowPage {
     pub fn page_id(&self) -> PageId {
-        self.page_id.get()
+        self.page_id
     }
 
     pub fn parse<'a>(
@@ -454,28 +455,27 @@ impl OverflowPage {
         ctx: &BtreeContext,
         buffer: &'a PageBuffer<'a>,
     ) -> ParseResult<(&'a [u8], Option<OverflowPage>)> {
-        let next_page_id =
-            PageId::from_be_bytes(buffer[..BTREE_OVERFLOW_PAGE_ID_BYTES].try_into().unwrap());
-        if next_page_id == 0 {
-            let tail = BTREE_OVERFLOW_PAGE_ID_BYTES + self.remaining_size as usize;
-            if buffer.len() >= tail {
-                Ok((&buffer[BTREE_OVERFLOW_PAGE_ID_BYTES..tail], None))
-            } else {
-                Err(FileCorrupt("overflow payload does not have next page id"))
-            }
-        } else {
+        if let Some(next_page_id) = PageId::new(u32::from_be_bytes(
+            buffer[..BTREE_OVERFLOW_PAGE_ID_BYTES].try_into().unwrap(),
+        )) {
             let payload = &buffer[BTREE_OVERFLOW_PAGE_ID_BYTES..ctx.usable_size as usize];
             if self.remaining_size > payload.len() as i32 {
                 Ok((
                     payload,
                     Some(Self {
-                        // next_page_id is not zero here.
-                        page_id: NonZeroU32::new(next_page_id).unwrap(),
+                        page_id: next_page_id,
                         remaining_size: self.remaining_size - payload.len() as i32,
                     }),
                 ))
             } else {
                 Err(FileCorrupt("overflow page has too many next page"))
+            }
+        } else {
+            let tail = BTREE_OVERFLOW_PAGE_ID_BYTES + self.remaining_size as usize;
+            if buffer.len() >= tail {
+                Ok((&buffer[BTREE_OVERFLOW_PAGE_ID_BYTES..tail], None))
+            } else {
+                Err(FileCorrupt("overflow payload does not have next page id"))
             }
         }
     }
@@ -519,18 +519,16 @@ impl PayloadInfo {
             if tail_payload + BTREE_OVERFLOW_PAGE_ID_BYTES > buffer.len() {
                 return Err(FileCorrupt("next page id out of range"));
             }
-            let next_page_id = PageId::from_be_bytes(
+            if let Some(next_page_id) = PageId::new(u32::from_be_bytes(
                 buffer[tail_payload..tail_payload + BTREE_OVERFLOW_PAGE_ID_BYTES]
                     .try_into()
                     .unwrap(),
-            );
-            if next_page_id > 0 {
+            )) {
                 Ok(Self {
                     payload_size,
                     local_range: offset..tail_payload,
                     overflow: Some(OverflowPage {
-                        // next_page_id > 0 is asserted.
-                        page_id: NonZeroU32::new(next_page_id).unwrap(),
+                        page_id: next_page_id,
                         remaining_size: payload_size - payload_size_in_cell as i32,
                     }),
                 })
@@ -592,7 +590,10 @@ pub fn parse_btree_interior_cell_page_id(
     if cell_offset + 5 > buffer.len() {
         return Err(FileCorrupt("btree interior cell buffer is too short"));
     }
-    let page_id = PageId::from_be_bytes(buffer[cell_offset..cell_offset + 4].try_into().unwrap());
+    let page_id = PageId::new(u32::from_be_bytes(
+        buffer[cell_offset..cell_offset + 4].try_into().unwrap(),
+    ))
+    .ok_or(FileCorrupt("btree interior cell page id is zero"))?;
     Ok(page_id)
 }
 
@@ -680,7 +681,7 @@ pub fn write_table_leaf_cell(
     let payload_tail_offset = payload_offset + local_payload.len();
     buffer[payload_offset..payload_tail_offset].copy_from_slice(local_payload);
     if let Some(overflow_page_id) = overflow_page_id {
-        let overflow_page_id = overflow_page_id.to_be_bytes();
+        let overflow_page_id = overflow_page_id.get().to_be_bytes();
         buffer[payload_tail_offset..payload_tail_offset + overflow_page_id.len()]
             .copy_from_slice(&overflow_page_id);
     }
@@ -720,6 +721,7 @@ pub fn compute_free_size(page: &MemPage, buffer: &PageBufferMut, n_cells: u16) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pager::PAGE_ID_1;
     use crate::test_utils::*;
     use crate::utils::unsafe_parse_varint;
 
@@ -778,10 +780,10 @@ mod tests {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
 
-        let page1 = pager.get_page(1).unwrap();
+        let page1 = pager.get_page(PAGE_ID_1).unwrap();
         let buffer1 = page1.buffer();
         let page1_header = BtreePageHeader::from_page(&page1, &buffer1);
-        let page2 = pager.get_page(2).unwrap();
+        let page2 = pager.get_page(PageId::new(2).unwrap()).unwrap();
         let buffer2 = page2.buffer();
         let page2_header = BtreePageHeader::from_page(&page2, &buffer2);
 
@@ -873,12 +875,12 @@ mod tests {
         content[MAX_PAGESIZE + header_size..MAX_PAGESIZE + header_size + 2]
             .copy_from_slice(&1000_u16.to_be_bytes());
         let pager = create_empty_pager(&content, MAX_PAGESIZE as u32);
-        let page = pager.get_page(1).unwrap();
+        let page = pager.get_page(PAGE_ID_1).unwrap();
         let buffer = page.buffer();
         // offset 0 is translated to 1 << 16.
         assert_eq!(get_cell_offset(&page, &buffer, 0, 12).unwrap(), 1 << 16);
 
-        let page = pager.get_page(2).unwrap();
+        let page = pager.get_page(PageId::new(2).unwrap()).unwrap();
         let buffer = page.buffer();
         assert_eq!(get_cell_offset(&page, &buffer, 0, 12).unwrap(), 1000);
     }
@@ -887,7 +889,7 @@ mod tests {
     fn test_parse_btree_leaf_table_cell() {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
-        let page1 = pager.get_page(1).unwrap();
+        let page1 = pager.get_page(PAGE_ID_1).unwrap();
         let buffer1 = page1.buffer();
         let bctx = load_btree_context(file.as_file()).unwrap();
         let page1_header = BtreePageHeader::from_page(&page1, &buffer1);
@@ -957,11 +959,11 @@ mod tests {
         let pager = create_empty_pager(&[], 4096 * 2);
 
         let (page_id, _) = pager.allocate_page().unwrap();
-        assert_eq!(page_id, 1);
+        assert_eq!(page_id, PAGE_ID_1);
         let (page_id, _) = pager.allocate_page().unwrap();
-        assert_eq!(page_id, 2);
+        assert_eq!(page_id.get(), 2);
 
-        for page_id in [1, 2] {
+        for page_id in [PAGE_ID_1, PageId::new(2).unwrap()] {
             let page = pager.get_page(page_id).unwrap();
             let mut buffer = pager.make_page_mut(&page).unwrap();
 
@@ -1054,7 +1056,7 @@ mod tests {
 
         // Tests for page 1.
         let (page_id, page) = pager.allocate_page().unwrap();
-        assert_eq!(page_id, 1);
+        assert_eq!(page_id, PAGE_ID_1);
         let mut buffer = pager.make_page_mut(&page).unwrap();
         let offset = allocate_from_unallocated_space(&page, &mut buffer, header_size, 4096, 0, 100);
         buffer[offset..offset + 100].copy_from_slice(&[1; 100]);
@@ -1083,7 +1085,7 @@ mod tests {
 
         // Test for page non-one.
         let (page_id, page) = pager.allocate_page().unwrap();
-        assert_ne!(page_id, 1);
+        assert_ne!(page_id, PAGE_ID_1);
         let mut buffer = pager.make_page_mut(&page).unwrap();
         let offset = allocate_from_unallocated_space(&page, &mut buffer, header_size, 3000, 0, 100);
         buffer[offset..offset + 100].copy_from_slice(&[1; 100]);
@@ -1117,7 +1119,7 @@ mod tests {
         let page_type = BtreePageType(BTREE_PAGE_TYPE_LEAF_TABLE);
 
         let (page_id, page) = pager.allocate_page().unwrap();
-        assert_eq!(page_id, 1);
+        assert_eq!(page_id, PAGE_ID_1);
         let mut buffer = pager.make_page_mut(&page).unwrap();
         let mut page_header = BtreePageHeaderMut::from_page(&page, &mut buffer);
         page_header.set_page_type(page_type);
@@ -1144,7 +1146,7 @@ mod tests {
         assert_eq!(compute_free_size(&page, &buffer, 10).unwrap(), 1985);
 
         let (page_id, page) = pager.allocate_page().unwrap();
-        assert_ne!(page_id, 1);
+        assert_ne!(page_id, PAGE_ID_1);
         let mut buffer = pager.make_page_mut(&page).unwrap();
         let mut page_header = BtreePageHeaderMut::from_page(&page, &mut buffer);
         page_header.set_page_type(page_type);

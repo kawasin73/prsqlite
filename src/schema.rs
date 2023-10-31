@@ -21,7 +21,7 @@ use anyhow::Context;
 
 pub use crate::btree::*;
 use crate::pager::PageId;
-use crate::pager::ROOT_PAGE_ID;
+use crate::pager::PAGE_ID_1;
 use crate::parser::expect_no_more_token;
 use crate::parser::parse_create_index;
 use crate::parser::parse_create_table;
@@ -42,7 +42,7 @@ struct SchemaRecord<'a> {
     type_: &'a [u8],
     name: &'a [u8],
     table_name: &'a [u8],
-    root_page_id: u32,
+    root_page_id: PageId,
     sql: Option<&'a [u8]>,
 }
 
@@ -63,7 +63,12 @@ impl<'a> SchemaRecord<'a> {
         let Value::Integer(root_page_id) = columns.get(3) else {
             bail!("invalid root_page_id: {:?}", columns.get(3));
         };
-        let root_page_id = (*root_page_id).try_into().context("parse root_page_id")?;
+        let root_page_id = PageId::new(
+            (*root_page_id)
+                .try_into()
+                .context("root_page_id not fit u32")?,
+        )
+        .ok_or_else(|| anyhow::anyhow!("root_page_id is zero"))?;
 
         let sql: Option<&[u8]> = match columns.get(4) {
             Value::Null => None,
@@ -90,7 +95,7 @@ pub struct Schema {
 impl Schema {
     pub fn schema_table() -> Table {
         Table {
-            root_page_id: ROOT_PAGE_ID,
+            root_page_id: PAGE_ID_1,
             columns: vec![
                 Column {
                     name: b"type".to_vec(),
@@ -496,7 +501,7 @@ mod tests {
         ]);
         let schema = generate_schema(file.path());
 
-        assert_eq!(schema.get_table(b"example2").unwrap().root_page_id, 3);
+        assert_eq!(schema.get_table(b"example2").unwrap().root_page_id.get(), 3);
     }
 
     #[test]
@@ -513,7 +518,10 @@ mod tests {
         let schema = generate_schema(file.path());
 
         assert!(pager.num_pages() > 1);
-        assert_eq!(schema.get_table(b"example99").unwrap().root_page_id, 104);
+        assert_eq!(
+            schema.get_table(b"example99").unwrap().root_page_id.get(),
+            104
+        );
     }
 
     #[test]
@@ -527,7 +535,7 @@ mod tests {
 
         assert_eq!(
             schema.get_table(b"sqlite_schema").unwrap().root_page_id,
-            ROOT_PAGE_ID
+            PAGE_ID_1
         );
     }
 
@@ -540,11 +548,11 @@ mod tests {
         ]);
         let schema = generate_schema(file.path());
 
-        assert_eq!(schema.get_table(b"example2").unwrap().root_page_id, 3);
-        assert_eq!(schema.get_table(b"exaMple2").unwrap().root_page_id, 3);
+        assert_eq!(schema.get_table(b"example2").unwrap().root_page_id.get(), 3);
+        assert_eq!(schema.get_table(b"exaMple2").unwrap().root_page_id.get(), 3);
         assert_eq!(
             schema.get_table(b"sqlite_Schema").unwrap().root_page_id,
-            ROOT_PAGE_ID
+            PAGE_ID_1
         );
     }
 
@@ -564,14 +572,14 @@ mod tests {
     fn parse_table() {
         let (table_name, table) = Table::parse(
             b"create table example(col, col1 integer primary key, \"col2\" text, `co``l3` blob, [col4] real, col5 other)",
-            1,
+            PAGE_ID_1,
         )
         .unwrap();
         assert_eq!(table_name, b"example");
         assert_eq!(
             table,
             Table {
-                root_page_id: 1,
+                root_page_id: PAGE_ID_1,
                 columns: vec![
                     Column {
                         name: b"col".to_vec(),
@@ -617,18 +625,22 @@ mod tests {
         // multiple primary key
         assert!(Table::parse(
             b"create table example(col, col1 integer primary key, col2 text primary key)",
-            1
+            PAGE_ID_1
         )
         .is_err());
         // duplicated column name
-        assert!(Table::parse(b"create table example(col, cOl integer)", 2).is_err());
+        assert!(Table::parse(
+            b"create table example(col, cOl integer)",
+            PageId::new(2).unwrap()
+        )
+        .is_err());
     }
 
     #[test]
     fn test_parse_table_collation() {
         let (_, table) = Table::parse(
             b"create table example(col, col1 collate binary primary key, col2 collate nocase, col3 text collate rtrim, col4 collate binary collate nocase collate rtrim)",
-            1,
+            PAGE_ID_1,
         )
         .unwrap();
 
@@ -640,7 +652,7 @@ mod tests {
 
         let (_, table) = Table::parse(
             b"create table example(col1 collate BINARY primary key, col2 collate NOCASE, col3 text collate RTRIM, col4 collate NoCase, col5 collate \"NoCase\")",
-            1,
+            PAGE_ID_1,
         )
         .unwrap();
 
@@ -653,7 +665,7 @@ mod tests {
         // unknown collation
         assert!(Table::parse(
             b"create table example(col collate invalid collate binary)",
-            1,
+            PAGE_ID_1,
         )
         .is_err());
     }
@@ -672,7 +684,7 @@ mod tests {
         assert_eq!(
             schema.get_table(b"example").unwrap(),
             &Table {
-                root_page_id: 2,
+                root_page_id: PageId::new(2).unwrap(),
                 columns: vec![Column {
                     name: b"col".to_vec(),
                     type_affinity: TypeAffinity::Blob,
@@ -997,12 +1009,12 @@ mod tests {
         let schema = generate_schema(file.path());
 
         let index1 = Rc::new(Index {
-            root_page_id: 3,
+            root_page_id: PageId::new(3).unwrap(),
             columns: vec![ColumnNumber::Column(0)],
             next: None,
         });
         let index2 = Rc::new(Index {
-            root_page_id: 4,
+            root_page_id: PageId::new(4).unwrap(),
             columns: vec![ColumnNumber::Column(0), ColumnNumber::Column(1)],
             next: Some(index1.clone()),
         });
@@ -1020,12 +1032,12 @@ mod tests {
         let schema = generate_schema(file.path());
 
         let index1 = Rc::new(Index {
-            root_page_id: 3,
+            root_page_id: PageId::new(3).unwrap(),
             columns: vec![ColumnNumber::Column(0)],
             next: None,
         });
         let index2 = Rc::new(Index {
-            root_page_id: 4,
+            root_page_id: PageId::new(4).unwrap(),
             columns: vec![ColumnNumber::Column(0), ColumnNumber::Column(1)],
             next: Some(index1.clone()),
         });
@@ -1045,12 +1057,12 @@ mod tests {
         let table = schema.get_table(b"example").unwrap();
 
         let index1 = Rc::new(Index {
-            root_page_id: 3,
+            root_page_id: PageId::new(3).unwrap(),
             columns: vec![ColumnNumber::Column(0)],
             next: None,
         });
         let index2 = Rc::new(Index {
-            root_page_id: 4,
+            root_page_id: PageId::new(4).unwrap(),
             columns: vec![ColumnNumber::Column(0), ColumnNumber::Column(1)],
             next: Some(index1.clone()),
         });
@@ -1066,8 +1078,8 @@ mod tests {
         ]);
         let schema = generate_schema(file.path());
 
-        assert_eq!(schema.get_index(b"index1").unwrap().root_page_id, 3);
-        assert_eq!(schema.get_index(b"inDex2").unwrap().root_page_id, 4);
+        assert_eq!(schema.get_index(b"index1").unwrap().root_page_id.get(), 3);
+        assert_eq!(schema.get_index(b"inDex2").unwrap().root_page_id.get(), 4);
     }
 
     #[test]
@@ -1086,17 +1098,22 @@ mod tests {
     fn parse_index() {
         let (_, table) = Table::parse(
             b"create table example(col1, id integer primary key, col2)",
-            1,
+            PAGE_ID_1,
         )
         .unwrap();
-        let (index_name, table_name, index) =
-            Index::parse(b"create index index1 on example(id, col1, col2)", 3, &table).unwrap();
+        let page_id = PageId::new(3).unwrap();
+        let (index_name, table_name, index) = Index::parse(
+            b"create index index1 on example(id, col1, col2)",
+            page_id,
+            &table,
+        )
+        .unwrap();
         assert_eq!(index_name, b"index1");
         assert_eq!(table_name, b"example".as_slice().into());
         assert_eq!(
             index,
             Index {
-                root_page_id: 3,
+                root_page_id: page_id,
                 columns: vec![
                     ColumnNumber::RowId,
                     ColumnNumber::Column(0),
@@ -1106,10 +1123,15 @@ mod tests {
             }
         );
         // unknown column
-        assert!(Index::parse(b"create index index1 on example(col1, invalid)", 3, &table).is_err());
+        assert!(Index::parse(
+            b"create index index1 on example(col1, invalid)",
+            page_id,
+            &table
+        )
+        .is_err());
         // unknown table
         let (_, table_name, _) =
-            Index::parse(b"create index index1 on invalid(col1)", 3, &table).unwrap();
+            Index::parse(b"create index index1 on invalid(col1)", page_id, &table).unwrap();
         assert_eq!(table_name, b"invalid".as_slice().into());
     }
 }

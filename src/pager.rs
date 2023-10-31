@@ -19,6 +19,7 @@ use std::cell::RefMut;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fs::File;
+use std::num::NonZeroU32;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::os::unix::fs::FileExt;
@@ -28,9 +29,14 @@ use anyhow::bail;
 
 use crate::DATABASE_HEADER_SIZE;
 
+/// Page 1 is special:
+///
+/// * It contains the database header.
+/// * It is the root page of sqlite_schema table.
+pub const PAGE_ID_1: PageId = NonZeroU32::MIN;
 pub const MAX_PAGE_SIZE: usize = 65536;
 
-pub type PageId = u32;
+pub type PageId = NonZeroU32;
 
 pub struct TemporaryPage(Vec<u8>);
 
@@ -84,8 +90,6 @@ pub fn swap_page_buffer(a: &mut PageBufferMut, b: &mut PageBufferMut) {
     std::mem::swap(&mut a.0.buf, &mut b.0.buf);
 }
 
-pub const ROOT_PAGE_ID: PageId = 1;
-
 pub struct Pager {
     file: File,
     n_pages: Cell<u32>,
@@ -114,12 +118,13 @@ impl Pager {
 
         let page_id = self.n_pages.get() + 1;
         self.n_pages.set(page_id);
+        let page_id = PageId::new(page_id).unwrap();
         let (page, is_new) = self.cache.get_page(page_id);
         assert!(is_new);
         page.borrow_mut().is_dirty = true;
         // TODO: setup journal
 
-        let header_offset = if page_id == 1 {
+        let header_offset = if page_id == PAGE_ID_1 {
             DATABASE_HEADER_SIZE
         } else {
             0
@@ -137,24 +142,25 @@ impl Pager {
         TemporaryPage(vec![0_u8; self.cache.pagesize as usize])
     }
 
-    pub fn get_page(&self, id: PageId) -> anyhow::Result<MemPage> {
-        match id {
-            0 => bail!("page id starts from 1"),
-            id if id > self.n_pages.get() => bail!("page id exceeds file size"),
-            id => {
-                let (page, is_new) = self.cache.get_page(id);
-                if is_new {
-                    let mut raw_page = page.borrow_mut();
-                    self.file
-                        .read_exact_at(&mut raw_page.buf, self.page_offset(id))?;
-                }
-                let header_offset = if id == 1 { DATABASE_HEADER_SIZE } else { 0 };
-                Ok(MemPage {
-                    page,
-                    header_offset,
-                })
-            }
+    pub fn get_page(&self, page_id: PageId) -> anyhow::Result<MemPage> {
+        if page_id.get() > self.n_pages.get() {
+            bail!("page id exceeds file size");
         }
+        let (page, is_new) = self.cache.get_page(page_id);
+        if is_new {
+            let mut raw_page = page.borrow_mut();
+            self.file
+                .read_exact_at(&mut raw_page.buf, self.page_offset(page_id))?;
+        }
+        let header_offset = if page_id == PAGE_ID_1 {
+            DATABASE_HEADER_SIZE
+        } else {
+            0
+        };
+        Ok(MemPage {
+            page,
+            header_offset,
+        })
     }
 
     pub fn make_page_mut<'a>(&self, page: &'a MemPage) -> anyhow::Result<PageBufferMut<'a>> {
@@ -208,7 +214,7 @@ impl Pager {
 
     #[inline]
     fn page_offset(&self, page_id: PageId) -> u64 {
-        (page_id - 1) as u64 * self.cache.pagesize as u64
+        (page_id.get() - 1) as u64 * self.cache.pagesize as u64
     }
 }
 

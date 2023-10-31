@@ -217,14 +217,13 @@ impl<'a> BtreeCursor<'a> {
 
             let next_page_id = if i_min == self.current_page.n_cells as usize {
                 let page_header = BtreePageHeader::from_page(&self.current_page.mem, &buffer);
-                page_header.right_page_id()
+                page_header.right_page_id()?
             } else {
                 parse_btree_interior_cell_page_id(
                     &self.current_page.mem,
                     &buffer,
                     self.current_page.idx_cell,
-                )
-                .map_err(|e| anyhow::anyhow!("get btree interior cell page id: {:?}", e))?
+                )?
             };
             drop(buffer);
             self.move_to_child(next_page_id)?;
@@ -295,14 +294,13 @@ impl<'a> BtreeCursor<'a> {
 
             let next_page_id = if i_min == self.current_page.n_cells as usize {
                 let page_header = BtreePageHeader::from_page(&self.current_page.mem, &buffer);
-                page_header.right_page_id()
+                page_header.right_page_id()?
             } else {
                 parse_btree_interior_cell_page_id(
                     &self.current_page.mem,
                     &buffer,
                     self.current_page.idx_cell,
-                )
-                .map_err(|e| anyhow::anyhow!("get btree interior cell page id: {:?}", e))?
+                )?
             };
             drop(buffer);
             self.move_to_child(next_page_id)?;
@@ -327,7 +325,7 @@ impl<'a> BtreeCursor<'a> {
             while !self.current_page.page_type.is_leaf() {
                 let buffer = self.current_page.mem.buffer();
                 let page_header = BtreePageHeader::from_page(&self.current_page.mem, &buffer);
-                let page_id = page_header.right_page_id();
+                let page_id = page_header.right_page_id()?;
                 drop(buffer);
                 self.move_to_child(page_id)?;
             }
@@ -430,7 +428,7 @@ impl<'a> BtreeCursor<'a> {
             while i_overflow_payload + usable_size_overflow < payload.len() {
                 let (next_page_id, next_page) = self.pager.allocate_page()?;
                 let mut buffer = self.pager.make_page_mut(&page)?;
-                let next_page_id = next_page_id.to_be_bytes();
+                let next_page_id = next_page_id.get().to_be_bytes();
                 assert_eq!(next_page_id.len(), BTREE_OVERFLOW_PAGE_ID_BYTES);
                 buffer[..next_page_id.len()].copy_from_slice(&next_page_id);
                 buffer[next_page_id.len()..self.btree_ctx.usable_size as usize].copy_from_slice(
@@ -833,7 +831,7 @@ impl<'a> BtreeCursor<'a> {
                 new_page_header.set_cell_content_area_offset(cell_content_area_offset as u16);
                 new_page_header.clear_fragmented_free_bytes();
 
-                interior_cell_buf[..4].copy_from_slice(&new_page_id.to_be_bytes());
+                interior_cell_buf[..4].copy_from_slice(&new_page_id.get().to_be_bytes());
 
                 let n_left_cells = if move_to_right {
                     if !current_page.page_type.is_leaf() {
@@ -988,7 +986,7 @@ impl<'a> BtreeCursor<'a> {
             .map_err(|e| anyhow::anyhow!("get btree interior cell page id: {:?}", e))?,
             Ordering::Equal => {
                 let page_header = BtreePageHeader::from_page(&self.current_page.mem, &buffer);
-                page_header.right_page_id()
+                page_header.right_page_id()?
             }
             Ordering::Greater => {
                 // The cursor traversed all cells in the interior page.
@@ -1042,6 +1040,7 @@ mod tests {
     use crate::btree::FreeblockIterator;
     use crate::header::DATABASE_HEADER_SIZE;
     use crate::pager::MAX_PAGE_SIZE;
+    use crate::pager::PAGE_ID_1;
     use crate::record::parse_record;
     use crate::test_utils::*;
     use crate::value::Collation;
@@ -2266,7 +2265,7 @@ mod tests {
         let bctx = load_btree_context(file.as_file()).unwrap();
         let table_page_id = find_table_page_id("example", file.path());
 
-        let page_1 = pager.get_page(1).unwrap();
+        let page_1 = pager.get_page(PAGE_ID_1).unwrap();
         assert_eq!(page_1.buffer().len(), MAX_PAGE_SIZE);
         assert_eq!(bctx.usable_size as usize, MAX_PAGE_SIZE);
         drop(page_1);
@@ -2751,7 +2750,7 @@ mod tests {
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let bctx = load_btree_context(file.as_file()).unwrap();
 
-        let page = pager.get_page(1).unwrap();
+        let page = pager.get_page(PAGE_ID_1).unwrap();
         let buffer = page.buffer();
         let page_header = BtreePageHeader::from_page(&page, &buffer);
         let page_type = page_header.page_type();
@@ -2771,12 +2770,12 @@ mod tests {
         );
         drop(buffer);
 
-        let mut cursor = BtreeCursor::new(1, &pager, &bctx).unwrap();
+        let mut cursor = BtreeCursor::new(PAGE_ID_1, &pager, &bctx).unwrap();
 
         let payload = [5; 10];
         cursor.insert(30, &payload).unwrap();
 
-        let page = pager.get_page(1).unwrap();
+        let page = pager.get_page(PAGE_ID_1).unwrap();
         let buffer = page.buffer();
         let page_header = BtreePageHeader::from_page(&page, &buffer);
         assert_eq!(page_header.first_freeblock_offset(), 0);
@@ -2889,7 +2888,7 @@ mod tests {
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let bctx = load_btree_context(file.as_file()).unwrap();
 
-        let mut cursor = BtreeCursor::new(1, &pager, &bctx).unwrap();
+        let mut cursor = BtreeCursor::new(PAGE_ID_1, &pager, &bctx).unwrap();
         cursor.move_to_first().unwrap();
         let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
         assert_eq!(key, 1);
