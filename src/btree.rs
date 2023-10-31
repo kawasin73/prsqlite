@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Display;
 use std::num::NonZeroU32;
 use std::ops::Range;
 
@@ -23,8 +24,18 @@ use crate::utils::len_varint_buffer;
 use crate::utils::parse_varint;
 use crate::utils::u64_to_i64;
 
-type ParseError = &'static str;
-type ParseResult<T> = std::result::Result<T, ParseError>;
+#[derive(Debug)]
+pub struct FileCorrupt(&'static str);
+
+impl std::error::Error for FileCorrupt {}
+
+impl Display for FileCorrupt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("btree corrupt: {}", self.0))
+    }
+}
+
+type ParseResult<T> = std::result::Result<T, FileCorrupt>;
 
 pub const BTREE_PAGE_INTERIOR_HEADER_SIZE: usize = 12;
 pub const BTREE_PAGE_LEAF_HEADER_SIZE: usize = 8;
@@ -273,15 +284,13 @@ impl<'a> TableCellKeyParser<'a> {
     pub fn get_cell_key(&self, cell_idx: u16) -> ParseResult<i64> {
         let offset = get_cell_offset(self.page, self.buffer, cell_idx, self.header_size)?;
         let offset_in_cell = if self.is_leaf {
-            // TODO: just skip bytes >= 0x80 because payload length is u32.
-            let (_, n) =
-                parse_varint(&self.buffer[offset..]).ok_or("parse payload length varint")?;
-            n
+            len_varint_buffer(&self.buffer[offset..])
+                .ok_or(FileCorrupt("parse payload length varint"))?
         } else {
             4
         };
-        let (key, _) =
-            parse_varint(&self.buffer[offset + offset_in_cell..]).ok_or("parse key varint")?;
+        let (key, _) = parse_varint(&self.buffer[offset + offset_in_cell..])
+            .ok_or(FileCorrupt("parse key varint"))?;
         Ok(u64_to_i64(key))
     }
 }
@@ -310,13 +319,13 @@ impl<'a> IndexCellKeyParser<'a> {
     pub fn get_cell_key(&self, cell_idx: u16) -> ParseResult<PayloadInfo> {
         let offset = get_cell_offset(self.page, self.buffer, cell_idx, self.header_size)?;
         let offset = offset + self.offset_in_cell as usize;
-        let (payload_size, n) =
-            parse_varint(&self.buffer[offset..]).ok_or("parse payload length varint")?;
+        let (payload_size, n) = parse_varint(&self.buffer[offset..])
+            .ok_or(FileCorrupt("parse payload length varint"))?;
         let payload_size: i32 = payload_size
             .try_into()
-            .map_err(|_| "payload length too large")?;
+            .map_err(|_| FileCorrupt("payload length too large"))?;
         if payload_size < 0 {
-            return Err("payload length is negative");
+            return Err(FileCorrupt("payload length is negative"));
         }
         PayloadInfo::parse(self.ctx, false, self.buffer, offset + n, payload_size)
     }
@@ -339,7 +348,7 @@ pub fn get_cell_offset(
 ) -> ParseResult<usize> {
     let cell_pointer_offset = cell_pointer_offset(page, cell_idx, header_size);
     if cell_pointer_offset + 2 > buffer.len() {
-        return Err("cell pointer out of range");
+        return Err(FileCorrupt("cell pointer out of range"));
     }
     let cell_offset = parse_non_zero_u16(
         buffer[cell_pointer_offset..cell_pointer_offset + 2]
@@ -348,7 +357,7 @@ pub fn get_cell_offset(
     )
     .get() as usize;
     if cell_offset > buffer.len() {
-        return Err("cell offset out of range");
+        return Err(FileCorrupt("cell offset out of range"));
     }
     Ok(cell_offset)
 }
@@ -360,9 +369,9 @@ fn compute_table_leaf_cell_size(
     offset: usize,
 ) -> ParseResult<u16> {
     let (payload_size, payload_size_length) =
-        parse_varint(&buffer[offset..]).ok_or("parse payload size")?;
-    let key_length =
-        len_varint_buffer(&buffer[offset + payload_size_length..]).ok_or("key length")?;
+        parse_varint(&buffer[offset..]).ok_or(FileCorrupt("parse payload size"))?;
+    let key_length = len_varint_buffer(&buffer[offset + payload_size_length..])
+        .ok_or(FileCorrupt("key length"))?;
     let n_local = if payload_size <= ctx.max_local(true) as u64 {
         payload_size as u16
     } else {
@@ -377,7 +386,7 @@ fn compute_table_interior_cell_size(
     buffer: &[u8],
     offset: usize,
 ) -> ParseResult<u16> {
-    let key_length = len_varint_buffer(&buffer[offset + 4..]).ok_or("key length")?;
+    let key_length = len_varint_buffer(&buffer[offset + 4..]).ok_or(FileCorrupt("key length"))?;
     Ok(4 + key_length as u16)
 }
 
@@ -452,7 +461,7 @@ impl OverflowPage {
             if buffer.len() >= tail {
                 Ok((&buffer[BTREE_OVERFLOW_PAGE_ID_BYTES..tail], None))
             } else {
-                Err("overflow payload does not have next page id")
+                Err(FileCorrupt("overflow payload does not have next page id"))
             }
         } else {
             let payload = &buffer[BTREE_OVERFLOW_PAGE_ID_BYTES..ctx.usable_size as usize];
@@ -466,7 +475,7 @@ impl OverflowPage {
                     }),
                 ))
             } else {
-                Err("overflow page has too many next page")
+                Err(FileCorrupt("overflow page has too many next page"))
             }
         }
     }
@@ -502,13 +511,13 @@ impl PayloadInfo {
                     overflow: None,
                 })
             } else {
-                Err("payload length is too large in single cell")
+                Err(FileCorrupt("payload length is too large in single cell"))
             }
         } else {
             let payload_size_in_cell = ctx.n_local(is_table, payload_size);
             let tail_payload = offset + payload_size_in_cell as usize;
             if tail_payload + BTREE_OVERFLOW_PAGE_ID_BYTES > buffer.len() {
-                return Err("next page id out of range");
+                return Err(FileCorrupt("next page id out of range"));
             }
             let next_page_id = PageId::from_be_bytes(
                 buffer[tail_payload..tail_payload + BTREE_OVERFLOW_PAGE_ID_BYTES]
@@ -526,7 +535,7 @@ impl PayloadInfo {
                     }),
                 })
             } else {
-                Err("next page id is zero")
+                Err(FileCorrupt("next page id is zero"))
             }
         }
     }
@@ -542,16 +551,16 @@ pub fn parse_btree_leaf_table_cell(
     let cell_offset =
         get_cell_offset(page, buffer, cell_idx, BTREE_PAGE_LEAF_HEADER_SIZE as u8).unwrap();
     let (payload_size, consumed1) =
-        parse_varint(&buffer[cell_offset..]).map_or(Err("parse payload length varint"), Ok)?;
+        parse_varint(&buffer[cell_offset..]).ok_or(FileCorrupt("parse payload length varint"))?;
     // The maximum payload length is 2147483647 (= i32::MAX).
     let payload_size: i32 = payload_size
         .try_into()
-        .map_err(|_| "payload length too large")?;
+        .map_err(|_| FileCorrupt("payload length too large"))?;
     if payload_size < 0 {
-        return Err("payload length is negative");
+        return Err(FileCorrupt("payload length is negative"));
     }
     let (key, consumed2) =
-        parse_varint(&buffer[cell_offset + consumed1..]).map_or(Err("parse key varint"), Ok)?;
+        parse_varint(&buffer[cell_offset + consumed1..]).ok_or(FileCorrupt("parse key varint"))?;
     let key = u64_to_i64(key);
 
     let payload = PayloadInfo::parse(
@@ -581,7 +590,7 @@ pub fn parse_btree_interior_cell_page_id(
     // Btree interiror cell has 4 bytes page id and at least 1 byte varint (the
     // payload length on index interior page, the key on table interior page).
     if cell_offset + 5 > buffer.len() {
-        return Err("btree interior cell buffer is too short");
+        return Err(FileCorrupt("btree interior cell buffer is too short"));
     }
     let page_id = PageId::from_be_bytes(buffer[cell_offset..cell_offset + 4].try_into().unwrap());
     Ok(page_id)
@@ -689,7 +698,7 @@ pub fn compute_free_size(page: &MemPage, buffer: &PageBufferMut, n_cells: u16) -
     let unallocated_space_offset = cell_pointer_offset(page, n_cells, header_size);
 
     if cell_content_area_offset < unallocated_space_offset {
-        return Err("invalid cell content area offset");
+        return Err(FileCorrupt("invalid cell content area offset"));
     }
 
     // unallocated_size must fit in u16 because cell_content_area_offset is at most
@@ -699,7 +708,7 @@ pub fn compute_free_size(page: &MemPage, buffer: &PageBufferMut, n_cells: u16) -
     let mut free_size = unallocated_size;
     for (freeblock_offset, size) in FreeblockIterator::new(first_freeblock_offset, buffer) {
         if freeblock_offset < cell_content_area_offset {
-            return Err("invalid freeblock offset");
+            return Err(FileCorrupt("invalid freeblock offset"));
         }
         free_size += size;
     }
