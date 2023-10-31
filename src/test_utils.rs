@@ -43,7 +43,7 @@ pub fn create_pager(file: File) -> anyhow::Result<Pager> {
     let mut header_buf = [0_u8; DATABASE_HEADER_SIZE];
     file.read_exact_at(&mut header_buf, 0)?;
     let header = DatabaseHeader::from(&header_buf);
-    Pager::new(file, header.n_pages(), header.pagesize())
+    Ok(Pager::new(file, header.n_pages(), header.pagesize())?)
 }
 
 pub fn create_empty_pager(file_content: &[u8], pagesize: u32) -> Pager {
