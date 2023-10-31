@@ -147,7 +147,7 @@ impl RecordPayload for BtreeRecordPayload<'_> {
 
     #[inline]
     fn load(&self, offset: i32, buf: &mut [u8]) -> anyhow::Result<usize> {
-        self.0.load(offset, buf)
+        Ok(self.0.load(offset, buf)?)
     }
 }
 

@@ -27,6 +27,12 @@ use crate::utils::u64_to_i64;
 #[derive(Debug)]
 pub struct FileCorrupt(&'static str);
 
+impl FileCorrupt {
+    pub fn new(msg: &'static str) -> Self {
+        Self(msg)
+    }
+}
+
 impl std::error::Error for FileCorrupt {}
 
 impl Display for FileCorrupt {
