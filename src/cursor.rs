@@ -49,6 +49,7 @@ use crate::value::ValueCmp;
 
 #[derive(Debug)]
 pub enum Error {
+    #[allow(dead_code)]
     FileCorrupt {
         page_id: PageId,
         e: FileCorrupt,
@@ -117,6 +118,40 @@ impl Display for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[cfg(not(feature = "trust-file"))]
+macro_rules! ret_err_corrupt {
+    ($result:expr, $page_id:expr) => {
+        $result.map_err(|e| Error::FileCorrupt {
+            page_id: $page_id,
+            e,
+        })?
+    };
+}
+
+#[cfg(feature = "trust-file")]
+macro_rules! ret_err_corrupt {
+    ($result:expr, $page_id:expr) => {
+        $result
+    };
+}
+
+#[cfg(not(feature = "trust-file"))]
+macro_rules! ret_none_corrupt {
+    ($option:expr, $page_id:expr, $msg:literal) => {
+        $option.ok_or_else(|| Error::FileCorrupt {
+            page_id: $page_id,
+            e: FileCorrupt::new($msg),
+        })?
+    };
+}
+
+#[cfg(feature = "trust-file")]
+macro_rules! ret_none_corrupt {
+    ($option:expr, $page_id:expr, $msg:literal) => {
+        $option.unwrap()
+    };
+}
+
 pub struct BtreePayload<'a> {
     pager: &'a Pager,
     bctx: &'a BtreeContext,
@@ -169,10 +204,7 @@ impl<'a> BtreePayload<'a> {
         let mut cur = payload.len() as i32;
         let mut overflow = self.payload_info.overflow;
         while !buf.is_empty() && cur < self.payload_info.payload_size {
-            let overflow_page = overflow.ok_or_else(|| Error::FileCorrupt {
-                page_id: self.local_page_id,
-                e: FileCorrupt::new("no overflow page"),
-            })?;
+            let overflow_page = ret_none_corrupt!(overflow, self.local_page_id, "no overflow page");
             let page = self
                 .pager
                 .get_page(overflow_page.page_id())
@@ -181,13 +213,10 @@ impl<'a> BtreePayload<'a> {
                     e,
                 })?;
             let buffer = page.buffer();
-            let (payload, next_overflow) =
-                overflow_page
-                    .parse(self.bctx, &buffer)
-                    .map_err(|e| Error::FileCorrupt {
-                        page_id: overflow_page.page_id(),
-                        e,
-                    })?;
+            let (payload, next_overflow) = ret_err_corrupt!(
+                overflow_page.parse(self.bctx, &buffer),
+                overflow_page.page_id()
+            );
             if offset < cur + payload.len() as i32 {
                 let local_offset = (offset - cur) as usize;
                 let n = std::cmp::min(payload.len() - local_offset, buf.len());
@@ -283,13 +312,10 @@ impl<'a> BtreeCursor<'a> {
             let mut max_cell_key = None;
             while i_min < i_max {
                 let i_mid = (i_min + i_max) / 2;
-                let cell_key =
-                    cell_key_parser
-                        .get_cell_key(i_mid as u16)
-                        .map_err(|e| Error::FileCorrupt {
-                            page_id: self.current_page.page_id,
-                            e,
-                        })?;
+                let cell_key = ret_err_corrupt!(
+                    cell_key_parser.get_cell_key(i_mid as u16),
+                    self.current_page.page_id
+                );
                 match key.cmp(&cell_key) {
                     Ordering::Less => {
                         i_max = i_mid;
@@ -311,25 +337,16 @@ impl<'a> BtreeCursor<'a> {
                 return Ok(max_cell_key);
             }
 
-            let next_page_id = if i_min == self.current_page.n_cells as usize {
-                let page_header = BtreePageHeader::from_page(&self.current_page.mem, &buffer);
-                page_header
-                    .right_page_id()
-                    .map_err(|e| Error::FileCorrupt {
-                        page_id: self.current_page.page_id,
-                        e,
-                    })?
+            let next_page_id_result = if i_min == self.current_page.n_cells as usize {
+                BtreePageHeader::from_page(&self.current_page.mem, &buffer).right_page_id()
             } else {
                 parse_btree_interior_cell_page_id(
                     &self.current_page.mem,
                     &buffer,
                     self.current_page.idx_cell,
                 )
-                .map_err(|e| Error::FileCorrupt {
-                    page_id: self.current_page.page_id,
-                    e,
-                })?
             };
+            let next_page_id = ret_err_corrupt!(next_page_id_result, self.current_page.page_id);
             drop(buffer);
             self.move_to_child(next_page_id)?;
         }
@@ -352,13 +369,10 @@ impl<'a> BtreeCursor<'a> {
 
             while i_min < i_max {
                 let i_mid = (i_min + i_max) / 2;
-                let payload_info =
-                    cell_key_parser
-                        .get_cell_key(i_mid as u16)
-                        .map_err(|e| Error::FileCorrupt {
-                            page_id: self.current_page.page_id,
-                            e,
-                        })?;
+                let payload_info = ret_err_corrupt!(
+                    cell_key_parser.get_cell_key(i_mid as u16),
+                    self.current_page.page_id
+                );
                 let key_payload = BtreePayload {
                     pager: self.pager,
                     bctx: self.btree_ctx,
@@ -402,25 +416,16 @@ impl<'a> BtreeCursor<'a> {
                 return Ok(());
             }
 
-            let next_page_id = if i_min == self.current_page.n_cells as usize {
-                let page_header = BtreePageHeader::from_page(&self.current_page.mem, &buffer);
-                page_header
-                    .right_page_id()
-                    .map_err(|e| Error::FileCorrupt {
-                        page_id: self.current_page.page_id,
-                        e,
-                    })?
+            let next_page_id_result = if i_min == self.current_page.n_cells as usize {
+                BtreePageHeader::from_page(&self.current_page.mem, &buffer).right_page_id()
             } else {
                 parse_btree_interior_cell_page_id(
                     &self.current_page.mem,
                     &buffer,
                     self.current_page.idx_cell,
                 )
-                .map_err(|e| Error::FileCorrupt {
-                    page_id: self.current_page.page_id,
-                    e,
-                })?
             };
+            let next_page_id = ret_err_corrupt!(next_page_id_result, self.current_page.page_id);
             drop(buffer);
             self.move_to_child(next_page_id)?;
         }
@@ -442,15 +447,14 @@ impl<'a> BtreeCursor<'a> {
             self.current_page.idx_cell = 0;
         } else {
             while !self.current_page.page_type.is_leaf() {
-                let page_id = BtreePageHeader::from_page(
-                    &self.current_page.mem,
-                    &self.current_page.mem.buffer(),
-                )
-                .right_page_id()
-                .map_err(|e| Error::FileCorrupt {
-                    page_id: self.current_page.page_id,
-                    e,
-                })?;
+                let page_id = ret_err_corrupt!(
+                    BtreePageHeader::from_page(
+                        &self.current_page.mem,
+                        &self.current_page.mem.buffer(),
+                    )
+                    .right_page_id(),
+                    self.current_page.page_id
+                );
                 self.move_to_child(page_id)?;
             }
             self.current_page.idx_cell = self.current_page.n_cells - 1;
@@ -515,6 +519,9 @@ impl<'a> BtreeCursor<'a> {
                 }
             }
         } else {
+            #[cfg(feature = "trust-file")]
+            unreachable!("invalid page type");
+            #[cfg(not(feature = "trust-file"))]
             return Err(Error::FileCorrupt {
                 page_id: self.current_page.page_id,
                 e: FileCorrupt::new("btree page type is invalid"),
@@ -634,11 +641,10 @@ impl<'a> BtreeCursor<'a> {
                     })?;
 
             // TODO: Cache free size.
-            let free_size = compute_free_size(&current_page.mem, &buffer, current_page.n_cells)
-                .map_err(|e| Error::FileCorrupt {
-                    page_id: current_page.page_id,
-                    e,
-                })?;
+            let free_size = ret_err_corrupt!(
+                compute_free_size(&current_page.mem, &buffer, current_page.n_cells),
+                current_page.page_id
+            );
 
             if free_size >= new_cell_size + 2 {
                 let page_header = BtreePageHeader::from_page_mut(&current_page.mem, &buffer);
@@ -712,19 +718,14 @@ impl<'a> BtreeCursor<'a> {
                                 .copy_from_slice(&tmp_page[cell_content_area_offset..]);
                             let compute_cell_size = page_type.compute_cell_size_fn();
                             for i in 0..current_page.n_cells {
-                                let offset =
-                                    get_cell_offset(&current_page.mem, &tmp_page, i, header_size)
-                                        .map_err(|e| Error::FileCorrupt {
-                                        page_id: current_page.page_id,
-                                        e,
-                                    })?;
-                                let cell_size =
-                                    compute_cell_size(self.btree_ctx, &tmp_page, offset).map_err(
-                                        |e| Error::FileCorrupt {
-                                            page_id: current_page.page_id,
-                                            e,
-                                        },
-                                    )?;
+                                let offset = ret_err_corrupt!(
+                                    get_cell_offset(&current_page.mem, &tmp_page, i, header_size),
+                                    current_page.page_id
+                                );
+                                let cell_size = ret_err_corrupt!(
+                                    compute_cell_size(self.btree_ctx, &tmp_page, offset),
+                                    current_page.page_id
+                                );
                                 // There must be enough size of unallocated space before
                                 // cell_content_area_offset because all cells have fit in the page
                                 // before defragmentation.
@@ -866,18 +867,14 @@ impl<'a> BtreeCursor<'a> {
                 let mut cells = Vec::with_capacity(current_page.n_cells as usize);
                 let compute_cell_size = current_page.page_type.compute_cell_size_fn();
                 for i in 0..current_page.n_cells {
-                    let offset = get_cell_offset(&current_page.mem, &buffer, i, header_size)
-                        .map_err(|e| Error::FileCorrupt {
-                            page_id: current_page.page_id,
-                            e,
-                        })?;
-                    let cell_size =
-                        compute_cell_size(self.btree_ctx, &buffer, offset).map_err(|e| {
-                            Error::FileCorrupt {
-                                page_id: current_page.page_id,
-                                e,
-                            }
-                        })?;
+                    let offset = ret_err_corrupt!(
+                        get_cell_offset(&current_page.mem, &buffer, i, header_size),
+                        current_page.page_id
+                    );
+                    let cell_size = ret_err_corrupt!(
+                        compute_cell_size(self.btree_ctx, &buffer, offset),
+                        current_page.page_id
+                    );
                     cells.push((offset, cell_size));
                     total_size += cell_size;
                 }
@@ -1015,24 +1012,22 @@ impl<'a> BtreeCursor<'a> {
 
                 // Fill interior cell with the new key.
                 let key_length = {
-                    let cell_offset = get_cell_offset(
-                        &current_page.mem,
-                        &left_buffer,
-                        n_left_cells - 1,
-                        header_size,
-                    )
-                    .map_err(|e| Error::FileCorrupt {
-                        page_id: current_page.page_id,
-                        e,
-                    })?;
+                    let cell_offset = ret_err_corrupt!(
+                        get_cell_offset(
+                            &current_page.mem,
+                            &left_buffer,
+                            n_left_cells - 1,
+                            header_size,
+                        ),
+                        current_page.page_id
+                    );
                     let key_offset_in_cell = if current_page.page_type.is_leaf() {
                         // payload_size_length
-                        len_varint_buffer(&left_buffer[cell_offset..]).ok_or_else(|| {
-                            Error::FileCorrupt {
-                                page_id: current_page.page_id,
-                                e: FileCorrupt::new("payload size len"),
-                            }
-                        })?
+                        ret_none_corrupt!(
+                            len_varint_buffer(&left_buffer[cell_offset..]),
+                            current_page.page_id,
+                            "payload size len"
+                        )
                     } else {
                         // Set the right page id of the left page.
                         // No header offset calibration because both pages must not page 1
@@ -1045,13 +1040,11 @@ impl<'a> BtreeCursor<'a> {
                         4
                     };
                     let key_offset = cell_offset + key_offset_in_cell;
-                    let key_length =
-                        len_varint_buffer(&left_buffer[key_offset..]).ok_or_else(|| {
-                            Error::FileCorrupt {
-                                page_id: current_page.page_id,
-                                e: FileCorrupt::new("key length"),
-                            }
-                        })?;
+                    let key_length = ret_none_corrupt!(
+                        len_varint_buffer(&left_buffer[key_offset..]),
+                        current_page.page_id,
+                        "key length"
+                    );
                     interior_cell_buf[4..4 + key_length]
                         .copy_from_slice(&left_buffer[key_offset..key_offset + key_length]);
                     key_length as u16
@@ -1084,12 +1077,10 @@ impl<'a> BtreeCursor<'a> {
         assert!(self.current_page.page_type.is_leaf());
         let buffer = self.current_page.mem.buffer();
         let cell_key_parser = TableCellKeyParser::new(&self.current_page.mem, &buffer);
-        let key = cell_key_parser
-            .get_cell_key(self.current_page.idx_cell)
-            .map_err(|e| Error::FileCorrupt {
-                page_id: self.current_page.page_id,
-                e,
-            })?;
+        let key = ret_err_corrupt!(
+            cell_key_parser.get_cell_key(self.current_page.idx_cell),
+            self.current_page.page_id
+        );
         Ok(Some(key))
     }
 
@@ -1103,16 +1094,15 @@ impl<'a> BtreeCursor<'a> {
         }
         assert!(self.current_page.page_type.is_leaf());
         let buffer = self.current_page.mem.buffer();
-        let (key, payload_info) = parse_btree_leaf_table_cell(
-            self.btree_ctx,
-            &self.current_page.mem,
-            &buffer,
-            self.current_page.idx_cell,
-        )
-        .map_err(|e| Error::FileCorrupt {
-            page_id: self.current_page.page_id,
-            e,
-        })?;
+        let (key, payload_info) = ret_err_corrupt!(
+            parse_btree_leaf_table_cell(
+                self.btree_ctx,
+                &self.current_page.mem,
+                &buffer,
+                self.current_page.idx_cell,
+            ),
+            self.current_page.page_id
+        );
         Ok(Some((
             key,
             BtreePayload {
@@ -1136,12 +1126,10 @@ impl<'a> BtreeCursor<'a> {
         let buffer = self.current_page.mem.buffer();
         let cell_key_parser =
             IndexCellKeyParser::new(self.btree_ctx, &self.current_page.mem, &buffer);
-        let payload_info = cell_key_parser
-            .get_cell_key(self.current_page.idx_cell)
-            .map_err(|e| Error::FileCorrupt {
-                page_id: self.current_page.page_id,
-                e,
-            })?;
+        let payload_info = ret_err_corrupt!(
+            cell_key_parser.get_cell_key(self.current_page.idx_cell),
+            self.current_page.page_id
+        );
         Ok(Some(BtreePayload {
             pager: self.pager,
             bctx: self.btree_ctx,
@@ -1159,23 +1147,19 @@ impl<'a> BtreeCursor<'a> {
         assert!(!self.current_page.page_type.is_leaf());
         let buffer = self.current_page.mem.buffer();
         let page_id = match self.current_page.idx_cell.cmp(&self.current_page.n_cells) {
-            Ordering::Less => parse_btree_interior_cell_page_id(
-                &self.current_page.mem,
-                &buffer,
-                self.current_page.idx_cell,
-            )
-            .map_err(|e| Error::FileCorrupt {
-                page_id: self.current_page.page_id,
-                e,
-            })?,
+            Ordering::Less => ret_err_corrupt!(
+                parse_btree_interior_cell_page_id(
+                    &self.current_page.mem,
+                    &buffer,
+                    self.current_page.idx_cell,
+                ),
+                self.current_page.page_id
+            ),
             Ordering::Equal => {
-                let page_header = BtreePageHeader::from_page(&self.current_page.mem, &buffer);
-                page_header
-                    .right_page_id()
-                    .map_err(|e| Error::FileCorrupt {
-                        page_id: self.current_page.page_id,
-                        e,
-                    })?
+                ret_err_corrupt!(
+                    BtreePageHeader::from_page(&self.current_page.mem, &buffer).right_page_id(),
+                    self.current_page.page_id
+                )
             }
             Ordering::Greater => {
                 // The cursor traversed all cells in the interior page.
@@ -1190,11 +1174,10 @@ impl<'a> BtreeCursor<'a> {
                 break;
             }
             let buffer = self.current_page.mem.buffer();
-            let page_id = parse_btree_interior_cell_page_id(&self.current_page.mem, &buffer, 0)
-                .map_err(|e| Error::FileCorrupt {
-                    page_id: self.current_page.page_id,
-                    e,
-                })?;
+            let page_id = ret_err_corrupt!(
+                parse_btree_interior_cell_page_id(&self.current_page.mem, &buffer, 0),
+                self.current_page.page_id
+            );
             drop(buffer);
             self.move_to_child(page_id)?;
         }

@@ -17,7 +17,8 @@ This is WIP and my hobby project.
 * Validating file format
   * prsqlite does not trust the file is valid unlike sqlite3 and validates pages
   in the file while parsing.
-  * `trust-file` feature will be added to disable the file validation.
+  * `trust-file` feature disables the file validation and gives less branch
+  condition and less static error message strings in a binary.
 * No unsafe
   * Will provide `unsafe` feature for better performance.
 
