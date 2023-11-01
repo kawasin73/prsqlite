@@ -49,40 +49,82 @@ type ParseResult<T> = std::result::Result<T, FileCorrupt>;
 type ParseResult<T> = T;
 
 #[cfg(not(feature = "trust-file"))]
-#[inline(always)]
-fn ok<T>(v: T) -> ParseResult<T> {
-    Ok(v)
+macro_rules! ok {
+    ($v:expr) => {
+        Ok($v)
+    };
 }
 
 #[cfg(feature = "trust-file")]
-#[inline(always)]
-fn ok<T>(v: T) -> ParseResult<T> {
-    v
+macro_rules! ok {
+    ($v:expr) => {
+        $v
+    };
 }
+
+// #[cfg(not(feature = "trust-file"))]
+// #[inline(always)]
+// fn ok<T>(v: T) -> ParseResult<T> {
+//     Ok(v)
+// }
+
+// #[cfg(feature = "trust-file")]
+// #[inline(always)]
+// fn ok<T>(v: T) -> ParseResult<T> {
+//     v
+// }
 
 #[cfg(not(feature = "trust-file"))]
-#[inline(always)]
-fn ok_or<T>(v: Option<T>, msg: &'static str) -> ParseResult<T> {
-    v.ok_or(FileCorrupt(msg))
+macro_rules! ok_or {
+    ($v:expr, $msg:literal) => {
+        $v.ok_or(FileCorrupt($msg))
+    };
 }
 
 #[cfg(feature = "trust-file")]
-#[inline(always)]
-fn ok_or<T>(v: Option<T>, _msg: &'static str) -> ParseResult<T> {
-    v.unwrap()
+macro_rules! ok_or {
+    ($v:expr, $msg:literal) => {
+        $v.unwrap()
+    };
 }
+
+// #[cfg(not(feature = "trust-file"))]
+// #[inline(always)]
+// fn ok_or<T>(v: Option<T>, msg: &'static str) -> ParseResult<T> {
+//     v.ok_or(FileCorrupt(msg))
+// }
+
+// #[cfg(feature = "trust-file")]
+// #[inline(always)]
+// fn ok_or<T>(v: Option<T>, _msg: &'static str) -> ParseResult<T> {
+//     v.unwrap()
+// }
 
 #[cfg(not(feature = "trust-file"))]
-#[inline]
-fn map_err<T, E: Debug>(v: std::result::Result<T, E>, msg: &'static str) -> ParseResult<T> {
-    v.map_err(|_| FileCorrupt(msg))
+macro_rules! map_err {
+    ($v:expr, $msg:literal) => {
+        $v.map_err(|_| FileCorrupt($msg))
+    };
 }
 
 #[cfg(feature = "trust-file")]
-#[inline(always)]
-fn map_err<T, E: Debug>(v: std::result::Result<T, E>, _msg: &'static str) -> ParseResult<T> {
-    v.unwrap()
+macro_rules! map_err {
+    ($v:expr, $msg:literal) => {
+        $v.unwrap()
+    };
 }
+
+// #[cfg(not(feature = "trust-file"))]
+// #[inline]
+// fn map_err<T, E: Debug>(v: std::result::Result<T, E>, msg: &'static str) -> ParseResult<T> {
+//     v.map_err(|_| FileCorrupt(msg))
+// }
+
+// #[cfg(feature = "trust-file")]
+// #[inline(always)]
+// fn map_err<T, E: Debug>(v: std::result::Result<T, E>, _msg: &'static str) -> ParseResult<T> {
+//     v.unwrap()
+// }
 
 #[cfg(not(feature = "trust-file"))]
 macro_rules! ret_err {
@@ -258,9 +300,9 @@ impl<'page> BtreePageHeader<'page> {
     ///
     /// This is only valid when the page is a interior page.
     pub fn right_page_id(&self) -> ParseResult<PageId> {
-        ok_or(
+        ok_or!(
             PageId::new(u32::from_be_bytes(self.0[8..12].try_into().unwrap())),
-            "right page id is zero",
+            "right page id is zero"
         )
     }
 }
@@ -369,18 +411,18 @@ impl<'a> TableCellKeyParser<'a> {
             self.header_size
         ));
         let offset_in_cell = if self.is_leaf {
-            ret_err!(ok_or(
+            ret_err!(ok_or!(
                 len_varint_buffer(&self.buffer[offset..]),
                 "parse payload length varint"
             ))
         } else {
             4
         };
-        let (key, _) = ret_err!(ok_or(
+        let (key, _) = ret_err!(ok_or!(
             parse_varint(&self.buffer[offset + offset_in_cell..]),
             "parse key varint"
         ));
-        ok(u64_to_i64(key))
+        ok!(u64_to_i64(key))
     }
 }
 
@@ -413,12 +455,14 @@ impl<'a> IndexCellKeyParser<'a> {
             self.header_size
         ));
         let offset = offset + self.offset_in_cell as usize;
-        let (payload_size, n) = ret_err!(ok_or(
+        let (payload_size, n) = ret_err!(ok_or!(
             parse_varint(&self.buffer[offset..]),
             "parse payload length varint"
         ));
-        let payload_size: i32 =
-            ret_err!(map_err(payload_size.try_into(), "payload length too large"));
+        let payload_size: i32 = ret_err!(map_err!(
+            payload_size.try_into(),
+            "payload length too large"
+        ));
         check_corrupt!(payload_size >= 0, "payload length is negative");
         PayloadInfo::parse(self.ctx, false, self.buffer, offset + n, payload_size)
     }
@@ -451,7 +495,7 @@ pub fn get_cell_offset(
     ) as usize;
     // Every cell is at least 4 bytes long.
     check_corrupt!(cell_offset + 4 <= buffer.len(), "cell offset out of range");
-    ok(cell_offset)
+    ok!(cell_offset)
 }
 
 fn compute_table_leaf_cell_size(
@@ -460,9 +504,11 @@ fn compute_table_leaf_cell_size(
     buffer: &[u8],
     offset: usize,
 ) -> ParseResult<u16> {
-    let (payload_size, payload_size_length) =
-        ret_err!(ok_or(parse_varint(&buffer[offset..]), "parse payload size"));
-    let key_length = ret_err!(ok_or(
+    let (payload_size, payload_size_length) = ret_err!(ok_or!(
+        parse_varint(&buffer[offset..]),
+        "parse payload size"
+    ));
+    let key_length = ret_err!(ok_or!(
         len_varint_buffer(&buffer[offset + payload_size_length..]),
         "key length"
     ));
@@ -471,7 +517,7 @@ fn compute_table_leaf_cell_size(
     } else {
         ctx.n_local(true, payload_size as i32)
     };
-    ok(payload_size_length as u16 + key_length as u16 + n_local)
+    ok!(payload_size_length as u16 + key_length as u16 + n_local)
 }
 
 fn compute_table_interior_cell_size(
@@ -480,11 +526,11 @@ fn compute_table_interior_cell_size(
     buffer: &[u8],
     offset: usize,
 ) -> ParseResult<u16> {
-    let key_length = ret_err!(ok_or(
+    let key_length = ret_err!(ok_or!(
         len_varint_buffer(&buffer[offset + 4..]),
         "key length"
     ));
-    ok(4 + key_length as u16)
+    ok!(4 + key_length as u16)
 }
 
 /// Context containing constant values to parse btree page.
@@ -559,7 +605,7 @@ impl OverflowPage {
                 payload.len() < self.remaining_size as usize,
                 "overflow page has too many next page"
             );
-            ok((
+            ok!((
                 payload,
                 Some(Self {
                     page_id: next_page_id,
@@ -572,7 +618,7 @@ impl OverflowPage {
                 buffer.len() >= tail,
                 "overflow payload does not have next page id"
             );
-            ok((&buffer[BTREE_OVERFLOW_PAGE_ID_BYTES..tail], None))
+            ok!((&buffer[BTREE_OVERFLOW_PAGE_ID_BYTES..tail], None))
         }
     }
 }
@@ -604,7 +650,7 @@ impl PayloadInfo {
                 buffer.len() >= offset + payload_size as usize,
                 "payload length is too large in single cell"
             );
-            ok(Self {
+            ok!(Self {
                 payload_size,
                 local_range: offset..offset + payload_size as usize,
                 overflow: None,
@@ -616,7 +662,7 @@ impl PayloadInfo {
                 buffer.len() >= tail_payload + BTREE_OVERFLOW_PAGE_ID_BYTES,
                 "next page id out of range of page"
             );
-            let next_page_id = ret_err!(ok_or(
+            let next_page_id = ret_err!(ok_or!(
                 PageId::new(u32::from_be_bytes(
                     buffer[tail_payload..tail_payload + BTREE_OVERFLOW_PAGE_ID_BYTES]
                         .try_into()
@@ -624,7 +670,7 @@ impl PayloadInfo {
                 )),
                 "next page id is zero"
             ));
-            ok(Self {
+            ok!(Self {
                 payload_size,
                 local_range: offset..tail_payload,
                 overflow: Some(OverflowPage {
@@ -649,14 +695,17 @@ pub fn parse_btree_leaf_table_cell(
         cell_idx,
         BTREE_PAGE_LEAF_HEADER_SIZE as u8
     ));
-    let (payload_size, consumed1) = ret_err!(ok_or(
+    let (payload_size, consumed1) = ret_err!(ok_or!(
         parse_varint(&buffer[cell_offset..]),
         "parse payload length varint"
     ));
     // The maximum payload length is 2147483647 (= i32::MAX).
-    let payload_size: i32 = ret_err!(map_err(payload_size.try_into(), "payload length too large"));
+    let payload_size: i32 = ret_err!(map_err!(
+        payload_size.try_into(),
+        "payload length too large"
+    ));
     check_corrupt!(payload_size >= 0, "payload length is negative");
-    let (key, consumed2) = ret_err!(ok_or(
+    let (key, consumed2) = ret_err!(ok_or!(
         parse_varint(&buffer[cell_offset + consumed1..]),
         "parse key varint"
     ));
@@ -670,7 +719,7 @@ pub fn parse_btree_leaf_table_cell(
         payload_size,
     ));
 
-    ok((key, payload))
+    ok!((key, payload))
 }
 
 /// Parses the page id which a b-tree (table/index) interiror page cell points
@@ -692,13 +741,13 @@ pub fn parse_btree_interior_cell_page_id(
         cell_offset + 5 <= buffer.len(),
         "btree interior cell buffer is too short"
     );
-    let page_id = ret_err!(ok_or(
+    let page_id = ret_err!(ok_or!(
         PageId::new(u32::from_be_bytes(
             buffer[cell_offset..cell_offset + 4].try_into().unwrap(),
         )),
         "btree interior cell page id is zero"
     ));
-    ok(page_id)
+    ok!(page_id)
 }
 
 /// Find the first freeblock which is larger than or equal to the given size.
@@ -827,7 +876,7 @@ pub fn compute_free_size(page: &MemPage, buffer: &PageBufferMut, n_cells: u16) -
     }
     free_size += fragmented_free_bytes as u16;
 
-    ok(free_size)
+    ok!(free_size)
 }
 
 #[cfg(test)]
