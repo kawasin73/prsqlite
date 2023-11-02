@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![feature(test)]
+
 mod btree;
 mod cursor;
 mod header;
@@ -1072,5 +1074,48 @@ impl<'conn> InsertStatement<'conn> {
         write_txn.commit()?;
 
         Ok(n)
+    }
+}
+
+extern crate test;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::*;
+    use test::Bencher;
+
+    #[bench]
+    fn bench_insert(b: &mut Bencher) {
+        let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
+        let conn = Connection::open(file.path()).unwrap();
+        let stmt = conn
+            .prepare("INSERT INTO example(col) VALUES(12345);")
+            .unwrap();
+
+        b.iter(|| stmt.execute().unwrap());
+    }
+
+    #[bench]
+    fn bench_select(b: &mut Bencher) {
+        let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
+        let conn = Connection::open(file.path()).unwrap();
+        for i in 0..10000 {
+            conn.prepare(&format!("INSERT INTO example(col) VALUES({i});"))
+                .unwrap()
+                .execute()
+                .unwrap();
+        }
+
+        let stmt = conn
+            .prepare("SELECT col FROM example WHERE col > 4900;")
+            .unwrap();
+
+        b.iter(|| {
+            let mut rows = stmt.query().unwrap();
+            while let Some(row) = rows.next_row().unwrap() {
+                std::hint::black_box(row.parse().unwrap());
+            }
+        });
     }
 }
