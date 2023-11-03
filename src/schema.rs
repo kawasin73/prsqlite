@@ -256,7 +256,7 @@ impl Index {
         let mut parser = Parser::new(sql);
         let create_index = parse_create_index(&mut parser)
             .map_err(|e| anyhow::anyhow!("parse create index sql: {:?}", e))?;
-        if expect_no_more_token(&mut parser).is_err() {
+        if expect_no_more_token(&parser).is_err() {
             bail!(
                 "create table sql in sqlite_schema contains useless contents at the tail: {:?}",
                 sql
@@ -365,7 +365,7 @@ impl Table {
         let mut parser = Parser::new(sql);
         let create_table = parse_create_table(&mut parser)
             .map_err(|e| anyhow::anyhow!("parse create table sql: {:?}", e))?;
-        if expect_no_more_token(&mut parser).is_err() {
+        if expect_no_more_token(&parser).is_err() {
             bail!(
                 "create table sql in sqlite_schema contains useless contents at the tail: {:?}",
                 sql

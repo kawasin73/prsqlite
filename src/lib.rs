@@ -148,7 +148,7 @@ impl Connection {
         let mut parser = Parser::new(input);
         let statement = parse_sql(&mut parser)?;
         expect_semicolon(&mut parser)?;
-        expect_no_more_token(&mut parser)?;
+        expect_no_more_token(&parser)?;
 
         match statement {
             Stmt::Select(select) => Ok(Statement::Query(self.prepare_select(select)?)),
@@ -302,7 +302,7 @@ impl Connection {
                     columns_idx.len()
                 )));
             }
-            for (column, expr) in columns_idx.iter().zip(column_values.into_iter()) {
+            for (column, expr) in columns_idx.iter().zip(column_values) {
                 match column {
                     ColumnNumber::RowId => {
                         rowid = Some(Expression::from(expr, None)?);

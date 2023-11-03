@@ -163,7 +163,7 @@ pub fn expect_semicolon<'a>(p: &mut Parser<'a>) -> Result<'a, ()> {
 /// Assert that there is no token except spaces.
 ///
 /// Uses mutable [Parser] to unify the interface with other expect functions.
-pub fn expect_no_more_token<'a>(p: &mut Parser<'a>) -> Result<'a, ()> {
+pub fn expect_no_more_token<'a>(p: &Parser<'a>) -> Result<'a, ()> {
     match p.peek() {
         Some(_) => Err(p.error("unexpected token")),
         None => Ok(()),
@@ -869,11 +869,18 @@ mod tests {
 
     #[test]
     fn test_expect_no_more_token() {
-        assert_parser!(expect_no_more_token, b"", 0, ());
-        assert_parser!(expect_no_more_token, b"    ", 4, ());
+        let parser = Parser::new(b"");
+        let r = expect_no_more_token(&parser);
+        assert!(r.is_ok());
+        assert_eq!(parser.n_consumed(), 0);
 
-        let mut parser = Parser::new(b"    ;  ");
-        let r = expect_no_more_token(&mut parser);
+        let parser = Parser::new(b"    ");
+        let r = expect_no_more_token(&parser);
+        assert!(r.is_ok());
+        assert_eq!(parser.n_consumed(), 4);
+
+        let parser = Parser::new(b"    ;  ");
+        let r = expect_no_more_token(&parser);
         assert!(r.is_err());
         assert_eq!(r.unwrap_err().cursor(), 4);
     }
