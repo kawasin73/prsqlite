@@ -837,13 +837,14 @@ impl<'conn> Rows<'conn> {
 
             content_offset = headers[0].1;
             let last_header = &headers[headers.len() - 1];
-            let content_size = last_header.1 + last_header.0.content_size() - content_offset;
-            assert!(content_offset + content_size <= payload.size());
-            use_local_buffer = payload.buf().len() >= (content_offset + content_size) as usize;
+            let content_size =
+                last_header.1 + last_header.0.content_size() as usize - content_offset;
+            assert!(content_offset + content_size <= payload.size() as usize);
+            use_local_buffer = payload.buf().len() >= (content_offset + content_size);
             if !use_local_buffer {
-                tmp_buf.resize(content_size as usize, 0);
+                tmp_buf.resize(content_size, 0);
                 let n = payload.load(content_offset, &mut tmp_buf)?;
-                if n != content_size as usize {
+                if n != content_size {
                     bail!("payload does not have enough size");
                 }
             };
@@ -938,8 +939,8 @@ const STATIC_NULL_VALUE: Value = Value::Null;
 struct RowData<'a> {
     rowid: i64,
     payload: BtreePayload<'a>,
-    headers: Vec<(SerialType, i32)>,
-    content_offset: i32,
+    headers: Vec<(SerialType, usize)>,
+    content_offset: usize,
     use_local_buffer: bool,
     tmp_buf: Vec<u8>,
 }
@@ -950,12 +951,12 @@ impl<'a> RowData<'a> {
             ColumnNumber::Column(idx) => {
                 if let Some((serial_type, offset)) = self.headers.get(*idx) {
                     let contents_buffer = if self.use_local_buffer {
-                        &self.payload.buf()[self.content_offset as usize..]
+                        &self.payload.buf()[self.content_offset..]
                     } else {
                         &self.tmp_buf
                     };
                     serial_type
-                        .parse(&contents_buffer[(offset - self.content_offset) as usize..])
+                        .parse(&contents_buffer[offset - self.content_offset..])
                         .context("parse value")
                 } else {
                     Ok(STATIC_NULL_VALUE)

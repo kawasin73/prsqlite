@@ -88,6 +88,76 @@ pub fn set_u16(buf: &mut [u8], offset: usize, value: u16) {
     buf[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
 }
 
+/// This is to guarantee that payload size is less than or equal to 2147483647
+/// (= i32::MAX).
+#[derive(Clone, Copy, Debug)]
+pub struct PayloadSize(u32);
+
+impl PayloadSize {
+    #[inline]
+    pub fn get(&self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<u64> for PayloadSize {
+    type Error = FileCorrupt;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        // The maximum payload length is 2147483647 (= i32::MAX).
+        check_corrupt!(value <= i32::MAX as u64, "payload size too large");
+        Ok(Self(value as u32))
+    }
+}
+
+/// Context containing constant values to parse btree page.
+#[derive(Debug)]
+pub struct BtreeContext {
+    /// Maximum local payload size. The first is for index pages, the second is
+    /// for table pages.
+    max_local: [u16; 2],
+    min_local: u16,
+    /// Usable size is less than or equal to 65536.
+    ///
+    /// TODO: Improve the visibility of this field. we may need to re-consider
+    /// to merge btree.rs and cursor.rs.
+    pub usable_size: u32,
+}
+
+impl BtreeContext {
+    /// Creates a new context.
+    ///
+    /// usable_size is at most 65536.
+    pub fn new(usable_size: u32) -> Self {
+        assert!(usable_size <= 65536);
+        Self {
+            max_local: [
+                (((usable_size - 12) * 64 / 255) - 23).try_into().unwrap(),
+                (usable_size - 35).try_into().unwrap(),
+            ],
+            min_local: ((usable_size - 12) * 32 / 255 - 23).try_into().unwrap(),
+            usable_size,
+        }
+    }
+
+    #[inline]
+    pub fn max_local(&self, is_table: bool) -> u16 {
+        self.max_local[is_table as usize]
+    }
+
+    #[inline]
+    pub fn n_local(&self, is_table: bool, payload_size: PayloadSize) -> u16 {
+        let surplus = self.min_local as u32
+            + ((payload_size.0 - self.min_local as u32)
+                % (self.usable_size - BTREE_OVERFLOW_PAGE_ID_BYTES as u32));
+        if surplus <= self.max_local[is_table as usize] as u32 {
+            surplus as u16
+        } else {
+            self.min_local
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct BtreePageType(u8);
 
@@ -336,10 +406,7 @@ impl<'a> IndexCellKeyParser<'a> {
         let offset = offset + self.offset_in_cell as usize;
         let (payload_size, n) = parse_varint(&self.buffer[offset..])
             .ok_or(FileCorrupt("parse payload length varint"))?;
-        let payload_size: i32 = payload_size
-            .try_into()
-            .map_err(|_| FileCorrupt("payload length too large"))?;
-        check_corrupt!(payload_size >= 0, "payload length is negative");
+        let payload_size: PayloadSize = payload_size.try_into()?;
         PayloadInfo::parse(self.ctx, false, self.buffer, offset + n, payload_size)
     }
 }
@@ -391,7 +458,8 @@ fn compute_table_leaf_cell_size(
     let n_local = if payload_size <= ctx.max_local(true) as u64 {
         payload_size as u16
     } else {
-        ctx.n_local(true, payload_size as i32)
+        let payload_size: PayloadSize = payload_size.try_into()?;
+        ctx.n_local(true, payload_size)
     };
     Ok(payload_size_length as u16 + key_length as u16 + n_local)
 }
@@ -406,58 +474,10 @@ fn compute_table_interior_cell_size(
     Ok(4 + key_length as u16)
 }
 
-/// Context containing constant values to parse btree page.
-pub struct BtreeContext {
-    /// Maximum local payload size. The first is for index pages, the second is
-    /// for table pages.
-    max_local: [u16; 2],
-    min_local: u16,
-    /// Usable size is less than or equal to 65536.
-    ///
-    /// TODO: Improve the visibility of this field. we may need to re-consider
-    /// to merge btree.rs and cursor.rs.
-    pub usable_size: u32,
-}
-
-impl BtreeContext {
-    /// Creates a new context.
-    ///
-    /// usable_size is at most 65536.
-    pub fn new(usable_size: u32) -> Self {
-        assert!(usable_size <= 65536);
-        Self {
-            max_local: [
-                (((usable_size - 12) * 64 / 255) - 23).try_into().unwrap(),
-                (usable_size - 35).try_into().unwrap(),
-            ],
-            min_local: ((usable_size - 12) * 32 / 255 - 23).try_into().unwrap(),
-            usable_size,
-        }
-    }
-
-    #[inline]
-    pub fn max_local(&self, is_table: bool) -> u16 {
-        self.max_local[is_table as usize]
-    }
-
-    #[inline]
-    pub fn n_local(&self, is_table: bool, payload_size: i32) -> u16 {
-        assert!(payload_size >= 0);
-        let surplus = self.min_local as i32
-            + ((payload_size - self.min_local as i32)
-                % (self.usable_size - BTREE_OVERFLOW_PAGE_ID_BYTES as u32) as i32);
-        if surplus <= self.max_local[is_table as usize] as i32 {
-            surplus as u16
-        } else {
-            self.min_local
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct OverflowPage {
-    page_id: NonZeroU32,
-    remaining_size: i32,
+    page_id: PageId,
+    remaining_size: usize,
 }
 
 impl OverflowPage {
@@ -475,18 +495,18 @@ impl OverflowPage {
         )) {
             let payload = &buffer[BTREE_OVERFLOW_PAGE_ID_BYTES..ctx.usable_size as usize];
             check_corrupt!(
-                payload.len() < self.remaining_size as usize,
+                payload.len() < self.remaining_size,
                 "overflow page has too many next page"
             );
             Ok((
                 payload,
                 Some(Self {
                     page_id: next_page_id,
-                    remaining_size: self.remaining_size - payload.len() as i32,
+                    remaining_size: self.remaining_size - payload.len(),
                 }),
             ))
         } else {
-            let tail = BTREE_OVERFLOW_PAGE_ID_BYTES + self.remaining_size as usize;
+            let tail = BTREE_OVERFLOW_PAGE_ID_BYTES + self.remaining_size;
             check_corrupt!(
                 buffer.len() >= tail,
                 "overflow payload does not have next page id"
@@ -499,7 +519,7 @@ impl OverflowPage {
 /// Payload information of a cell.
 pub struct PayloadInfo {
     /// The total size of the payload.
-    pub payload_size: i32,
+    pub payload_size: PayloadSize,
     /// The range of the local payload in the page buffer.
     ///
     /// If the size of this range is equal to the payload size, the whole
@@ -516,16 +536,16 @@ impl PayloadInfo {
         is_table: bool,
         buffer: &PageBuffer,
         offset: usize,
-        payload_size: i32,
+        payload_size: PayloadSize,
     ) -> ParseResult<Self> {
-        if payload_size <= ctx.max_local(is_table) as i32 {
+        if payload_size.0 <= ctx.max_local(is_table) as u32 {
             check_corrupt!(
-                buffer.len() >= offset + payload_size as usize,
+                buffer.len() >= offset + payload_size.0 as usize,
                 "payload length is too large in single cell"
             );
             Ok(Self {
                 payload_size,
-                local_range: offset..offset + payload_size as usize,
+                local_range: offset..offset + payload_size.0 as usize,
                 overflow: None,
             })
         } else {
@@ -545,7 +565,7 @@ impl PayloadInfo {
                     local_range: offset..tail_payload,
                     overflow: Some(OverflowPage {
                         page_id: next_page_id,
-                        remaining_size: payload_size - payload_size_in_cell as i32,
+                        remaining_size: payload_size.0 as usize - payload_size_in_cell as usize,
                     }),
                 })
             } else {
@@ -566,12 +586,7 @@ pub fn parse_btree_leaf_table_cell(
         get_cell_offset(page, buffer, cell_idx, BTREE_PAGE_LEAF_HEADER_SIZE as u8).unwrap();
     let (payload_size, consumed1) =
         parse_varint(&buffer[cell_offset..]).ok_or(FileCorrupt("parse payload length varint"))?;
-    // The maximum payload length is 2147483647 (= i32::MAX).
-    let payload_size: i32 = payload_size
-        .try_into()
-        .map_err(|_| FileCorrupt("payload length too large"))?;
-    // TODO: payload_size should be unsigned integer.
-    assert!(payload_size >= 0);
+    let payload_size = payload_size.try_into()?;
     let (key, consumed2) =
         parse_varint(&buffer[cell_offset + consumed1..]).ok_or(FileCorrupt("parse key varint"))?;
     let key = u64_to_i64(key);
@@ -753,6 +768,27 @@ mod tests {
     const BTREE_PAGE_TYPE_LEAF_TABLE: u8 = LEAF_FLAG | TABLE_FLAG;
 
     #[test]
+    fn test_payload_size() {
+        assert_eq!(TryInto::<PayloadSize>::try_into(0_u64).unwrap().get(), 0);
+        assert_eq!(TryInto::<PayloadSize>::try_into(1_u64).unwrap().get(), 1);
+        assert_eq!(TryInto::<PayloadSize>::try_into(2_u64).unwrap().get(), 2);
+        assert_eq!(
+            TryInto::<PayloadSize>::try_into(i32::MAX as u64 - 1)
+                .unwrap()
+                .get(),
+            i32::MAX as u32 - 1
+        );
+        assert_eq!(
+            TryInto::<PayloadSize>::try_into(i32::MAX as u64)
+                .unwrap()
+                .get(),
+            i32::MAX as u32
+        );
+        assert!(TryInto::<PayloadSize>::try_into(i32::MAX as u64 + 1).is_err());
+        assert!(TryInto::<PayloadSize>::try_into(u64::MAX).is_err());
+    }
+
+    #[test]
     fn pagetype() {
         let mut buf = [0_u8; 12];
         for t in [
@@ -920,7 +956,7 @@ mod tests {
         let (key, payload_info) = parse_btree_leaf_table_cell(&bctx, &page1, &buffer1, 0).unwrap();
         let payload = &buffer1[payload_info.local_range.clone()];
         assert_eq!(key, 1);
-        assert_eq!(payload_info.payload_size as usize, payload.len());
+        assert_eq!(payload_info.payload_size.0 as usize, payload.len());
         assert_eq!(
             payload,
             &[

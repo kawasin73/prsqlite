@@ -32,6 +32,7 @@ use crate::btree::BtreePageType;
 use crate::btree::FileCorrupt;
 use crate::btree::IndexCellKeyParser;
 use crate::btree::PayloadInfo;
+use crate::btree::PayloadSize;
 use crate::btree::TableCellKeyParser;
 use crate::btree::BTREE_OVERFLOW_PAGE_ID_BYTES;
 use crate::btree::BTREE_PAGE_CELL_POINTER_SIZE;
@@ -60,8 +61,8 @@ pub enum Error {
     AllocatePage(PagerError),
     InvalidOffset {
         page_id: PageId,
-        offset: i32,
-        payload_size: i32,
+        offset: usize,
+        payload_size: PayloadSize,
     },
     NotTable,
     NotIndex,
@@ -104,7 +105,7 @@ impl Display for Error {
                 "invalid offset for payload (page_id: {}): offset: {}, payload_size: {}",
                 page_id.get(),
                 offset,
-                payload_size
+                payload_size.get()
             )),
             Self::NotTable => f.write_str("not a table page"),
             Self::NotIndex => f.write_str("not an index page"),
@@ -127,8 +128,8 @@ pub struct BtreePayload<'a> {
 
 impl<'a> BtreePayload<'a> {
     /// The size of the payload.
-    pub fn size(&self) -> i32 {
-        self.payload_info.payload_size
+    pub fn size(&self) -> u32 {
+        self.payload_info.payload_size.get()
     }
 
     /// The local payload.
@@ -143,8 +144,8 @@ impl<'a> BtreePayload<'a> {
     /// Returns the number of bytes loaded.
     ///
     /// The offset must be less than the size of the payload.
-    pub fn load(&self, offset: i32, buf: &mut [u8]) -> Result<usize> {
-        if offset < 0 || offset >= self.payload_info.payload_size {
+    pub fn load(&self, offset: usize, buf: &mut [u8]) -> Result<usize> {
+        if offset >= self.payload_info.payload_size.get() as usize {
             return Err(Error::InvalidOffset {
                 page_id: self.local_page_id,
                 offset,
@@ -156,19 +157,19 @@ impl<'a> BtreePayload<'a> {
         let mut buf = buf;
         let payload = &self.local_payload_buffer[self.payload_info.local_range.clone()];
 
-        if offset < payload.len() as i32 {
-            let local_offset = offset as usize;
+        if offset < payload.len() {
+            let local_offset = offset;
             let n = std::cmp::min(payload.len() - local_offset, buf.len());
             // TODO: std::ptr::copy_nonoverlapping
             buf[..n].copy_from_slice(&payload[local_offset..local_offset + n]);
             n_loaded += n;
-            offset += n as i32;
+            offset += n;
             buf = &mut buf[n..];
         }
 
-        let mut cur = payload.len() as i32;
+        let mut cur = payload.len();
         let mut overflow = self.payload_info.overflow;
-        while !buf.is_empty() && cur < self.payload_info.payload_size {
+        while !buf.is_empty() && cur < self.payload_info.payload_size.get() as usize {
             let overflow_page = overflow.ok_or_else(|| Error::FileCorrupt {
                 page_id: self.local_page_id,
                 e: FileCorrupt::new("no overflow page"),
@@ -188,16 +189,16 @@ impl<'a> BtreePayload<'a> {
                         page_id: overflow_page.page_id(),
                         e,
                     })?;
-            if offset < cur + payload.len() as i32 {
-                let local_offset = (offset - cur) as usize;
+            if offset < cur + payload.len() {
+                let local_offset = offset - cur;
                 let n = std::cmp::min(payload.len() - local_offset, buf.len());
                 // TODO: std::ptr::copy_nonoverlapping
                 buf[..n].copy_from_slice(&payload[local_offset..local_offset + n]);
                 n_loaded += n;
-                offset += n as i32;
+                offset += n;
                 buf = &mut buf[n..];
             }
-            cur += payload.len() as i32;
+            cur += payload.len();
             overflow = next_overflow;
         }
 
@@ -531,23 +532,21 @@ impl<'a> BtreeCursor<'a> {
         let current_cell_key = self.table_move_to(key)?;
 
         let mut cell_header_buf = [0; 18];
-        let payload_size: i32 = payload
-            .len()
+        let payload_size: PayloadSize = (payload.len() as u64)
             .try_into()
             .map_err(|_| Error::PayloadTooLarge)?;
         let mut cell_header_size =
-            put_varint(cell_header_buf.as_mut_slice(), payload_size as u64) as u16;
+            put_varint(cell_header_buf.as_mut_slice(), payload_size.get() as u64) as u16;
         cell_header_size += put_varint(
             &mut cell_header_buf[cell_header_size as usize..],
             i64_to_u64(key),
         ) as u16;
         let cell_header = &cell_header_buf[..cell_header_size as usize];
         let is_table = true;
-        let (new_cell_size, local_payload, overflow_page_id) = if payload_size
-            <= self.btree_ctx.max_local(is_table) as i32
+        let (new_cell_size, local_payload, overflow_page_id) = if payload_size.get()
+            <= self.btree_ctx.max_local(is_table) as u32
         {
-            let payload_size = payload_size as u16;
-            (cell_header_size + payload_size, payload, None)
+            (cell_header_size + payload_size.get() as u16, payload, None)
         } else {
             // Split the payload into local and overflow pages.
             let n_local = self.btree_ctx.n_local(is_table, payload_size);
@@ -1261,7 +1260,7 @@ mod tests {
         let (key, payload) = payload.unwrap();
         assert_eq!(key, 1);
         assert_eq!(payload.buf(), &[2, 8]);
-        assert_eq!(payload.size(), payload.buf().len() as i32);
+        assert_eq!(payload.size(), payload.buf().len() as u32);
         assert!(cursor.get_index_payload().is_err());
         drop(payload);
         assert_eq!(cursor.get_table_key().unwrap().unwrap(), 1);
@@ -1272,7 +1271,7 @@ mod tests {
         let (key, payload) = payload.unwrap();
         assert_eq!(key, 2);
         assert_eq!(payload.buf(), &[2, 9]);
-        assert_eq!(payload.size(), payload.buf().len() as i32);
+        assert_eq!(payload.size(), payload.buf().len() as u32);
         assert!(cursor.get_index_payload().is_err());
         drop(payload);
         assert_eq!(cursor.get_table_key().unwrap().unwrap(), 2);
@@ -1283,7 +1282,7 @@ mod tests {
         let (key, payload) = payload.unwrap();
         assert_eq!(key, 3);
         assert_eq!(payload.buf(), &[2, 1, 2]);
-        assert_eq!(payload.size(), payload.buf().len() as i32);
+        assert_eq!(payload.size(), payload.buf().len() as u32);
         assert!(cursor.get_index_payload().is_err());
         drop(payload);
         assert_eq!(cursor.get_table_key().unwrap().unwrap(), 3);
@@ -1321,7 +1320,7 @@ mod tests {
         assert!(payload.is_some());
         let payload = payload.unwrap();
         assert_eq!(payload.buf(), &[3, 8, 1, 2]);
-        assert_eq!(payload.size(), payload.buf().len() as i32);
+        assert_eq!(payload.size(), payload.buf().len() as u32);
         assert!(cursor.get_table_payload().is_err());
         drop(payload);
 
@@ -1330,7 +1329,7 @@ mod tests {
         assert!(payload.is_some());
         let payload = payload.unwrap();
         assert_eq!(payload.buf(), &[3, 9, 9]);
-        assert_eq!(payload.size(), payload.buf().len() as i32);
+        assert_eq!(payload.size(), payload.buf().len() as u32);
         assert!(cursor.get_table_payload().is_err());
         drop(payload);
 
@@ -1339,7 +1338,7 @@ mod tests {
         assert!(payload.is_some());
         let payload = payload.unwrap();
         assert_eq!(payload.buf(), &[3, 1, 1, 2, 3]);
-        assert_eq!(payload.size(), payload.buf().len() as i32);
+        assert_eq!(payload.size(), payload.buf().len() as u32);
         assert!(cursor.get_table_payload().is_err());
         drop(payload);
 
@@ -1473,8 +1472,8 @@ mod tests {
             assert!(payload.is_some());
             let (rowid, payload) = payload.unwrap();
             assert_eq!(rowid, i + 1);
-            assert!(payload.size() > BUFFER_SIZE as i32);
-            assert_eq!(payload.size(), payload.buf().len() as i32);
+            assert!(payload.size() > BUFFER_SIZE as u32);
+            assert_eq!(payload.size(), payload.buf().len() as u32);
             let mut table_record = parse_record(&payload).unwrap();
             assert_eq!(table_record.get(0).unwrap(), Value::Integer(i));
             drop(payload);
@@ -1485,8 +1484,8 @@ mod tests {
             let payload = payload.unwrap();
             let mut index_record = parse_record(&payload).unwrap();
             assert_eq!(index_record.get(1).unwrap(), Value::Integer(i + 1));
-            assert!(payload.size() > BUFFER_SIZE as i32, "{}", i);
-            assert_eq!(payload.size(), payload.buf().len() as i32);
+            assert!(payload.size() > BUFFER_SIZE as u32, "{}", i);
+            assert_eq!(payload.size(), payload.buf().len() as u32);
             drop(payload);
             index1_cursor.move_next().unwrap();
 
@@ -1495,7 +1494,7 @@ mod tests {
             let mut index_record = parse_record(&payload).unwrap();
             assert_eq!(index_record.get(0).unwrap(), Value::Integer(i));
             assert_eq!(index_record.get(1).unwrap(), Value::Integer(i + 1));
-            assert_eq!(payload.size(), payload.buf().len() as i32);
+            assert_eq!(payload.size(), payload.buf().len() as u32);
             drop(payload);
             index2_cursor.move_next().unwrap();
         }
@@ -1506,7 +1505,7 @@ mod tests {
             assert_eq!(rowid, i + 1);
             let col_buf = (i as u16).to_be_bytes();
             assert_eq!(payload.buf(), &[3, 2, 14, col_buf[0], col_buf[1], 0xff]);
-            assert_eq!(payload.size(), payload.buf().len() as i32);
+            assert_eq!(payload.size(), payload.buf().len() as u32);
             drop(payload);
             assert_eq!(table_cursor.get_table_key().unwrap().unwrap(), i + 1);
             table_cursor.move_next().unwrap();
@@ -1517,7 +1516,7 @@ mod tests {
             assert_eq!(index_record.get(1).unwrap(), Value::Integer(i + 1));
             let rowid_buf = (i as u16 + 1).to_be_bytes();
             assert_eq!(payload.buf(), &[3, 14, 2, 0xff, rowid_buf[0], rowid_buf[1]]);
-            assert_eq!(payload.size(), payload.buf().len() as i32);
+            assert_eq!(payload.size(), payload.buf().len() as u32);
             drop(payload);
             index1_cursor.move_next().unwrap();
 
@@ -1526,7 +1525,7 @@ mod tests {
             let mut index_record = parse_record(&payload).unwrap();
             assert_eq!(index_record.get(0).unwrap(), Value::Integer(i));
             assert_eq!(index_record.get(1).unwrap(), Value::Integer(i + 1));
-            assert_eq!(payload.size(), payload.buf().len() as i32);
+            assert_eq!(payload.size(), payload.buf().len() as u32);
             drop(payload);
             index2_cursor.move_next().unwrap();
         }
@@ -1576,7 +1575,7 @@ mod tests {
         let mut index_record = parse_record(&payload).unwrap();
         assert_eq!(index_record.get(0).unwrap(), Value::Integer(2000));
         assert_eq!(index_record.get(1).unwrap(), Value::Integer(2001));
-        assert_eq!(payload.size(), payload.buf().len() as i32);
+        assert_eq!(payload.size(), payload.buf().len() as u32);
         drop(payload);
 
         index2_cursor
@@ -1590,7 +1589,7 @@ mod tests {
         let mut index_record = parse_record(&payload).unwrap();
         assert_eq!(index_record.get(0).unwrap(), Value::Integer(3000));
         assert_eq!(index_record.get(1).unwrap(), Value::Integer(3001));
-        assert_eq!(payload.size(), payload.buf().len() as i32);
+        assert_eq!(payload.size(), payload.buf().len() as u32);
         drop(payload);
 
         index2_cursor
@@ -1604,7 +1603,7 @@ mod tests {
         let mut index_record = parse_record(&payload).unwrap();
         assert_eq!(index_record.get(0).unwrap(), Value::Integer(3001));
         assert_eq!(index_record.get(1).unwrap(), Value::Integer(3002));
-        assert_eq!(payload.size(), payload.buf().len() as i32);
+        assert_eq!(payload.size(), payload.buf().len() as u32);
         drop(payload);
     }
 
@@ -2537,18 +2536,19 @@ mod tests {
         pager.abort();
 
         // Overflows with exact overflow page size
-        let mut size_exact_overflow_page_size = -1;
+        let mut size_exact_overflow_page_size = None;
         for i in 1..4096 {
             let p_size = max_local + i;
-            let n_local = bctx.n_local(true, p_size as i32) as usize;
-            if (p_size - n_local) % (bctx.usable_size as usize - 4) == 0 {
-                size_exact_overflow_page_size = p_size as i32;
+            let p_size = (p_size as u64).try_into().unwrap();
+            let n_local = bctx.n_local(true, p_size) as usize;
+            if (p_size.get() as usize - n_local) % (bctx.usable_size as usize - 4) == 0 {
+                size_exact_overflow_page_size = Some(p_size);
                 break;
             }
         }
-        assert!(size_exact_overflow_page_size > 0);
-        assert_eq!(size_exact_overflow_page_size, 4581);
-        let payload_size = size_exact_overflow_page_size as usize;
+        assert!(size_exact_overflow_page_size.is_some());
+        assert_eq!(size_exact_overflow_page_size.unwrap().get(), 4581);
+        let payload_size = size_exact_overflow_page_size.unwrap().get() as usize;
         {
             let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
             cursor.insert(3, &data[..payload_size]).unwrap();

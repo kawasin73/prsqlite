@@ -43,17 +43,17 @@ pub fn compare_record(keys: &[ValueCmp<'_>], payload: &BtreePayload) -> anyhow::
 pub struct SerialType(u32);
 
 impl SerialType {
-    pub fn content_size(&self) -> i32 {
+    pub fn content_size(&self) -> u32 {
         // TODO: use pre-calculated table for first 128 serial types.
         match self.0 {
-            n if n <= 4 => n as i32,
+            n if n <= 4 => n,
             5 => 6,
             6 | 7 => 8,
             8 | 9 => 0,
             10 | 11 => {
                 unimplemented!("reserved record is not implemented");
             }
-            n => ((n - 12) >> 1) as i32,
+            n => (n - 12) >> 1,
         }
     }
 
@@ -123,9 +123,9 @@ impl SerialType {
 }
 
 pub trait RecordPayload {
-    fn size(&self) -> i32;
+    fn size(&self) -> u32;
     fn buf(&self) -> &[u8];
-    fn load(&self, offset: i32, buf: &mut [u8]) -> anyhow::Result<usize>;
+    fn load(&self, offset: usize, buf: &mut [u8]) -> anyhow::Result<usize>;
 }
 
 /// A wrapper of BtreePayload to implement RecordPayload.
@@ -136,7 +136,7 @@ pub struct BtreeRecordPayload<'a>(&'a BtreePayload<'a>);
 
 impl RecordPayload for BtreeRecordPayload<'_> {
     #[inline]
-    fn size(&self) -> i32 {
+    fn size(&self) -> u32 {
         self.0.size()
     }
 
@@ -146,7 +146,7 @@ impl RecordPayload for BtreeRecordPayload<'_> {
     }
 
     #[inline]
-    fn load(&self, offset: i32, buf: &mut [u8]) -> anyhow::Result<usize> {
+    fn load(&self, offset: usize, buf: &mut [u8]) -> anyhow::Result<usize> {
         Ok(self.0.load(offset, buf)?)
     }
 }
@@ -159,7 +159,7 @@ impl<'a> From<&'a BtreePayload<'a>> for BtreeRecordPayload<'a> {
 
 pub struct Record<P: RecordPayload> {
     payload: P,
-    header: Vec<(SerialType, i32)>,
+    header: Vec<(SerialType, usize)>,
     tmp_buf: Vec<u8>,
 }
 
@@ -190,7 +190,7 @@ impl<P: RecordPayload> Record<P> {
         };
         let offset = *offset;
         let content_size = serial_type.content_size() as usize;
-        let buf = if offset as usize + content_size > self.payload.buf().len() {
+        let buf = if offset + content_size > self.payload.buf().len() {
             self.tmp_buf.resize(content_size, 0);
             let n = self.payload.load(offset, &mut self.tmp_buf)?;
             if n != content_size {
@@ -198,14 +198,14 @@ impl<P: RecordPayload> Record<P> {
             }
             &self.tmp_buf
         } else {
-            &self.payload.buf()[offset as usize..offset as usize + content_size]
+            &self.payload.buf()[offset..offset + content_size]
         };
         serial_type.parse(buf)
     }
 }
 
 #[inline]
-pub fn parse_record_header(payload: &BtreePayload) -> anyhow::Result<Vec<(SerialType, i32)>> {
+pub fn parse_record_header(payload: &BtreePayload) -> anyhow::Result<Vec<(SerialType, usize)>> {
     parse_record_header_payload::<BtreeRecordPayload>(&payload.into())
 }
 
@@ -214,20 +214,20 @@ pub fn parse_record_header(payload: &BtreePayload) -> anyhow::Result<Vec<(Serial
 /// TODO: support partial parsing.
 fn parse_record_header_payload<P: RecordPayload>(
     payload: &P,
-) -> anyhow::Result<Vec<(SerialType, i32)>> {
+) -> anyhow::Result<Vec<(SerialType, usize)>> {
     let local_buf = payload.buf();
     let (header_size, consumed) = parse_varint(local_buf).context("parse record header size")?;
-    let header_size: i32 = header_size.try_into().context("header size is too large")?;
-    let mut header_offset = consumed as i32;
+    let header_size: usize = header_size.try_into().context("header size is too large")?;
+    let mut header_offset = consumed;
     let mut content_offset = header_size;
 
     let mut buf_loaded;
-    let buf = if local_buf.len() > header_size as usize {
-        buf_loaded = vec![0; header_size as usize];
+    let buf = if local_buf.len() > header_size {
+        buf_loaded = vec![0; header_size];
         let n = payload
             .load(0, &mut buf_loaded)
             .context("load record header")?;
-        if n != header_size as usize {
+        if n != header_size {
             bail!(
                 "record header size {} does not match with loaded size {}",
                 header_size,
@@ -242,12 +242,12 @@ fn parse_record_header_payload<P: RecordPayload>(
     let mut parsed = Vec::new();
     while header_offset < header_size {
         let (serial_type, consumed) =
-            parse_varint(&buf[header_offset as usize..]).context("parse serial type")?;
+            parse_varint(&buf[header_offset..]).context("parse serial type")?;
         let serial_type = SerialType(serial_type.try_into().context("serial type is too large")?);
         let content_size = serial_type.content_size();
         parsed.push((serial_type, content_offset));
-        header_offset += consumed as i32;
-        content_offset += content_size;
+        header_offset += consumed;
+        content_offset += content_size as usize;
     }
 
     Ok(parsed)
@@ -513,17 +513,17 @@ mod tests {
     }
 
     impl RecordPayload for FakePayload<'_> {
-        fn size(&self) -> i32 {
-            self.buf.len() as i32
+        fn size(&self) -> u32 {
+            self.buf.len() as u32
         }
 
         fn buf(&self) -> &[u8] {
             self.buf
         }
 
-        fn load(&self, offset: i32, buf: &mut [u8]) -> anyhow::Result<usize> {
-            let n = buf.len().min(self.buf.len() - offset as usize);
-            buf[..n].copy_from_slice(&self.buf[offset as usize..offset as usize + n]);
+        fn load(&self, offset: usize, buf: &mut [u8]) -> anyhow::Result<usize> {
+            let n = buf.len().min(self.buf.len() - offset);
+            buf[..n].copy_from_slice(&self.buf[offset..offset + n]);
             Ok(n)
         }
     }
