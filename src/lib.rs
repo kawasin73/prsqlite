@@ -785,11 +785,11 @@ impl<'conn> SelectStatement<'conn> {
                 .iter()
                 .map(|(v, c)| (v.as_value(), c))
                 .collect::<Vec<_>>();
-            let mut keys = Vec::with_capacity(index.keys.len() + index.n_extra + 1);
-            keys.extend(tmp_keys.iter().map(|(v, c)| Some(ValueCmp::new(v, c))));
+            let mut comparators = Vec::with_capacity(index.keys.len() + index.n_extra + 1);
+            comparators.extend(tmp_keys.iter().map(|(v, c)| Some(ValueCmp::new(v, c))));
             // +1 for rowid
-            keys.extend((0..index.n_extra + 1).map(|_| None));
-            index_cursor.index_move_to(&keys)?;
+            comparators.extend((0..index.n_extra + 1).map(|_| None));
+            index_cursor.index_move_to(&comparators)?;
             Some(index_cursor)
         } else {
             cursor.move_to_first()?;
@@ -1080,7 +1080,7 @@ impl<'conn> InsertStatement<'conn> {
 
             let record = build_record(&columns);
 
-            cursor.insert(rowid, &record)?;
+            cursor.table_insert(rowid, &record)?;
 
             // TODO: insert into index if exists.
 

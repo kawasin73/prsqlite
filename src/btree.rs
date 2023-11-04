@@ -182,6 +182,12 @@ impl BtreePageType {
         self.0 & INDEX_FLAG != 0
     }
 
+    #[inline]
+    pub fn is_table_leaf(&self) -> bool {
+        const MASK: u8 = LEAF_FLAG | TABLE_FLAG;
+        self.0 & (MASK) == MASK
+    }
+
     /// The btree page header size.
     ///
     /// * Returns 8 if this is a leaf page.
@@ -197,13 +203,20 @@ impl BtreePageType {
     }
 
     pub fn compute_cell_size_fn(&self) -> fn(&BtreeContext, &[u8], usize) -> ParseResult<u16> {
-        if self.is_index() {
-            todo!("index cell size");
-        }
-        if self.is_leaf() {
-            compute_table_leaf_cell_size
+        if self.is_table() {
+            if self.is_leaf() {
+                compute_table_leaf_cell_size
+            } else {
+                compute_table_interior_cell_size
+            }
+        } else if self.is_index() {
+            if self.is_leaf() {
+                compute_index_leaf_cell_size
+            } else {
+                compute_index_interior_cell_size
+            }
         } else {
-            compute_table_interior_cell_size
+            unreachable!("invalid page type must be asserted");
         }
     }
 }
@@ -474,6 +487,32 @@ fn compute_table_interior_cell_size(
     Ok(4 + key_length as u16)
 }
 
+fn compute_index_leaf_cell_size(
+    ctx: &BtreeContext,
+    // TODO: How to accept both PageBufferMut and TemporaryPage?
+    buffer: &[u8],
+    offset: usize,
+) -> ParseResult<u16> {
+    let (payload_size, payload_size_length) =
+        parse_varint(&buffer[offset..]).ok_or(FileCorrupt("parse key size"))?;
+    let n_local = if payload_size <= ctx.max_local(false) as u64 {
+        payload_size as u16
+    } else {
+        let payload_size: PayloadSize = payload_size.try_into()?;
+        ctx.n_local(false, payload_size) + BTREE_OVERFLOW_PAGE_ID_BYTES as u16
+    };
+    Ok(payload_size_length as u16 + n_local)
+}
+
+fn compute_index_interior_cell_size(
+    ctx: &BtreeContext,
+    // TODO: How to accept both PageBufferMut and TemporaryPage?
+    buffer: &[u8],
+    offset: usize,
+) -> ParseResult<u16> {
+    Ok(4 + compute_index_leaf_cell_size(ctx, buffer, offset + 4)?)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct OverflowPage {
     page_id: PageId,
@@ -699,7 +738,7 @@ pub fn allocate_from_unallocated_space(
 }
 
 /// Write a table leaf cell to the specified offset.
-pub fn write_table_leaf_cell(
+pub fn write_leaf_cell(
     buffer: &mut PageBufferMut,
     offset: usize,
     cell_header: &[u8],

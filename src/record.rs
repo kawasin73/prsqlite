@@ -26,20 +26,20 @@ use crate::value::Value;
 use crate::value::ValueCmp;
 
 pub fn compare_record(
-    keys: &[Option<ValueCmp<'_>>],
+    comparators: &[Option<ValueCmp<'_>>],
     payload: &BtreePayload,
 ) -> anyhow::Result<Ordering> {
     let mut record = parse_record(payload)?;
-    if record.len() < keys.len() {
+    if record.len() < comparators.len() {
         bail!("keys is more than index columns");
     }
-    for (i, key) in keys.iter().enumerate() {
+    for (i, cmp) in comparators.iter().enumerate() {
         let index_value = record.get(i)?;
-        match (key, index_value) {
+        match (cmp, index_value) {
             (None, None) => continue,
             (None, Some(_)) => return Ok(Ordering::Less),
             (Some(_), None) => return Ok(Ordering::Greater),
-            (Some(key), Some(index_value)) => match key.compare(&index_value) {
+            (Some(cmp), Some(index_value)) => match cmp.compare(&index_value) {
                 Ordering::Equal => continue,
                 o => return Ok(o),
             },

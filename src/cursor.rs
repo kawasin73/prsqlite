@@ -24,7 +24,7 @@ use crate::btree::non_zero_to_u16;
 use crate::btree::parse_btree_interior_cell_page_id;
 use crate::btree::parse_btree_leaf_table_cell;
 use crate::btree::set_u16;
-use crate::btree::write_table_leaf_cell;
+use crate::btree::write_leaf_cell;
 use crate::btree::BtreeContext;
 use crate::btree::BtreePageHeader;
 use crate::btree::BtreePageHeaderMut;
@@ -69,6 +69,7 @@ pub enum Error {
     NotInitialized,
     Record(anyhow::Error),
     PayloadTooLarge,
+    IndexExists,
 }
 
 impl std::error::Error for Error {
@@ -83,6 +84,7 @@ impl std::error::Error for Error {
             Self::NotInitialized => None,
             Self::Record(e) => e.source(),
             Self::PayloadTooLarge => None,
+            Self::IndexExists => None,
         }
     }
 }
@@ -112,6 +114,7 @@ impl Display for Error {
             Self::NotInitialized => f.write_str("cursor is not initialized"),
             Self::Record(e) => f.write_fmt(format_args!("record: {}", e)),
             Self::PayloadTooLarge => f.write_str("payload is too large"),
+            Self::IndexExists => f.write_str("index already exists"),
         }
     }
 }
@@ -338,8 +341,30 @@ impl<'a> BtreeCursor<'a> {
 
     /// Move to the specified btree index cell with the key.
     ///
-    /// If it does not exist, move to the next cell.
-    pub fn index_move_to(&mut self, keys: &[Option<ValueCmp>]) -> Result<()> {
+    /// Returns `true` if exact key is found.
+    ///
+    /// If it does not exist, move to the next cell and returns `false`.
+    pub fn index_move_to(&mut self, comparators: &[Option<ValueCmp>]) -> Result<bool> {
+        let found = self.index_move_to_leaf(comparators)?;
+        if !found && self.current_page.page_type.is_leaf() {
+            // If the key is between the last key of the index leaf page and the parent key,
+            // we need to adjust the cursor to the parent cell.
+            if self.current_page.idx_cell == self.current_page.n_cells {
+                while self.back_to_parent()
+                    && self.current_page.idx_cell == self.current_page.n_cells
+                {}
+            }
+        }
+        Ok(found)
+    }
+
+    /// Move to the specified btree index cell with the key without adjustment.
+    ///
+    /// Returns `true` if exact key is found.
+    ///
+    /// If it does not exist, the cursor points to a cell (or tail) of a leaf
+    /// page and returns `false`.
+    fn index_move_to_leaf(&mut self, comparators: &[Option<ValueCmp>]) -> Result<bool> {
         self.move_to_root();
         loop {
             if !self.current_page.page_type.is_index() {
@@ -367,14 +392,14 @@ impl<'a> BtreeCursor<'a> {
                     local_payload_buffer: self.current_page.mem.buffer(),
                     payload_info,
                 };
-                match compare_record(keys, &key_payload).map_err(Error::Record)? {
+                match compare_record(comparators, &key_payload).map_err(Error::Record)? {
                     Ordering::Less => {
                         i_max = i_mid;
                     }
                     Ordering::Equal => {
                         self.current_page.idx_cell = i_mid as u16;
                         self.initialized = true;
-                        return Ok(());
+                        return Ok(true);
                     }
                     Ordering::Greater => {
                         i_min = i_mid + 1;
@@ -383,24 +408,8 @@ impl<'a> BtreeCursor<'a> {
             }
             self.current_page.idx_cell = i_min as u16;
             if self.current_page.page_type.is_leaf() {
-                drop(buffer);
-                // If the key is between the last key of the index leaf page and the parent key,
-                // we need to adjust the cursor to parent cell.
-                if self.current_page.idx_cell == self.current_page.n_cells {
-                    loop {
-                        if self.back_to_parent() {
-                            if self.current_page.idx_cell == self.current_page.n_cells {
-                                continue;
-                            }
-                        } else {
-                            // traversing completed.
-                            self.current_page.idx_cell += 1;
-                        }
-                        break;
-                    }
-                }
                 self.initialized = true;
-                return Ok(());
+                return Ok(false);
             }
 
             let next_page_id = if i_min == self.current_page.n_cells as usize {
@@ -524,29 +533,87 @@ impl<'a> BtreeCursor<'a> {
         Ok(())
     }
 
+    /// Insert a new key to index.
+    ///
+    /// This fails if the key already exists. If you need to update the key for
+    /// an entry, delete the key in the index first.
+    #[allow(dead_code)]
+    pub fn index_insert(&mut self, comparators: &[Option<ValueCmp>], payload: &[u8]) -> Result<()> {
+        let payload_size: PayloadSize = (payload.len() as u64)
+            .try_into()
+            .map_err(|_| Error::PayloadTooLarge)?;
+
+        if self.index_move_to_leaf(comparators)? {
+            // index_insert() does not support updating a key.
+            return Err(Error::IndexExists);
+        }
+
+        assert!(self.current_page.page_type.is_index());
+        // Since the key is not in the index, the cursor must be pointing the leaf page.
+        assert!(self.current_page.page_type.is_leaf());
+
+        let mut cell_header_buf = [0; 9];
+
+        let (cell_header, local_payload, overflow_page_id) =
+            self.pack_cell(cell_header_buf.as_mut_slice(), payload, payload_size, None)?;
+
+        self.insert_cell(cell_header, local_payload, overflow_page_id)
+    }
+
     /// Insert or update a new item to the table.
     ///
     /// There should not be other [BtreeCursor]s pointing the same btree.
     /// Otherwise, this fails.
-    pub fn insert(&mut self, key: i64, payload: &[u8]) -> Result<()> {
-        let current_cell_key = self.table_move_to(key)?;
-
-        let mut cell_header_buf = [0; 18];
+    pub fn table_insert(&mut self, key: i64, payload: &[u8]) -> Result<()> {
         let payload_size: PayloadSize = (payload.len() as u64)
             .try_into()
             .map_err(|_| Error::PayloadTooLarge)?;
-        let mut cell_header_size =
-            put_varint(cell_header_buf.as_mut_slice(), payload_size.get() as u64) as u16;
-        cell_header_size += put_varint(
-            &mut cell_header_buf[cell_header_size as usize..],
-            i64_to_u64(key),
-        ) as u16;
+
+        let current_cell_key = self.table_move_to(key)?;
+
+        assert!(self.current_page.page_type.is_table());
+        assert!(self.current_page.page_type.is_leaf());
+
+        if let Some(current_cell_key) = current_cell_key {
+            if current_cell_key == key {
+                // TODO: Update the payload
+                todo!("update the payload");
+            }
+        }
+
+        let mut cell_header_buf = [0; 18];
+
+        let (cell_header, local_payload, overflow_page_id) = self.pack_cell(
+            cell_header_buf.as_mut_slice(),
+            payload,
+            payload_size,
+            Some(key),
+        )?;
+
+        self.insert_cell(cell_header, local_payload, overflow_page_id)
+    }
+
+    fn pack_cell<'b>(
+        &self,
+        cell_header_buf: &'b mut [u8],
+        payload: &'b [u8],
+        payload_size: PayloadSize,
+        table_key: Option<i64>,
+    ) -> Result<(&'b [u8], &'b [u8], Option<PageId>)> {
+        assert!(cell_header_buf.len() >= 9);
+        let mut cell_header_size = put_varint(cell_header_buf, payload_size.get() as u64) as u16;
+        if let Some(key) = table_key {
+            assert!(cell_header_buf.len() >= 18);
+            cell_header_size += put_varint(
+                &mut cell_header_buf[cell_header_size as usize..],
+                i64_to_u64(key),
+            ) as u16;
+        }
         let cell_header = &cell_header_buf[..cell_header_size as usize];
-        let is_table = true;
-        let (new_cell_size, local_payload, overflow_page_id) = if payload_size.get()
-            <= self.btree_ctx.max_local(is_table) as u32
-        {
-            (cell_header_size + payload_size.get() as u16, payload, None)
+
+        let is_table = table_key.is_some();
+        if payload_size.get() <= self.btree_ctx.max_local(is_table) as u32 {
+            Ok((cell_header, payload, None))
         } else {
             // Split the payload into local and overflow pages.
             let n_local = self.btree_ctx.n_local(is_table, payload_size);
@@ -559,17 +626,17 @@ impl<'a> BtreeCursor<'a> {
             while i_overflow_payload + usable_size_overflow < payload.len() {
                 let (next_page_id, next_page) =
                     self.pager.allocate_page().map_err(Error::AllocatePage)?;
-                page_id = next_page_id;
                 // make_page_mut() must succeed for allocated pages.
                 let mut buffer = self.pager.make_page_mut(&page).unwrap();
-                let next_page_id = next_page_id.get().to_be_bytes();
-                assert_eq!(next_page_id.len(), BTREE_OVERFLOW_PAGE_ID_BYTES);
-                buffer[..next_page_id.len()].copy_from_slice(&next_page_id);
-                buffer[next_page_id.len()..self.btree_ctx.usable_size as usize].copy_from_slice(
-                    &payload[i_overflow_payload..i_overflow_payload + usable_size_overflow],
-                );
+                let next_page_id_buf = next_page_id.get().to_be_bytes();
+                buffer[..next_page_id_buf.len()].copy_from_slice(&next_page_id_buf);
+                buffer[next_page_id_buf.len()..self.btree_ctx.usable_size as usize]
+                    .copy_from_slice(
+                        &payload[i_overflow_payload..i_overflow_payload + usable_size_overflow],
+                    );
                 drop(buffer);
                 i_overflow_payload += usable_size_overflow;
+                page_id = next_page_id;
                 page = next_page;
             }
             let mut buffer = self
@@ -582,33 +649,37 @@ impl<'a> BtreeCursor<'a> {
                 .copy_from_slice(&payload[i_overflow_payload..]);
             drop(buffer);
 
-            (
-                cell_header_size + n_local + BTREE_OVERFLOW_PAGE_ID_BYTES as u16,
+            Ok((
+                cell_header,
                 &payload[..n_local as usize],
                 Some(first_overflow_page_id),
-            )
-        };
-
-        match current_cell_key {
-            Some(current_cell_key) if current_cell_key == key => {
-                // TODO: Update the payload
-                todo!("update the payload");
-            }
-            _ => {}
+            ))
         }
+    }
 
-        assert!(self.current_page.page_type.is_table());
-        assert!(self.current_page.page_type.is_leaf());
-
-        let mut depth = self.parent_pages.len();
-        let mut interior_cell_buf = [0; 13];
-
+    fn insert_cell(
+        &mut self,
+        cell_header: &[u8],
+        local_payload: &[u8],
+        overflow_page_id: Option<PageId>,
+    ) -> Result<()> {
+        let new_cell_size = cell_header.len()
+            + local_payload.len()
+            + BTREE_OVERFLOW_PAGE_ID_BYTES * overflow_page_id.is_some() as usize;
+        assert!(new_cell_size <= u16::MAX as usize);
         // Allocate 4 bytes or more to be compatible to allocateSpace() of SQLite.
         // Otherwise freeSpace() of SQLite corrupts the database file (e.g. on updating
         // or deleting records). 4 bytes allocation is introduced in order to make
         // spaces easier to reused as freeblock. 1 ~ 3 bytes spaces are counted as
         // fragmented and never reused. cell_size can be less than 4 on index pages.
-        let mut new_cell_size = if new_cell_size < 4 { 4 } else { new_cell_size };
+        let mut new_cell_size = if new_cell_size < 4 {
+            4
+        } else {
+            new_cell_size as u16
+        };
+
+        let mut depth = self.parent_pages.len();
+        let mut interior_cell_buf = self.pager.allocate_tmp_page();
 
         loop {
             let current_page = if depth == self.parent_pages.len() {
@@ -774,23 +845,18 @@ impl<'a> BtreeCursor<'a> {
                     .set_n_cells(current_page.n_cells);
 
                 // Update cell pointer.
-                let cell_pointer_offset = if current_cell_key.is_some() {
-                    // Insert the new cell between cells.
-                    let cell_pointer_offset =
-                        cell_pointer_offset(&current_page.mem, current_page.idx_cell, header_size);
-                    buffer.copy_within(
-                        cell_pointer_offset..unallocated_space_offset,
-                        cell_pointer_offset + 2,
-                    );
-                    cell_pointer_offset
-                } else {
-                    // Append the new cell to the tail.
-                    unallocated_space_offset
-                };
+                let cell_pointer_offset =
+                    cell_pointer_offset(&current_page.mem, current_page.idx_cell, header_size);
+                // Insert the new cell between cells. If the pointer is at the tail, this copy
+                // is no-op.
+                buffer.copy_within(
+                    cell_pointer_offset..unallocated_space_offset,
+                    cell_pointer_offset + 2,
+                );
                 set_u16(&mut buffer, cell_pointer_offset, allocated_offset as u16);
 
                 if page_type.is_leaf() {
-                    write_table_leaf_cell(
+                    write_leaf_cell(
                         &mut buffer,
                         allocated_offset,
                         cell_header,
@@ -942,10 +1008,10 @@ impl<'a> BtreeCursor<'a> {
                     new_cell_size,
                 );
                 if current_page.page_type.is_leaf() {
-                    write_table_leaf_cell(
+                    write_leaf_cell(
                         &mut new_buffer,
                         cell_content_area_offset,
-                        &cell_header[..cell_header_size as usize],
+                        cell_header,
                         local_payload,
                         overflow_page_id,
                     );
@@ -994,8 +1060,6 @@ impl<'a> BtreeCursor<'a> {
                 new_page_header.set_cell_content_area_offset(cell_content_area_offset as u16);
                 new_page_header.clear_fragmented_free_bytes();
 
-                interior_cell_buf[..4].copy_from_slice(&new_page_id.get().to_be_bytes());
-
                 let n_left_cells = if move_to_right {
                     if !current_page.page_type.is_leaf() {
                         // Copy the right page id from left to right page.
@@ -1013,49 +1077,87 @@ impl<'a> BtreeCursor<'a> {
                 let mut left_buffer = new_buffer;
 
                 // Fill interior cell with the new key.
-                let key_length = {
-                    let cell_offset = get_cell_offset(
-                        &current_page.mem,
-                        &left_buffer,
-                        n_left_cells - 1,
-                        header_size,
-                    )
-                    .map_err(|e| Error::FileCorrupt {
-                        page_id: current_page.page_id,
-                        e,
-                    })?;
-                    let key_offset_in_cell = if current_page.page_type.is_leaf() {
-                        // payload_size_length
-                        len_varint_buffer(&left_buffer[cell_offset..]).ok_or_else(|| {
-                            Error::FileCorrupt {
+                let cell_offset = get_cell_offset(
+                    &current_page.mem,
+                    &left_buffer,
+                    n_left_cells - 1,
+                    header_size,
+                )
+                .map_err(|e| Error::FileCorrupt {
+                    page_id: current_page.page_id,
+                    e,
+                })?;
+                // TODO: Better way to get the range of key? Reuse the size array
+                let key_range =
+                    if current_page.page_type.is_leaf() {
+                        if current_page.page_type.is_table() {
+                            // payload_size_length
+                            let key_offset_in_cell = len_varint_buffer(&left_buffer[cell_offset..])
+                                .ok_or_else(|| Error::FileCorrupt {
+                                    page_id: current_page.page_id,
+                                    e: FileCorrupt::new("payload size len"),
+                                })?;
+                            let key_offset = cell_offset + key_offset_in_cell;
+                            let key_length = len_varint_buffer(&left_buffer[key_offset..])
+                                .ok_or_else(|| Error::FileCorrupt {
+                                    page_id: current_page.page_id,
+                                    e: FileCorrupt::new("key length"),
+                                })?;
+                            key_offset..key_offset + key_length
+                        } else if current_page.page_type.is_index() {
+                            let cell_size =
+                                compute_cell_size(self.btree_ctx, &left_buffer, cell_offset)
+                                    .map_err(|e| Error::FileCorrupt {
+                                        page_id: current_page.page_id,
+                                        e,
+                                    })?;
+                            cell_offset..cell_offset + cell_size as usize
+                        } else {
+                            return Err(Error::FileCorrupt {
                                 page_id: current_page.page_id,
-                                e: FileCorrupt::new("payload size len"),
-                            }
-                        })?
+                                e: FileCorrupt::new("invalid page type"),
+                            });
+                        }
                     } else {
                         // Set the right page id of the left page.
                         // No header offset calibration because both pages must not page 1
                         // because they are not the root page.
                         left_buffer.copy_within(cell_offset..cell_offset + 4, 8);
-                        // Remove the cell at the tail.
-                        // TODO: add the cell to freeblocks list or try not to copy the cell.
-                        BtreePageHeaderMut::from_page(&current_page.mem, &mut left_buffer)
-                            .set_n_cells(n_left_cells - 1);
-                        4
-                    };
-                    let key_offset = cell_offset + key_offset_in_cell;
-                    let key_length =
-                        len_varint_buffer(&left_buffer[key_offset..]).ok_or_else(|| {
-                            Error::FileCorrupt {
+                        let key_offset_in_cell = 4;
+                        if current_page.page_type.is_table() {
+                            let key_offset = cell_offset + key_offset_in_cell;
+                            let key_length = len_varint_buffer(&left_buffer[key_offset..])
+                                .ok_or_else(|| Error::FileCorrupt {
+                                    page_id: current_page.page_id,
+                                    e: FileCorrupt::new("key length"),
+                                })?;
+                            key_offset..key_offset + key_length
+                        } else if current_page.page_type.is_index() {
+                            let cell_size =
+                                compute_cell_size(self.btree_ctx, &left_buffer, cell_offset)
+                                    .map_err(|e| Error::FileCorrupt {
+                                        page_id: current_page.page_id,
+                                        e,
+                                    })?;
+                            cell_offset + 4..cell_offset + cell_size as usize
+                        } else {
+                            return Err(Error::FileCorrupt {
                                 page_id: current_page.page_id,
-                                e: FileCorrupt::new("key length"),
-                            }
-                        })?;
-                    interior_cell_buf[4..4 + key_length]
-                        .copy_from_slice(&left_buffer[key_offset..key_offset + key_length]);
-                    key_length as u16
-                };
-                new_cell_size = 4 + key_length;
+                                e: FileCorrupt::new("invalid page type"),
+                            });
+                        }
+                    };
+                let key = &left_buffer[key_range];
+                new_cell_size = 4 + key.len() as u16;
+                interior_cell_buf[..4].copy_from_slice(&new_page_id.get().to_be_bytes());
+                interior_cell_buf[4..new_cell_size as usize].copy_from_slice(key);
+                let is_table_leaf = current_page.page_type.is_table_leaf();
+                if !is_table_leaf {
+                    // Remove the cell at the tail.
+                    // TODO: add the cell to freeblocks list or try not to copy the cell.
+                    BtreePageHeaderMut::from_page(&current_page.mem, &mut left_buffer)
+                        .set_n_cells(n_left_cells - 1);
+                }
 
                 drop(buffer);
                 drop(left_buffer);
@@ -1063,8 +1165,7 @@ impl<'a> BtreeCursor<'a> {
                 // not points at the buffer of new_page.
                 current_page.mem = new_page;
                 current_page.n_cells = n_new_cells;
-                current_page.n_cells -=
-                    (!move_to_right && !current_page.page_type.is_leaf()) as u16;
+                current_page.n_cells -= (!move_to_right && !is_table_leaf) as u16;
                 current_page.idx_cell = new_idx_cell;
 
                 depth -= 1;
@@ -1235,6 +1336,7 @@ mod tests {
     use crate::header::DATABASE_HEADER_SIZE;
     use crate::pager::MAX_PAGE_SIZE;
     use crate::pager::PAGE_ID_1;
+    use crate::record::build_record;
     use crate::record::parse_record;
     use crate::test_utils::*;
     use crate::value::Collation;
@@ -1416,9 +1518,9 @@ mod tests {
         assert!(cursor.get_index_payload().unwrap().is_none());
         cursor.move_next().unwrap();
         assert!(cursor.get_index_payload().unwrap().is_none());
-        cursor
+        assert!(!cursor
             .index_move_to(&[Some(ValueCmp::new(&Value::Integer(0), &Collation::Binary))])
-            .unwrap();
+            .unwrap());
         assert!(cursor.get_index_payload().unwrap().is_none());
         cursor.move_to_last().unwrap();
         assert!(cursor.get_index_payload().unwrap().is_none());
@@ -1570,12 +1672,12 @@ mod tests {
         let (rowid, _) = payload.unwrap();
         assert_eq!(rowid, 2000);
 
-        index2_cursor
-            .index_move_to(&[Some(ValueCmp::new(
-                &Value::Integer(2000),
-                &Collation::Binary,
-            ))])
-            .unwrap();
+        assert!(!index2_cursor
+            .index_move_to(&[
+                Some(ValueCmp::new(&Value::Integer(2000), &Collation::Binary)),
+                None
+            ])
+            .unwrap());
         let payload = index2_cursor.get_index_payload().unwrap();
         let payload = payload.unwrap();
         let mut index_record = parse_record(&payload).unwrap();
@@ -1584,12 +1686,12 @@ mod tests {
         assert_eq!(payload.size(), payload.buf().len() as u32);
         drop(payload);
 
-        index2_cursor
+        assert!(index2_cursor
             .index_move_to(&[
                 Some(ValueCmp::new(&Value::Integer(3000), &Collation::Binary)),
                 Some(ValueCmp::new(&Value::Integer(3001), &Collation::Binary)),
             ])
-            .unwrap();
+            .unwrap());
         let payload = index2_cursor.get_index_payload().unwrap();
         let payload = payload.unwrap();
         let mut index_record = parse_record(&payload).unwrap();
@@ -1598,12 +1700,12 @@ mod tests {
         assert_eq!(payload.size(), payload.buf().len() as u32);
         drop(payload);
 
-        index2_cursor
+        assert!(!index2_cursor
             .index_move_to(&[
                 Some(ValueCmp::new(&Value::Integer(3000), &Collation::Binary)),
                 Some(ValueCmp::new(&Value::Integer(3003), &Collation::Binary)),
             ])
-            .unwrap();
+            .unwrap());
         let payload = index2_cursor.get_index_payload().unwrap();
         let payload = payload.unwrap();
         let mut index_record = parse_record(&payload).unwrap();
@@ -1834,12 +1936,12 @@ mod tests {
         let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
 
         for i in 0..3 {
-            cursor
+            assert!(!cursor
                 .index_move_to(&[Some(ValueCmp::new(
                     &Value::Integer(2 * i),
                     &Collation::Binary,
                 ))])
-                .unwrap();
+                .unwrap());
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some());
             let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
@@ -1847,12 +1949,12 @@ mod tests {
             assert_eq!(record.get(1).unwrap(), Some(Value::Integer(2 * i + 1)));
             drop(payload);
 
-            cursor
+            assert!(cursor
                 .index_move_to(&[Some(ValueCmp::new(
                     &Value::Integer(2 * i + 1),
                     &Collation::Binary,
                 ))])
-                .unwrap();
+                .unwrap());
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some());
             let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
@@ -1860,9 +1962,9 @@ mod tests {
             assert_eq!(record.get(1).unwrap(), Some(Value::Integer(2 * i + 1)));
         }
 
-        cursor
+        assert!(cursor
             .index_move_to(&[Some(ValueCmp::new(&Value::Integer(10), &Collation::Binary))])
-            .unwrap();
+            .unwrap());
         let payload = cursor.get_index_payload().unwrap();
         assert!(payload.is_some());
         let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
@@ -1872,13 +1974,27 @@ mod tests {
         assert_eq!(record.get(1).unwrap(), Some(Value::Integer(11)));
         drop(payload);
 
+        assert!(!cursor
+            .index_move_to(&[
+                Some(ValueCmp::new(&Value::Integer(10), &Collation::Binary)),
+                None
+            ])
+            .unwrap());
+        let payload = cursor.get_index_payload().unwrap();
+        assert!(payload.is_some());
+        let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
+        assert_eq!(record.get(0).unwrap(), Some(Value::Integer(10)));
+        // Specify None to the rowid column comparator to get the first entry.
+        assert_eq!(record.get(1).unwrap(), Some(Value::Integer(10)));
+        drop(payload);
+
         for i in 10..13 {
-            cursor
+            assert!(cursor
                 .index_move_to(&[
                     Some(ValueCmp::new(&Value::Integer(10), &Collation::Binary)),
                     Some(ValueCmp::new(&Value::Integer(i), &Collation::Binary)),
                 ])
-                .unwrap();
+                .unwrap());
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some());
             let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
@@ -1886,12 +2002,12 @@ mod tests {
             assert_eq!(record.get(1).unwrap(), Some(Value::Integer(i)));
         }
 
-        cursor
+        assert!(!cursor
             .index_move_to(&[
                 Some(ValueCmp::new(&Value::Integer(10), &Collation::Binary)),
                 Some(ValueCmp::new(&Value::Integer(13), &Collation::Binary)),
             ])
-            .unwrap();
+            .unwrap());
         let payload = cursor.get_index_payload().unwrap();
         assert!(payload.is_some());
         let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
@@ -1899,12 +2015,12 @@ mod tests {
         assert_eq!(record.get(1).unwrap(), Some(Value::Integer(14)));
         drop(payload);
 
-        cursor
+        assert!(!cursor
             .index_move_to(&[
                 Some(ValueCmp::new(&Value::Integer(11), &Collation::Binary)),
                 Some(ValueCmp::new(&Value::Integer(16), &Collation::Binary)),
             ])
-            .unwrap();
+            .unwrap());
         let payload = cursor.get_index_payload().unwrap();
         assert!(payload.is_none());
     }
@@ -1949,7 +2065,7 @@ mod tests {
 
         let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
 
-        for (expected, keys) in [
+        for (expected, comparators) in [
             (15, vec![None, None, None]),
             (
                 1,
@@ -2126,15 +2242,15 @@ mod tests {
                 ],
             ),
         ] {
-            cursor.index_move_to(&keys).unwrap();
+            cursor.index_move_to(&comparators).unwrap();
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some());
             let payload = payload.unwrap();
             let mut record = parse_record(&payload).unwrap();
             if let Some(Value::Integer(rowid)) = record.get(record.len() - 1).unwrap() {
-                assert_eq!(rowid, expected, "{:?}", keys);
+                assert_eq!(rowid, expected, "{:?}", comparators);
             } else {
-                panic!("unexpected payload: {:?}", keys);
+                panic!("unexpected payload: {:?}", comparators);
             }
         }
     }
@@ -2238,9 +2354,9 @@ mod tests {
         let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
 
         for i in 0..3 {
-            cursor
+            assert!(!cursor
                 .index_move_to(&[Some(ValueCmp::new(&Value::Integer(i), &Collation::Binary))])
-                .unwrap();
+                .unwrap());
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_none());
         }
@@ -2285,12 +2401,12 @@ mod tests {
         let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
 
         for i in 0..2000 {
-            cursor
+            assert!(!cursor
                 .index_move_to(&[Some(ValueCmp::new(
                     &Value::Integer(2 * i),
                     &Collation::Binary,
                 ))])
-                .unwrap();
+                .unwrap());
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some(), "i = {}", i);
             let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
@@ -2301,12 +2417,12 @@ mod tests {
             // Reset the cursor.
             cursor.move_to_first().unwrap();
 
-            cursor
+            assert!(cursor
                 .index_move_to(&[Some(ValueCmp::new(
                     &Value::Integer(2 * i + 1),
                     &Collation::Binary,
                 ))])
-                .unwrap();
+                .unwrap());
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some(), "i = {}", i);
             let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
@@ -2318,12 +2434,12 @@ mod tests {
             cursor.move_to_first().unwrap();
         }
 
-        cursor
+        assert!(!cursor
             .index_move_to(&[Some(ValueCmp::new(
                 &Value::Integer(10000),
                 &Collation::Binary,
             ))])
-            .unwrap();
+            .unwrap());
         let payload = cursor.get_index_payload().unwrap();
         assert!(payload.is_none());
     }
@@ -2337,7 +2453,7 @@ mod tests {
 
         let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
 
-        cursor.insert(1, &[1]).unwrap();
+        cursor.table_insert(1, &[1]).unwrap();
         cursor.move_to_first().unwrap();
         let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
         assert_eq!(key, 1);
@@ -2349,8 +2465,8 @@ mod tests {
         assert!(payload.is_none());
         drop(payload);
 
-        cursor.insert(2, &[2, 3]).unwrap();
-        cursor.insert(4, &[4, 5, 6, 7]).unwrap();
+        cursor.table_insert(2, &[2, 3]).unwrap();
+        cursor.table_insert(4, &[4, 5, 6, 7]).unwrap();
 
         cursor.move_to_first().unwrap();
         let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
@@ -2375,8 +2491,8 @@ mod tests {
         assert!(payload.is_none());
         drop(payload);
 
-        cursor.insert(-1, &[255]).unwrap();
-        cursor.insert(3, &[]).unwrap();
+        cursor.table_insert(-1, &[255]).unwrap();
+        cursor.table_insert(3, &[]).unwrap();
 
         cursor.move_to_first().unwrap();
         let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
@@ -2428,9 +2544,9 @@ mod tests {
 
         let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
 
-        cursor.insert(6, &[6]).unwrap();
-        cursor.insert(-1, &[255]).unwrap();
-        cursor.insert(3, &[3]).unwrap();
+        cursor.table_insert(6, &[6]).unwrap();
+        cursor.table_insert(-1, &[255]).unwrap();
+        cursor.table_insert(3, &[3]).unwrap();
 
         cursor.move_to_first().unwrap();
         let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
@@ -2484,7 +2600,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_max_page_size() {
+    fn test_insert_table_max_page_size() {
         let file =
             create_sqlite_database(&["PRAGMA page_size = 65536;", "CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
@@ -2509,7 +2625,7 @@ mod tests {
 
         // cell_content_area_offset zero must be translated as 65536 and inserting must
         // succeed.
-        cursor.insert(1, &[1]).unwrap();
+        cursor.table_insert(1, &[1]).unwrap();
         cursor.move_to_first().unwrap();
         let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
         assert_eq!(key, 1);
@@ -2523,7 +2639,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_overflow() {
+    fn test_insert_table_overflow() {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
 
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
@@ -2540,7 +2656,7 @@ mod tests {
         // Not overflow
         {
             let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
-            cursor.insert(1, &data[..max_local]).unwrap();
+            cursor.table_insert(1, &data[..max_local]).unwrap();
             cursor.table_move_to(1).unwrap();
             let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
             assert_eq!(key, 1);
@@ -2554,7 +2670,7 @@ mod tests {
         let payload_size = max_local + 1;
         {
             let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
-            cursor.insert(2, &data[..payload_size]).unwrap();
+            cursor.table_insert(2, &data[..payload_size]).unwrap();
             cursor.table_move_to(2).unwrap();
             let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
             assert_eq!(key, 2);
@@ -2583,7 +2699,7 @@ mod tests {
         let payload_size = size_exact_overflow_page_size.unwrap().get() as usize;
         {
             let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
-            cursor.insert(3, &data[..payload_size]).unwrap();
+            cursor.table_insert(3, &data[..payload_size]).unwrap();
             cursor.table_move_to(3).unwrap();
             let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
             assert_eq!(key, 3);
@@ -2600,7 +2716,7 @@ mod tests {
         let payload_size = usable_size * 2;
         {
             let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
-            cursor.insert(4, &data[..payload_size]).unwrap();
+            cursor.table_insert(4, &data[..payload_size]).unwrap();
             cursor.table_move_to(4).unwrap();
             let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
             assert_eq!(key, 4);
@@ -2614,7 +2730,7 @@ mod tests {
         pager.abort();
     }
 
-    fn assert_all_local_in_cursor(cursor: &mut BtreeCursor, values: &[(i64, &[u8])]) {
+    fn assert_all_local_in_table_cursor(cursor: &mut BtreeCursor, values: &[(i64, &[u8])]) {
         for (expected_key, expected_buf) in values {
             let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
             assert_eq!(key, *expected_key);
@@ -2626,7 +2742,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_from_freeblock_split() {
+    fn test_insert_table_from_freeblock_split() {
         let file = create_sqlite_database(&[
             "CREATE TABLE example(col);",
             "INSERT INTO example(rowid, col) VALUES (1, x'01');",
@@ -2650,10 +2766,10 @@ mod tests {
 
         let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
 
-        cursor.insert(5, &[2, 20, 5, 5, 5, 5]).unwrap();
+        cursor.table_insert(5, &[2, 20, 5, 5, 5, 5]).unwrap();
 
         cursor.move_to_first().unwrap();
-        assert_all_local_in_cursor(
+        assert_all_local_in_table_cursor(
             &mut cursor,
             &[
                 (2, &[2, 16, 2, 2]),
@@ -2677,7 +2793,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_from_freeblock_skipping_small_freeblock() {
+    fn test_insert_table_from_freeblock_skipping_small_freeblock() {
         let file = create_sqlite_database(&[
             "CREATE TABLE example(col);",
             "INSERT INTO example(rowid, col) VALUES (1, x'ffffffffffffffff');", // 8 bytes
@@ -2701,10 +2817,10 @@ mod tests {
 
         let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
 
-        cursor.insert(5, &[2, 20, 5, 5, 5, 5]).unwrap();
+        cursor.table_insert(5, &[2, 20, 5, 5, 5, 5]).unwrap();
 
         cursor.move_to_first().unwrap();
-        assert_all_local_in_cursor(
+        assert_all_local_in_table_cursor(
             &mut cursor,
             &[
                 (2, &[2, 16, 2, 2]),
@@ -2728,7 +2844,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_from_freeblock_fragmented() {
+    fn test_insert_table_from_freeblock_fragmented() {
         let file = create_sqlite_database(&[
             "CREATE TABLE example(col);",
             "INSERT INTO example(rowid, col) VALUES (1, x'01');",
@@ -2752,10 +2868,10 @@ mod tests {
 
         let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
 
-        cursor.insert(5, &[2, 22, 5, 5, 5, 5, 5]).unwrap();
+        cursor.table_insert(5, &[2, 22, 5, 5, 5, 5, 5]).unwrap();
 
         cursor.move_to_first().unwrap();
-        assert_all_local_in_cursor(
+        assert_all_local_in_table_cursor(
             &mut cursor,
             &[
                 (2, &[2, 16, 2, 2]),
@@ -2778,7 +2894,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_from_freeblock_fragment_threshold() {
+    fn test_insert_table_from_freeblock_fragment_threshold() {
         let mut stmts = vec!["CREATE TABLE example(col);"];
         // Create total 57 bytes fragments.
         for _ in 0..57 {
@@ -2813,7 +2929,7 @@ mod tests {
         let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
 
         cursor
-            .insert(400, &[2, 28, 1, 2, 3, 4, 5, 6, 7, 8])
+            .table_insert(400, &[2, 28, 1, 2, 3, 4, 5, 6, 7, 8])
             .unwrap();
 
         let page = pager.get_page(table_page_id).unwrap();
@@ -2828,7 +2944,7 @@ mod tests {
         assert_eq!(page_header.cell_content_area_offset().get(), 3024);
         drop(buffer);
 
-        cursor.insert(401, &[2, 0]).unwrap();
+        cursor.table_insert(401, &[2, 0]).unwrap();
 
         // Use unallocated space while there is a freeblock because fragment size is
         // bigger than 57.
@@ -2841,7 +2957,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_skipping_all_freeblock() {
+    fn test_insert_table_skipping_all_freeblock() {
         let file = create_sqlite_database(&[
             "CREATE TABLE example(col);",
             "INSERT INTO example(rowid, col) VALUES (1, x'01');",
@@ -2866,11 +2982,11 @@ mod tests {
         let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
 
         cursor
-            .insert(5, &[2, 32, 9, 9, 9, 9, 9, 9, 9, 9, 9])
+            .table_insert(5, &[2, 32, 9, 9, 9, 9, 9, 9, 9, 9, 9])
             .unwrap();
 
         cursor.move_to_first().unwrap();
-        assert_all_local_in_cursor(
+        assert_all_local_in_table_cursor(
             &mut cursor,
             &[
                 (2, &[2, 16, 2, 2]),
@@ -2894,7 +3010,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_defragment() {
+    fn test_insert_table_defragment() {
         let insert_1001byte_stmt_1 = format!(
             "INSERT INTO example(rowid, col) VALUES (1, x'{}');",
             "11".repeat(1001)
@@ -2942,7 +3058,7 @@ mod tests {
         let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
 
         let payload5 = [5; 1008];
-        cursor.insert(5, &payload5).unwrap();
+        cursor.table_insert(5, &payload5).unwrap();
 
         let page = pager.get_page(table_page_id).unwrap();
         let buffer = page.buffer();
@@ -2960,7 +3076,7 @@ mod tests {
         payload3.extend(&[0x33; 1000]);
         let mut payload4 = vec![3, 143, 94];
         payload4.extend(&[0x44; 1001]);
-        assert_all_local_in_cursor(
+        assert_all_local_in_table_cursor(
             &mut cursor,
             &[
                 (2, &payload2),
@@ -2972,7 +3088,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_defragment_page1() {
+    fn test_insert_table_defragment_page1() {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let bctx = load_btree_context(file.as_file()).unwrap();
@@ -3000,7 +3116,7 @@ mod tests {
         let mut cursor = BtreeCursor::new(PAGE_ID_1, &pager, &bctx).unwrap();
 
         let payload = [5; 10];
-        cursor.insert(30, &payload).unwrap();
+        cursor.table_insert(30, &payload).unwrap();
 
         let page = pager.get_page(PAGE_ID_1).unwrap();
         let buffer = page.buffer();
@@ -3014,7 +3130,7 @@ mod tests {
         drop(buffer);
 
         cursor.move_to_first().unwrap();
-        assert_all_local_in_cursor(
+        assert_all_local_in_table_cursor(
             &mut cursor,
             &[
                 (
@@ -3031,7 +3147,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_split() {
+    fn test_insert_table_split() {
         let file =
             create_sqlite_database(&["PRAGMA page_size = 512;", "CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
@@ -3040,7 +3156,7 @@ mod tests {
 
         let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
         for i in 0..1000 {
-            cursor.insert(i, &[(i % 256) as u8; 200]).unwrap();
+            cursor.table_insert(i, &[(i % 256) as u8; 200]).unwrap();
         }
 
         cursor.move_to_first().unwrap();
@@ -3055,7 +3171,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_split_reversed() {
+    fn test_insert_table_split_reversed() {
         let file =
             create_sqlite_database(&["PRAGMA page_size = 512;", "CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
@@ -3065,7 +3181,7 @@ mod tests {
         let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
         for i in 0..1000 {
             cursor
-                .insert(i64::MAX - i, &[(i % 256) as u8; 200])
+                .table_insert(i64::MAX - i, &[(i % 256) as u8; 200])
                 .unwrap();
         }
 
@@ -3081,7 +3197,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_split_holes() {
+    fn test_insert_table_split_holes() {
         let file =
             create_sqlite_database(&["PRAGMA page_size = 512;", "CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
@@ -3092,7 +3208,7 @@ mod tests {
         for i in 0..4 {
             for j in 0..1000 {
                 cursor
-                    .insert(4 * j + i, &[((4 * j + i) % 256) as u8; 200])
+                    .table_insert(4 * j + i, &[((4 * j + i) % 256) as u8; 200])
                     .unwrap();
             }
         }
@@ -3109,7 +3225,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_split_page1() {
+    fn test_insert_table_split_page1() {
         let file =
             create_sqlite_database(&["PRAGMA page_size = 512;", "CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
@@ -3124,7 +3240,9 @@ mod tests {
         drop(payload);
 
         for i in 1..1000 {
-            cursor.insert(key + i, &[(i % 256) as u8; 200]).unwrap();
+            cursor
+                .table_insert(key + i, &[(i % 256) as u8; 200])
+                .unwrap();
         }
 
         cursor.move_to_first().unwrap();
@@ -3141,5 +3259,485 @@ mod tests {
         }
         cursor.move_next().unwrap();
         assert!(cursor.get_table_payload().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_insert_empty_index() {
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col);",
+            "CREATE INDEX index1 ON example(col);",
+        ]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let index_page_id = find_index_page_id("index1", file.path());
+
+        let mut cursor = BtreeCursor::new(index_page_id, &pager, &bctx).unwrap();
+
+        let payload1 = build_record(&[Some(Value::Integer(1)), Some(Value::Integer(1))]);
+        cursor
+            .index_insert(
+                &[
+                    Some(ValueCmp::new(&Value::Integer(1), &Collation::Binary)),
+                    Some(ValueCmp::new(&Value::Integer(1), &Collation::Binary)),
+                ],
+                &payload1,
+            )
+            .unwrap();
+        cursor.move_to_first().unwrap();
+        let payload = cursor.get_index_payload().unwrap().unwrap();
+        assert_eq!(payload.buf(), &payload1);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let payload = cursor.get_index_payload().unwrap();
+        assert!(payload.is_none());
+        drop(payload);
+
+        let payload2 = build_record(&[Some(Value::Integer(1)), Some(Value::Integer(4))]);
+        let payload3 = build_record(&[Some(Value::Integer(4)), Some(Value::Integer(3))]);
+        cursor
+            .index_insert(
+                &[
+                    Some(ValueCmp::new(&Value::Integer(1), &Collation::Binary)),
+                    Some(ValueCmp::new(&Value::Integer(2), &Collation::Binary)),
+                ],
+                &payload2,
+            )
+            .unwrap();
+        cursor
+            .index_insert(
+                &[
+                    Some(ValueCmp::new(&Value::Integer(4), &Collation::Binary)),
+                    Some(ValueCmp::new(&Value::Integer(3), &Collation::Binary)),
+                ],
+                &payload3,
+            )
+            .unwrap();
+
+        cursor.move_to_first().unwrap();
+        let payload = cursor.get_index_payload().unwrap().unwrap();
+        assert_eq!(payload.buf(), &payload1);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let payload = cursor.get_index_payload().unwrap().unwrap();
+        assert_eq!(payload.buf(), &payload2);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let payload = cursor.get_index_payload().unwrap().unwrap();
+        assert_eq!(payload.buf(), &payload3);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let payload = cursor.get_index_payload().unwrap();
+        assert!(payload.is_none());
+        drop(payload);
+
+        let payload4 = build_record(&[Some(Value::Integer(1)), Some(Value::Integer(-1))]);
+        let payload5 = build_record(&[Some(Value::Integer(1)), Some(Value::Integer(2))]);
+        let payload6 = build_record(&[Some(Value::Integer(2)), Some(Value::Integer(5))]);
+        cursor
+            .index_insert(
+                &[
+                    Some(ValueCmp::new(&Value::Integer(1), &Collation::Binary)),
+                    Some(ValueCmp::new(&Value::Integer(-1), &Collation::Binary)),
+                ],
+                &payload4,
+            )
+            .unwrap();
+        cursor
+            .index_insert(
+                &[
+                    Some(ValueCmp::new(&Value::Integer(1), &Collation::Binary)),
+                    Some(ValueCmp::new(&Value::Integer(2), &Collation::Binary)),
+                ],
+                &payload5,
+            )
+            .unwrap();
+        cursor
+            .index_insert(
+                &[
+                    Some(ValueCmp::new(&Value::Integer(2), &Collation::Binary)),
+                    Some(ValueCmp::new(&Value::Integer(5), &Collation::Binary)),
+                ],
+                &payload6,
+            )
+            .unwrap();
+
+        cursor.move_to_first().unwrap();
+        let payload = cursor.get_index_payload().unwrap().unwrap();
+        assert_eq!(payload.buf(), &payload4);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let payload = cursor.get_index_payload().unwrap().unwrap();
+        assert_eq!(payload.buf(), &payload1);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let payload = cursor.get_index_payload().unwrap().unwrap();
+        assert_eq!(payload.buf(), &payload5);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let payload = cursor.get_index_payload().unwrap().unwrap();
+        assert_eq!(payload.buf(), &payload2);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let payload = cursor.get_index_payload().unwrap().unwrap();
+        assert_eq!(payload.buf(), &payload6);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let payload = cursor.get_index_payload().unwrap().unwrap();
+        assert_eq!(payload.buf(), &payload3);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let payload = cursor.get_index_payload().unwrap();
+        assert!(payload.is_none());
+        drop(payload);
+    }
+
+    #[test]
+    fn test_insert_index_overflow() {
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col);",
+            "CREATE INDEX index1 ON example(col);",
+        ]);
+
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let index_page_id = find_index_page_id("index1", file.path());
+        let max_local = bctx.max_local(false) as usize;
+        let usable_size = bctx.usable_size as usize;
+
+        let mut data = Vec::with_capacity(usable_size * 2);
+        for _ in 0..usable_size * 2 {
+            data.push(rand::random::<u8>());
+        }
+
+        // Not overflow
+        {
+            let mut cursor = BtreeCursor::new(index_page_id, &pager, &bctx).unwrap();
+            let value = Value::Blob(data[..max_local - 3].into());
+            let record_payload = build_record(&[Some(value.clone())]);
+            assert_eq!(record_payload.len(), max_local);
+            let comparator = [Some(ValueCmp::new(&value, &Collation::Binary))];
+            cursor.index_insert(&comparator, &record_payload).unwrap();
+            cursor.index_move_to(&comparator).unwrap();
+            let payload = cursor.get_index_payload().unwrap().unwrap();
+            assert_eq!(payload.size() as usize, max_local);
+            assert_eq!(payload.buf().len(), max_local);
+            assert_eq!(payload.buf(), &record_payload);
+        }
+        pager.abort();
+
+        // Overflows
+        let payload_size = max_local + 1;
+        {
+            let mut cursor = BtreeCursor::new(index_page_id, &pager, &bctx).unwrap();
+            let value = Value::Blob(data[..payload_size - 3].into());
+            let record_payload = build_record(&[Some(value.clone())]);
+            assert_eq!(record_payload.len(), payload_size);
+            let comparator = [Some(ValueCmp::new(&value, &Collation::Binary))];
+            cursor.index_insert(&comparator, &record_payload).unwrap();
+            cursor.index_move_to(&comparator).unwrap();
+            let payload = cursor.get_index_payload().unwrap().unwrap();
+            assert_eq!(payload.size() as usize, payload_size);
+            assert!(payload.buf().len() < payload_size);
+            let mut buf = vec![0; payload_size + 1];
+            let loaded = payload.load(0, &mut buf).unwrap();
+            assert_eq!(loaded, payload_size);
+            assert_eq!(&buf[..payload_size], &record_payload);
+        }
+        pager.abort();
+
+        // Overflows with exact overflow page size
+        let mut size_exact_overflow_page_size = None;
+        for i in 1..4096 {
+            let p_size = max_local + i;
+            let p_size = (p_size as u64).try_into().unwrap();
+            let n_local = bctx.n_local(false, p_size) as usize;
+            if (p_size.get() as usize - n_local) % (bctx.usable_size as usize - 4) == 0 {
+                size_exact_overflow_page_size = Some(p_size);
+                break;
+            }
+        }
+        assert!(size_exact_overflow_page_size.is_some());
+        assert_eq!(size_exact_overflow_page_size.unwrap().get(), 4581);
+        let payload_size = size_exact_overflow_page_size.unwrap().get() as usize;
+        {
+            let mut cursor = BtreeCursor::new(index_page_id, &pager, &bctx).unwrap();
+            let value = Value::Blob(data[..payload_size - 3].into());
+            let record_payload = build_record(&[Some(value.clone())]);
+            assert_eq!(record_payload.len(), payload_size);
+            let comparator = [Some(ValueCmp::new(&value, &Collation::Binary))];
+            cursor.index_insert(&comparator, &record_payload).unwrap();
+            cursor.index_move_to(&comparator).unwrap();
+            let payload = cursor.get_index_payload().unwrap().unwrap();
+            assert_eq!(payload.size() as usize, payload_size);
+            assert!(payload.buf().len() < payload_size);
+            let mut buf = vec![0; payload_size + 1];
+            let loaded = payload.load(0, &mut buf).unwrap();
+            assert_eq!(loaded, payload_size);
+            assert_eq!(&buf[..payload_size], &record_payload);
+        }
+        pager.abort();
+
+        // Overflow with multiple overflow pages.
+        let payload_size = usable_size * 2;
+        {
+            let mut cursor = BtreeCursor::new(index_page_id, &pager, &bctx).unwrap();
+            let value = Value::Blob(data[..payload_size - 4].into());
+            let record_payload = build_record(&[Some(value.clone())]);
+            assert_eq!(record_payload.len(), payload_size);
+            let comparator = [Some(ValueCmp::new(&value, &Collation::Binary))];
+            cursor.index_insert(&comparator, &record_payload).unwrap();
+            cursor.index_move_to(&comparator).unwrap();
+            let payload = cursor.get_index_payload().unwrap().unwrap();
+            assert_eq!(payload.size() as usize, payload_size);
+            assert!(payload.buf().len() < payload_size);
+            let mut buf = vec![0; payload_size + 1];
+            let loaded = payload.load(0, &mut buf).unwrap();
+            assert_eq!(loaded, payload_size);
+            assert_eq!(&buf[..payload_size], &record_payload);
+        }
+        pager.abort();
+    }
+
+    fn assert_all_local_in_index_cursor(cursor: &mut BtreeCursor, values: &[&[u8]]) {
+        for expected in values {
+            let payload = cursor.get_index_payload().unwrap().unwrap();
+            assert_eq!(payload.buf(), *expected);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        assert!(cursor.get_index_payload().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_insert_index_defragment() {
+        let insert_901byte_stmt_2 = format!(
+            "INSERT INTO example(rowid, col) VALUES (2, x'{}');",
+            "22".repeat(901)
+        );
+        let insert_901byte_stmt_3 = format!(
+            "INSERT INTO example(rowid, col) VALUES (3, x'{}');",
+            "33".repeat(901)
+        );
+        let insert_900byte_stmt_4 = format!(
+            "INSERT INTO example(rowid, col) VALUES (4, x'{}');",
+            "44".repeat(900)
+        );
+        // The payload will overflow.
+        let insert_2000byte_stmt_5 = format!(
+            "INSERT INTO example(rowid, col) VALUES (5, x'{}');",
+            "55".repeat(2000)
+        );
+        let file = create_sqlite_database(&[
+            "CREATE TABLE example(col);",
+            "CREATE INDEX index1 ON example(col);",
+            &insert_901byte_stmt_2,
+            &insert_901byte_stmt_3,
+            "DELETE FROM example WHERE rowid = 2;",
+            &insert_900byte_stmt_4,
+            &insert_901byte_stmt_2,
+            &insert_2000byte_stmt_5,
+            "DELETE FROM example WHERE rowid = 2;",
+        ]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        assert_eq!(bctx.max_local(false), 1002);
+        let index_page_id = find_index_page_id("index1", file.path());
+
+        let page = pager.get_page(index_page_id).unwrap();
+        let buffer = page.buffer();
+        let page_header = BtreePageHeader::from_page(&page, &buffer);
+        assert_eq!(page_header.first_freeblock_offset(), 1372);
+        assert_eq!(page_header.fragmented_free_bytes(), 1);
+        assert_eq!(page_header.cell_content_area_offset().get(), 877);
+        assert_eq!(
+            FreeblockIterator::new(page_header.first_freeblock_offset(), &buffer)
+                .next()
+                .unwrap(),
+            (1372, 908)
+        );
+        drop(buffer);
+
+        let mut cursor = BtreeCursor::new(index_page_id, &pager, &bctx).unwrap();
+
+        let rowid_value = Value::Integer(6);
+        let value = Value::Blob(vec![0x66; 902].into());
+        let payload6 = build_record(&[Some(value.clone()), Some(rowid_value.clone())]);
+        let comparator = [
+            Some(ValueCmp::new(&value, &Collation::Binary)),
+            Some(ValueCmp::new(&rowid_value, &Collation::Binary)),
+        ];
+        cursor.index_insert(&comparator, &payload6).unwrap();
+
+        let page = pager.get_page(index_page_id).unwrap();
+        let buffer = page.buffer();
+        let page_header = BtreePageHeader::from_page(&page, &buffer);
+        assert_eq!(page_header.first_freeblock_offset(), 0);
+        assert_eq!(page_header.fragmented_free_bytes(), 0);
+        assert_eq!(page_header.cell_content_area_offset().get(), 877);
+        drop(buffer);
+
+        cursor.move_to_first().unwrap();
+
+        let payload3 = build_record(&[
+            Some(Value::Blob([0x33; 901].as_slice().into())),
+            Some(Value::Integer(3)),
+        ]);
+        let payload4 = build_record(&[
+            Some(Value::Blob([0x44; 900].as_slice().into())),
+            Some(Value::Integer(4)),
+        ]);
+        let payload5 = build_record(&[
+            Some(Value::Blob([0x55; 2000].as_slice().into())),
+            Some(Value::Integer(5)),
+        ]);
+        assert_all_local_in_index_cursor(
+            &mut cursor,
+            &[
+                &payload3,
+                &payload4,
+                &payload5
+                    [..bctx.n_local(false, (payload5.len() as u64).try_into().unwrap()) as usize],
+                &payload6,
+            ],
+        );
+    }
+
+    #[test]
+    fn test_insert_index_split() {
+        let file = create_sqlite_database(&[
+            "PRAGMA page_size = 512;",
+            "CREATE TABLE example(col);",
+            "CREATE INDEX index1 ON example(col);",
+        ]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        assert_eq!(bctx.max_local(false), 102);
+        let page_id = find_index_page_id("index1", file.path());
+
+        let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
+        for i in 0..1000 {
+            let rowid_value = Value::Integer(i);
+            let mut buf = (i as u16).to_be_bytes().to_vec();
+            buf.extend(&[(i % 256) as u8; 90]);
+            let value = Value::Blob(buf.into());
+            let payload = build_record(&[Some(value.clone()), Some(rowid_value.clone())]);
+            let comparator = [
+                Some(ValueCmp::new(&value, &Collation::Binary)),
+                Some(ValueCmp::new(&rowid_value, &Collation::Binary)),
+            ];
+            cursor.index_insert(&comparator, &payload).unwrap();
+        }
+
+        cursor.move_to_first().unwrap();
+        for i in 0..1000 {
+            let rowid_value = Value::Integer(i);
+            let mut buf = (i as u16).to_be_bytes().to_vec();
+            buf.extend(&[(i % 256) as u8; 90]);
+            let value = Value::Blob(buf.into());
+            let expected = build_record(&[Some(value.clone()), Some(rowid_value.clone())]);
+            let payload = cursor.get_index_payload().unwrap().unwrap();
+            assert_eq!(payload.buf(), &expected, "i = {}", i);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        assert!(cursor.get_index_payload().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_insert_index_split_reversed() {
+        let file = create_sqlite_database(&[
+            "PRAGMA page_size = 512;",
+            "CREATE TABLE example(col);",
+            "CREATE INDEX index1 ON example(col);",
+        ]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        assert_eq!(bctx.max_local(false), 102);
+        let page_id = find_index_page_id("index1", file.path());
+
+        let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
+        for i in 0..1000 {
+            let rowid = 1000 - i;
+            let rowid_value = Value::Integer(rowid);
+            let mut buf = (rowid as u16).to_be_bytes().to_vec();
+            buf.extend(&[(rowid % 256) as u8; 90]);
+            let value = Value::Blob(buf.into());
+            let payload = build_record(&[Some(value.clone()), Some(rowid_value.clone())]);
+            let comparator = [
+                Some(ValueCmp::new(&value, &Collation::Binary)),
+                Some(ValueCmp::new(&rowid_value, &Collation::Binary)),
+            ];
+            cursor.index_insert(&comparator, &payload).unwrap();
+        }
+
+        cursor.move_to_first().unwrap();
+        for i in 0..1000 {
+            let rowid = i + 1;
+            let rowid_value = Value::Integer(rowid);
+            let mut buf = (rowid as u16).to_be_bytes().to_vec();
+            buf.extend(&[(rowid % 256) as u8; 90]);
+            let value = Value::Blob(buf.into());
+            let expected = build_record(&[Some(value.clone()), Some(rowid_value.clone())]);
+            let payload = cursor.get_index_payload().unwrap().unwrap();
+            assert_eq!(payload.buf(), &expected, "i = {}", i);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        assert!(cursor.get_index_payload().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_insert_index_split_holes() {
+        let file = create_sqlite_database(&[
+            "PRAGMA page_size = 512;",
+            "CREATE TABLE example(col);",
+            "CREATE INDEX index1 ON example(col);",
+        ]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        assert_eq!(bctx.max_local(false), 102);
+        let page_id = find_index_page_id("index1", file.path());
+
+        let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
+        for i in 0..4 {
+            for j in 0..1000 {
+                let rowid = 4 * j + i;
+                let rowid_value = Value::Integer(rowid);
+                let mut buf = (rowid as u16).to_be_bytes().to_vec();
+                buf.extend(&[(rowid % 256) as u8; 90]);
+                let value = Value::Blob(buf.into());
+                let payload = build_record(&[Some(value.clone()), Some(rowid_value.clone())]);
+                let comparator = [
+                    Some(ValueCmp::new(&value, &Collation::Binary)),
+                    Some(ValueCmp::new(&rowid_value, &Collation::Binary)),
+                ];
+                cursor.index_insert(&comparator, &payload).unwrap();
+            }
+        }
+
+        cursor.move_to_first().unwrap();
+        for i in 0..4000 {
+            let rowid = i;
+            let rowid_value = Value::Integer(rowid);
+            let mut buf = (rowid as u16).to_be_bytes().to_vec();
+            buf.extend(&[(rowid % 256) as u8; 90]);
+            let value = Value::Blob(buf.into());
+            let expected = build_record(&[Some(value.clone()), Some(rowid_value.clone())]);
+            let payload = cursor.get_index_payload().unwrap().unwrap();
+            assert_eq!(payload.buf(), &expected, "i = {}", i);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        assert!(cursor.get_index_payload().unwrap().is_none());
     }
 }
