@@ -520,3 +520,100 @@ fn test_insert_rowid_type_affinity() {
         &conn,
     )
 }
+
+/// Test case is from https://www.sqlite.org/datatype3.html#column_affinity_behavior_example
+#[test]
+fn test_insert_type_affinity() {
+    let file = create_sqlite_database(&[
+        "CREATE TABLE t1(t TEXT, nu NUMERIC, i INTEGER, r REAL, no BLOB);",
+    ]);
+    let conn = Connection::open(file.path()).unwrap();
+
+    assert_eq!(
+        conn.prepare(
+            "INSERT INTO t1(t, nu, i, r, no) VALUES('500.0', '500.0', '500.0', '500.0', '500.0');"
+        )
+        .unwrap()
+        .execute()
+        .unwrap(),
+        1
+    );
+
+    assert_eq!(
+        conn.prepare("INSERT INTO t1(t, nu, i, r, no) VALUES(500.0, 500.0, 500.0, 500.0, 500.0);")
+            .unwrap()
+            .execute()
+            .unwrap(),
+        1
+    );
+
+    assert_eq!(
+        conn.prepare("INSERT INTO t1(t, nu, i, r, no) VALUES(500, 500, 500, 500, 500);")
+            .unwrap()
+            .execute()
+            .unwrap(),
+        1
+    );
+
+    assert_eq!(
+        conn.prepare(
+            "INSERT INTO t1(t, nu, i, r, no) VALUES(x'0500', x'0500', x'0500', x'0500', x'0500');"
+        )
+        .unwrap()
+        .execute()
+        .unwrap(),
+        1
+    );
+
+    assert_eq!(
+        conn.prepare("INSERT INTO t1(t, nu, i, r, no) VALUES(NULL,NULL,NULL,NULL,NULL);")
+            .unwrap()
+            .execute()
+            .unwrap(),
+        1
+    );
+
+    let test_conn = rusqlite::Connection::open(file.path()).unwrap();
+    assert_same_results(
+        &[
+            &[
+                Value::Text(b"500.0".as_slice().into()),
+                Value::Integer(500),
+                Value::Integer(500),
+                Value::Real(500.0),
+                Value::Text(b"500.0".as_slice().into()),
+            ],
+            &[
+                Value::Text(b"500".as_slice().into()),
+                Value::Integer(500),
+                Value::Integer(500),
+                Value::Real(500.0),
+                Value::Real(500.0),
+            ],
+            &[
+                Value::Text(b"500".as_slice().into()),
+                Value::Integer(500),
+                Value::Integer(500),
+                Value::Real(500.0),
+                Value::Integer(500),
+            ],
+            &[
+                Value::Blob([0x05, 0x00].as_slice().into()),
+                Value::Blob([0x05, 0x00].as_slice().into()),
+                Value::Blob([0x05, 0x00].as_slice().into()),
+                Value::Blob([0x05, 0x00].as_slice().into()),
+                Value::Blob([0x05, 0x00].as_slice().into()),
+            ],
+            &[
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ],
+        ],
+        "SELECT * FROM t1;",
+        &test_conn,
+        &conn,
+    )
+}

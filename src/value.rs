@@ -111,9 +111,36 @@ impl<'a> Value<'a> {
         }
     }
 
+    /// Apply [TypeAffinity] to the value.
+    ///
+    /// Applying type affinity happens when storing a value to database.
+    ///
+    /// https://www.sqlite.org/datatype3.html#type_affinity
+    pub fn apply_affinity(self, type_affinity: TypeAffinity) -> Self {
+        match type_affinity {
+            TypeAffinity::Numeric | TypeAffinity::Integer => self.apply_numeric_affinity(),
+            TypeAffinity::Real => match self {
+                Value::Null => Value::Null,
+                Value::Integer(i) => Value::Real(i as f64),
+                Value::Real(d) => Value::Real(d),
+                Value::Text(buf) => {
+                    let (valid, _, d) = parse_float(&buf);
+                    if valid {
+                        Value::Real(d)
+                    } else {
+                        Value::Text(buf)
+                    }
+                }
+                Value::Blob(buf) => Value::Blob(buf),
+            },
+            TypeAffinity::Text => self.apply_text_affinity(),
+            TypeAffinity::Blob => self,
+        }
+    }
+
     /// Convert the text value to a numeric value if it is well-formed.
     /// Otherwise, return the original value.
-    pub fn apply_numeric_affinity(self) -> Value<'a> {
+    pub fn apply_numeric_affinity(self) -> Self {
         match self {
             Value::Null => Value::Null,
             Value::Integer(i) => Value::Integer(i),
@@ -152,12 +179,11 @@ impl<'a> Value<'a> {
     ///
     /// For [Value::Integer] and [Value::Real] values, this
     /// converts the value to a text value.
-    ///
-    /// This does not support [Value::Null] values.
-    pub fn apply_text_affinity(self) -> Value<'a> {
-        assert_ne!(self, Value::Null);
+    pub fn apply_text_affinity(self) -> Self {
+        // TODO: Consider removing Value::Null from Value and use Option<Value> as the
+        // value.
         match self {
-            Value::Null => unreachable!(),
+            Value::Null => Value::Null,
             Value::Integer(i) => {
                 // i64 is at most 19 digits. 1 byte is for sign (-).
                 let mut text_buf = Vec::with_capacity(20);
@@ -228,7 +254,7 @@ impl<'a> Value<'a> {
     /// This is used for the CAST expression.
     ///
     /// https://www.sqlite.org/lang_expr.html#castexpr
-    pub fn force_apply_type_affinity(self, type_affinity: TypeAffinity) -> Value<'a> {
+    pub fn force_apply_type_affinity(self, type_affinity: TypeAffinity) -> Self {
         match type_affinity {
             TypeAffinity::Numeric => match self {
                 Value::Null => Value::Null,
@@ -650,141 +676,219 @@ mod tests {
 
     #[test]
     fn test_apply_numeric_affinity() {
-        assert_eq!(Value::Null.apply_numeric_affinity(), Value::Null);
+        for (value, expected) in [
+            (Value::Null.apply_numeric_affinity(), Value::Null),
+            (Value::Integer(12345), Value::Integer(12345)),
+            (Value::Real(12345.1), Value::Real(12345.1)),
+            (Value::Real(12345.0), Value::Integer(12345)),
+            (
+                Value::Text(b"12345".as_slice().into()),
+                Value::Integer(12345),
+            ),
+            (
+                Value::Text(b" 12345 ".as_slice().into()),
+                Value::Integer(12345),
+            ),
+            (
+                Value::Text(b"9223372036854775807".as_slice().into()),
+                Value::Integer(9223372036854775807),
+            ),
+            (
+                Value::Text(b"-9223372036854775808".as_slice().into()),
+                Value::Integer(-9223372036854775808),
+            ),
+            (Value::Text(b"0.0".as_slice().into()), Value::Integer(0)),
+            (
+                Value::Text(b"12345.0".as_slice().into()),
+                Value::Integer(12345),
+            ),
+            (
+                Value::Text(b"12345.6".as_slice().into()),
+                Value::Real(12345.6),
+            ),
+            (
+                Value::Text(b" 12345.6 ".as_slice().into()),
+                Value::Real(12345.6),
+            ),
+            (
+                Value::Text(b"12345.6e+10".as_slice().into()),
+                Value::Integer(123456000000000),
+            ),
+            (
+                Value::Text(b"12345e-1".as_slice().into()),
+                Value::Real(1234.5),
+            ),
+            (
+                Value::Text(b"2251799813685247.0".as_slice().into()),
+                Value::Integer(2251799813685247),
+            ),
+            (
+                Value::Text(b"2251799813685248.0".as_slice().into()),
+                Value::Real(2251799813685248.0),
+            ),
+            (
+                Value::Text(b"-2251799813685248.0".as_slice().into()),
+                Value::Integer(-2251799813685248),
+            ),
+            (
+                Value::Text(b"2251799813685249.0".as_slice().into()),
+                Value::Real(2251799813685249.0),
+            ),
+            (
+                Value::Text(b"-2251799813685249.0".as_slice().into()),
+                Value::Real(-2251799813685249.0),
+            ),
+            // TODO: i64 overflow should preserve 15 digits?
+            (
+                Value::Text(b"9223372036854775808".as_slice().into()),
+                Value::Real(9223372036854776e3),
+            ),
+            (
+                Value::Text(b"-9223372036854775809".as_slice().into()),
+                Value::Real(-9223372036854776e3),
+            ),
+            // Invalid text as numeric
+            (
+                Value::Text(b"12345a".as_slice().into()),
+                Value::Text(b"12345a".as_slice().into()),
+            ),
+            (
+                Value::Text(b"12345e".as_slice().into()),
+                Value::Text(b"12345e".as_slice().into()),
+            ),
+            (
+                Value::Text(b"a12345".as_slice().into()),
+                Value::Text(b"a12345".as_slice().into()),
+            ),
+            (
+                Value::Text(b".".as_slice().into()),
+                Value::Text(b".".as_slice().into()),
+            ),
+            (
+                Value::Blob(b"12345".as_slice().into()),
+                Value::Blob(b"12345".as_slice().into()),
+            ),
+        ] {
+            assert_eq!(
+                value.clone().apply_numeric_affinity(),
+                expected,
+                "apply_numeric_affinity(): {:?}",
+                value
+            );
+            assert_eq!(
+                value.clone().apply_affinity(TypeAffinity::Numeric),
+                expected,
+                "apply_affinity(TypeAffinity::Numeric): {:?}",
+                value
+            );
+            assert_eq!(
+                value.clone().apply_affinity(TypeAffinity::Integer),
+                expected,
+                "apply_affinity(TypeAffinity::Integer): {:?}",
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn test_apply_real_affinity() {
+        assert_eq!(Value::Null.apply_affinity(TypeAffinity::Real), Value::Null);
 
         assert_eq!(
-            Value::Integer(12345).apply_numeric_affinity(),
-            Value::Integer(12345)
+            Value::Integer(12345).apply_affinity(TypeAffinity::Real),
+            Value::Real(12345.0)
         );
 
         assert_eq!(
-            Value::Real(12345.1).apply_numeric_affinity(),
+            Value::Real(12345.0).apply_affinity(TypeAffinity::Real),
+            Value::Real(12345.0)
+        );
+        assert_eq!(
+            Value::Real(12345.1).apply_affinity(TypeAffinity::Real),
             Value::Real(12345.1)
         );
-        assert_eq!(
-            Value::Real(12345.0).apply_numeric_affinity(),
-            Value::Integer(12345)
-        );
 
         assert_eq!(
-            Value::Text(b"12345".as_slice().into()).apply_numeric_affinity(),
-            Value::Integer(12345)
+            Value::Text(b"12345".as_slice().into()).apply_affinity(TypeAffinity::Real),
+            Value::Real(12345.0)
         );
         assert_eq!(
-            Value::Text(b" 12345 ".as_slice().into()).apply_numeric_affinity(),
-            Value::Integer(12345)
+            Value::Text(b"-12345".as_slice().into()).apply_affinity(TypeAffinity::Real),
+            Value::Real(-12345.0)
         );
         assert_eq!(
-            Value::Text(b"9223372036854775807".as_slice().into()).apply_numeric_affinity(),
-            Value::Integer(9223372036854775807)
-        );
-        assert_eq!(
-            Value::Text(b"-9223372036854775808".as_slice().into()).apply_numeric_affinity(),
-            Value::Integer(-9223372036854775808)
-        );
-        assert_eq!(
-            Value::Text(b"0.0".as_slice().into()).apply_numeric_affinity(),
-            Value::Integer(0)
-        );
-        assert_eq!(
-            Value::Text(b"12345.0".as_slice().into()).apply_numeric_affinity(),
-            Value::Integer(12345)
-        );
-        assert_eq!(
-            Value::Text(b"12345.6".as_slice().into()).apply_numeric_affinity(),
-            Value::Real(12345.6)
-        );
-        assert_eq!(
-            Value::Text(b" 12345.6 ".as_slice().into()).apply_numeric_affinity(),
-            Value::Real(12345.6)
-        );
-        assert_eq!(
-            Value::Text(b"12345.6e+10".as_slice().into()).apply_numeric_affinity(),
-            Value::Integer(123456000000000)
-        );
-        assert_eq!(
-            Value::Text(b"12345e-1".as_slice().into()).apply_numeric_affinity(),
+            Value::Text(b"1234.5".as_slice().into()).apply_affinity(TypeAffinity::Real),
             Value::Real(1234.5)
         );
         assert_eq!(
-            Value::Text(b"2251799813685247.0".as_slice().into()).apply_numeric_affinity(),
-            Value::Integer(2251799813685247)
-        );
-        assert_eq!(
-            Value::Text(b"2251799813685248.0".as_slice().into()).apply_numeric_affinity(),
-            Value::Real(2251799813685248.0)
-        );
-        assert_eq!(
-            Value::Text(b"-2251799813685248.0".as_slice().into()).apply_numeric_affinity(),
-            Value::Integer(-2251799813685248)
-        );
-        assert_eq!(
-            Value::Text(b"2251799813685249.0".as_slice().into()).apply_numeric_affinity(),
-            Value::Real(2251799813685249.0)
-        );
-        assert_eq!(
-            Value::Text(b"-2251799813685249.0".as_slice().into()).apply_numeric_affinity(),
-            Value::Real(-2251799813685249.0)
-        );
-
-        // TODO; i64 overflow should preserve 15 digits?
-        assert_eq!(
-            Value::Text(b"9223372036854775808".as_slice().into()).apply_numeric_affinity(),
-            Value::Real(9223372036854776e3)
-        );
-        assert_eq!(
-            Value::Text(b"-9223372036854775809".as_slice().into()).apply_numeric_affinity(),
-            Value::Real(-9223372036854776e3)
-        );
-
-        // Invalid text as numeric
-        assert_eq!(
-            Value::Text(b"12345a".as_slice().into()).apply_numeric_affinity(),
-            Value::Text(b"12345a".as_slice().into())
-        );
-        assert_eq!(
-            Value::Text(b"12345e".as_slice().into()).apply_numeric_affinity(),
-            Value::Text(b"12345e".as_slice().into())
-        );
-        assert_eq!(
-            Value::Text(b"a12345".as_slice().into()).apply_numeric_affinity(),
-            Value::Text(b"a12345".as_slice().into())
-        );
-        assert_eq!(
-            Value::Text(b".".as_slice().into()).apply_numeric_affinity(),
-            Value::Text(b".".as_slice().into())
+            Value::Text(b"1234a".as_slice().into()).apply_affinity(TypeAffinity::Real),
+            Value::Text(b"1234a".as_slice().into())
         );
 
         assert_eq!(
-            Value::Blob(b"12345".as_slice().into()).apply_numeric_affinity(),
+            Value::Blob(b"12345".as_slice().into()).apply_affinity(TypeAffinity::Real),
             Value::Blob(b"12345".as_slice().into())
         );
     }
 
     #[test]
     fn test_apply_text_affinity() {
+        for (value, expected) in [
+            (Value::Null, Value::Null),
+            (Value::Integer(12345), Value::Text(b"12345".to_vec().into())),
+            (
+                Value::Integer(-12345),
+                Value::Text(b"-12345".to_vec().into()),
+            ),
+            (
+                Value::Real(12345.1),
+                Value::Text(b"12345.1".to_vec().into()),
+            ),
+            (
+                Value::Real(-12345.1),
+                Value::Text(b"-12345.1".to_vec().into()),
+            ),
+            (
+                Value::Text(b"abcde".as_slice().into()),
+                Value::Text(b"abcde".as_slice().into()),
+            ),
+            (
+                Value::Blob(b"abcde".as_slice().into()),
+                Value::Blob(b"abcde".as_slice().into()),
+            ),
+        ] {
+            assert_eq!(
+                value.clone().apply_text_affinity(),
+                expected,
+                "apply_text_affinity(): {:?}",
+                value
+            );
+            assert_eq!(
+                value.clone().apply_affinity(TypeAffinity::Text),
+                expected,
+                "apply_affinity(TypeAffinity::Text): {:?}",
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn test_apply_blob_affinity() {
+        assert_eq!(Value::Null.apply_affinity(TypeAffinity::Blob), Value::Null);
         assert_eq!(
-            Value::Integer(12345).apply_text_affinity(),
-            Value::Text(b"12345".to_vec().into())
+            Value::Integer(12345).apply_affinity(TypeAffinity::Blob),
+            Value::Integer(12345)
         );
         assert_eq!(
-            Value::Integer(-12345).apply_text_affinity(),
-            Value::Text(b"-12345".to_vec().into())
+            Value::Real(12345.1).apply_affinity(TypeAffinity::Blob),
+            Value::Real(12345.1)
         );
         assert_eq!(
-            Value::Real(12345.1).apply_text_affinity(),
-            Value::Text(b"12345.1".to_vec().into())
-        );
-        assert_eq!(
-            Value::Real(-12345.1).apply_text_affinity(),
-            Value::Text(b"-12345.1".to_vec().into())
-        );
-        assert_eq!(
-            Value::Text(b"abcde".as_slice().into()).apply_text_affinity(),
+            Value::Text(b"abcde".as_slice().into()).apply_affinity(TypeAffinity::Blob),
             Value::Text(b"abcde".as_slice().into())
         );
         assert_eq!(
-            Value::Blob(b"abcde".as_slice().into()).apply_text_affinity(),
+            Value::Blob(b"abcde".as_slice().into()).apply_affinity(TypeAffinity::Blob),
             Value::Blob(b"abcde".as_slice().into())
         );
     }

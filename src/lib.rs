@@ -1076,9 +1076,9 @@ impl<'conn> InsertStatement<'conn> {
             }
 
             let mut columns = Vec::with_capacity(record.columns.len());
-            for (expr, _type_affinity) in record.columns.iter() {
+            for (expr, type_affinity) in record.columns.iter() {
                 let (value, _, _) = expr.execute(None)?;
-                // TODO: apply affinity
+                let value = value.apply_affinity(*type_affinity);
                 columns.push(value);
             }
 
