@@ -339,7 +339,7 @@ impl<'a> BtreeCursor<'a> {
     /// Move to the specified btree index cell with the key.
     ///
     /// If it does not exist, move to the next cell.
-    pub fn index_move_to(&mut self, keys: &[ValueCmp]) -> Result<()> {
+    pub fn index_move_to(&mut self, keys: &[Option<ValueCmp>]) -> Result<()> {
         self.move_to_root();
         loop {
             if !self.current_page.page_type.is_index() {
@@ -1417,7 +1417,7 @@ mod tests {
         cursor.move_next().unwrap();
         assert!(cursor.get_index_payload().unwrap().is_none());
         cursor
-            .index_move_to(&[ValueCmp::new(&Value::Integer(0), &Collation::Binary)])
+            .index_move_to(&[Some(ValueCmp::new(&Value::Integer(0), &Collation::Binary))])
             .unwrap();
         assert!(cursor.get_index_payload().unwrap().is_none());
         cursor.move_to_last().unwrap();
@@ -1475,7 +1475,7 @@ mod tests {
             assert!(payload.size() > BUFFER_SIZE as u32);
             assert_eq!(payload.size(), payload.buf().len() as u32);
             let mut table_record = parse_record(&payload).unwrap();
-            assert_eq!(table_record.get(0).unwrap(), Value::Integer(i));
+            assert_eq!(table_record.get(0).unwrap(), Some(Value::Integer(i)));
             drop(payload);
             assert_eq!(table_cursor.get_table_key().unwrap().unwrap(), i + 1);
             table_cursor.move_next().unwrap();
@@ -1483,7 +1483,7 @@ mod tests {
             let payload = index1_cursor.get_index_payload().unwrap();
             let payload = payload.unwrap();
             let mut index_record = parse_record(&payload).unwrap();
-            assert_eq!(index_record.get(1).unwrap(), Value::Integer(i + 1));
+            assert_eq!(index_record.get(1).unwrap(), Some(Value::Integer(i + 1)));
             assert!(payload.size() > BUFFER_SIZE as u32, "{}", i);
             assert_eq!(payload.size(), payload.buf().len() as u32);
             drop(payload);
@@ -1492,8 +1492,8 @@ mod tests {
             let payload = index2_cursor.get_index_payload().unwrap();
             let payload = payload.unwrap();
             let mut index_record = parse_record(&payload).unwrap();
-            assert_eq!(index_record.get(0).unwrap(), Value::Integer(i));
-            assert_eq!(index_record.get(1).unwrap(), Value::Integer(i + 1));
+            assert_eq!(index_record.get(0).unwrap(), Some(Value::Integer(i)));
+            assert_eq!(index_record.get(1).unwrap(), Some(Value::Integer(i + 1)));
             assert_eq!(payload.size(), payload.buf().len() as u32);
             drop(payload);
             index2_cursor.move_next().unwrap();
@@ -1513,7 +1513,7 @@ mod tests {
             let payload = index1_cursor.get_index_payload().unwrap();
             let payload = payload.unwrap();
             let mut index_record = parse_record(&payload).unwrap();
-            assert_eq!(index_record.get(1).unwrap(), Value::Integer(i + 1));
+            assert_eq!(index_record.get(1).unwrap(), Some(Value::Integer(i + 1)));
             let rowid_buf = (i as u16 + 1).to_be_bytes();
             assert_eq!(payload.buf(), &[3, 14, 2, 0xff, rowid_buf[0], rowid_buf[1]]);
             assert_eq!(payload.size(), payload.buf().len() as u32);
@@ -1523,8 +1523,8 @@ mod tests {
             let payload = index2_cursor.get_index_payload().unwrap();
             let payload = payload.unwrap();
             let mut index_record = parse_record(&payload).unwrap();
-            assert_eq!(index_record.get(0).unwrap(), Value::Integer(i));
-            assert_eq!(index_record.get(1).unwrap(), Value::Integer(i + 1));
+            assert_eq!(index_record.get(0).unwrap(), Some(Value::Integer(i)));
+            assert_eq!(index_record.get(1).unwrap(), Some(Value::Integer(i + 1)));
             assert_eq!(payload.size(), payload.buf().len() as u32);
             drop(payload);
             index2_cursor.move_next().unwrap();
@@ -1547,10 +1547,13 @@ mod tests {
                 .unwrap()
                 .get(1)
                 .unwrap(),
-            Value::Integer(5000)
+            Some(Value::Integer(5000))
         );
         index1_cursor
-            .index_move_to(&[ValueCmp::new(&Value::Integer(1000), &Collation::Binary)])
+            .index_move_to(&[Some(ValueCmp::new(
+                &Value::Integer(1000),
+                &Collation::Binary,
+            ))])
             .unwrap();
         index1_cursor.move_to_last().unwrap();
         assert_eq!(
@@ -1558,7 +1561,7 @@ mod tests {
                 .unwrap()
                 .get(1)
                 .unwrap(),
-            Value::Integer(5000)
+            Some(Value::Integer(5000))
         );
 
         table_cursor.table_move_to(2000).unwrap();
@@ -1568,41 +1571,44 @@ mod tests {
         assert_eq!(rowid, 2000);
 
         index2_cursor
-            .index_move_to(&[ValueCmp::new(&Value::Integer(2000), &Collation::Binary)])
+            .index_move_to(&[Some(ValueCmp::new(
+                &Value::Integer(2000),
+                &Collation::Binary,
+            ))])
             .unwrap();
         let payload = index2_cursor.get_index_payload().unwrap();
         let payload = payload.unwrap();
         let mut index_record = parse_record(&payload).unwrap();
-        assert_eq!(index_record.get(0).unwrap(), Value::Integer(2000));
-        assert_eq!(index_record.get(1).unwrap(), Value::Integer(2001));
+        assert_eq!(index_record.get(0).unwrap(), Some(Value::Integer(2000)));
+        assert_eq!(index_record.get(1).unwrap(), Some(Value::Integer(2001)));
         assert_eq!(payload.size(), payload.buf().len() as u32);
         drop(payload);
 
         index2_cursor
             .index_move_to(&[
-                ValueCmp::new(&Value::Integer(3000), &Collation::Binary),
-                ValueCmp::new(&Value::Integer(3001), &Collation::Binary),
+                Some(ValueCmp::new(&Value::Integer(3000), &Collation::Binary)),
+                Some(ValueCmp::new(&Value::Integer(3001), &Collation::Binary)),
             ])
             .unwrap();
         let payload = index2_cursor.get_index_payload().unwrap();
         let payload = payload.unwrap();
         let mut index_record = parse_record(&payload).unwrap();
-        assert_eq!(index_record.get(0).unwrap(), Value::Integer(3000));
-        assert_eq!(index_record.get(1).unwrap(), Value::Integer(3001));
+        assert_eq!(index_record.get(0).unwrap(), Some(Value::Integer(3000)));
+        assert_eq!(index_record.get(1).unwrap(), Some(Value::Integer(3001)));
         assert_eq!(payload.size(), payload.buf().len() as u32);
         drop(payload);
 
         index2_cursor
             .index_move_to(&[
-                ValueCmp::new(&Value::Integer(3000), &Collation::Binary),
-                ValueCmp::new(&Value::Integer(3003), &Collation::Binary),
+                Some(ValueCmp::new(&Value::Integer(3000), &Collation::Binary)),
+                Some(ValueCmp::new(&Value::Integer(3003), &Collation::Binary)),
             ])
             .unwrap();
         let payload = index2_cursor.get_index_payload().unwrap();
         let payload = payload.unwrap();
         let mut index_record = parse_record(&payload).unwrap();
-        assert_eq!(index_record.get(0).unwrap(), Value::Integer(3001));
-        assert_eq!(index_record.get(1).unwrap(), Value::Integer(3002));
+        assert_eq!(index_record.get(0).unwrap(), Some(Value::Integer(3001)));
+        assert_eq!(index_record.get(1).unwrap(), Some(Value::Integer(3002)));
         assert_eq!(payload.size(), payload.buf().len() as u32);
         drop(payload);
     }
@@ -1829,71 +1835,74 @@ mod tests {
 
         for i in 0..3 {
             cursor
-                .index_move_to(&[ValueCmp::new(&Value::Integer(2 * i), &Collation::Binary)])
+                .index_move_to(&[Some(ValueCmp::new(
+                    &Value::Integer(2 * i),
+                    &Collation::Binary,
+                ))])
                 .unwrap();
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some());
             let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
-            assert_eq!(record.get(0).unwrap(), Value::Integer(2 * i + 1));
-            assert_eq!(record.get(1).unwrap(), Value::Integer(2 * i + 1));
+            assert_eq!(record.get(0).unwrap(), Some(Value::Integer(2 * i + 1)));
+            assert_eq!(record.get(1).unwrap(), Some(Value::Integer(2 * i + 1)));
             drop(payload);
 
             cursor
-                .index_move_to(&[ValueCmp::new(
+                .index_move_to(&[Some(ValueCmp::new(
                     &Value::Integer(2 * i + 1),
                     &Collation::Binary,
-                )])
+                ))])
                 .unwrap();
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some());
             let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
-            assert_eq!(record.get(0).unwrap(), Value::Integer(2 * i + 1));
-            assert_eq!(record.get(1).unwrap(), Value::Integer(2 * i + 1));
+            assert_eq!(record.get(0).unwrap(), Some(Value::Integer(2 * i + 1)));
+            assert_eq!(record.get(1).unwrap(), Some(Value::Integer(2 * i + 1)));
         }
 
         cursor
-            .index_move_to(&[ValueCmp::new(&Value::Integer(10), &Collation::Binary)])
+            .index_move_to(&[Some(ValueCmp::new(&Value::Integer(10), &Collation::Binary))])
             .unwrap();
         let payload = cursor.get_index_payload().unwrap();
         assert!(payload.is_some());
         let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
-        assert_eq!(record.get(0).unwrap(), Value::Integer(10));
+        assert_eq!(record.get(0).unwrap(), Some(Value::Integer(10)));
         // If there are multiple entries with the same key, one of the entries is
         // returned (not necessarily the first or last one).
-        assert_eq!(record.get(1).unwrap(), Value::Integer(11));
+        assert_eq!(record.get(1).unwrap(), Some(Value::Integer(11)));
         drop(payload);
 
         for i in 10..13 {
             cursor
                 .index_move_to(&[
-                    ValueCmp::new(&Value::Integer(10), &Collation::Binary),
-                    ValueCmp::new(&Value::Integer(i), &Collation::Binary),
+                    Some(ValueCmp::new(&Value::Integer(10), &Collation::Binary)),
+                    Some(ValueCmp::new(&Value::Integer(i), &Collation::Binary)),
                 ])
                 .unwrap();
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some());
             let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
-            assert_eq!(record.get(0).unwrap(), Value::Integer(10));
-            assert_eq!(record.get(1).unwrap(), Value::Integer(i));
+            assert_eq!(record.get(0).unwrap(), Some(Value::Integer(10)));
+            assert_eq!(record.get(1).unwrap(), Some(Value::Integer(i)));
         }
 
         cursor
             .index_move_to(&[
-                ValueCmp::new(&Value::Integer(10), &Collation::Binary),
-                ValueCmp::new(&Value::Integer(13), &Collation::Binary),
+                Some(ValueCmp::new(&Value::Integer(10), &Collation::Binary)),
+                Some(ValueCmp::new(&Value::Integer(13), &Collation::Binary)),
             ])
             .unwrap();
         let payload = cursor.get_index_payload().unwrap();
         assert!(payload.is_some());
         let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
-        assert_eq!(record.get(0).unwrap(), Value::Integer(11));
-        assert_eq!(record.get(1).unwrap(), Value::Integer(14));
+        assert_eq!(record.get(0).unwrap(), Some(Value::Integer(11)));
+        assert_eq!(record.get(1).unwrap(), Some(Value::Integer(14)));
         drop(payload);
 
         cursor
             .index_move_to(&[
-                ValueCmp::new(&Value::Integer(11), &Collation::Binary),
-                ValueCmp::new(&Value::Integer(16), &Collation::Binary),
+                Some(ValueCmp::new(&Value::Integer(11), &Collation::Binary)),
+                Some(ValueCmp::new(&Value::Integer(16), &Collation::Binary)),
             ])
             .unwrap();
         let payload = cursor.get_index_payload().unwrap();
@@ -1941,165 +1950,179 @@ mod tests {
         let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
 
         for (expected, keys) in [
-            (
-                15,
-                vec![
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
-                ],
-            ),
+            (15, vec![None, None, None]),
             (
                 1,
                 vec![
-                    ValueCmp::new(&Value::Integer(1), &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
+                    Some(ValueCmp::new(&Value::Integer(1), &Collation::Binary)),
+                    None,
+                    None,
                 ],
             ),
             (
                 2,
                 vec![
-                    ValueCmp::new(&Value::Integer(1), &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
-                    ValueCmp::new(&Value::Integer(2), &Collation::Binary),
+                    Some(ValueCmp::new(&Value::Integer(1), &Collation::Binary)),
+                    None,
+                    Some(ValueCmp::new(&Value::Integer(2), &Collation::Binary)),
                 ],
             ),
             (
                 4,
                 vec![
-                    ValueCmp::new(&Value::Integer(1), &Collation::Binary),
-                    ValueCmp::new(&Value::Integer(0), &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
+                    Some(ValueCmp::new(&Value::Integer(1), &Collation::Binary)),
+                    Some(ValueCmp::new(&Value::Integer(0), &Collation::Binary)),
+                    None,
                 ],
             ),
             (
                 3,
                 vec![
-                    ValueCmp::new(&Value::Integer(1), &Collation::Binary),
-                    ValueCmp::new(&Value::Real(-10.1), &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
+                    Some(ValueCmp::new(&Value::Integer(1), &Collation::Binary)),
+                    Some(ValueCmp::new(&Value::Real(-10.1), &Collation::Binary)),
+                    None,
                 ],
             ),
             (
                 5,
                 vec![
-                    ValueCmp::new(&Value::Integer(1), &Collation::Binary),
-                    ValueCmp::new(&Value::Integer(5), &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
+                    Some(ValueCmp::new(&Value::Integer(1), &Collation::Binary)),
+                    Some(ValueCmp::new(&Value::Integer(5), &Collation::Binary)),
+                    None,
                 ],
             ),
             (
                 7,
                 vec![
-                    ValueCmp::new(&Value::Integer(1), &Collation::Binary),
-                    ValueCmp::new(&Value::Integer(101), &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
+                    Some(ValueCmp::new(&Value::Integer(1), &Collation::Binary)),
+                    Some(ValueCmp::new(&Value::Integer(101), &Collation::Binary)),
+                    None,
                 ],
             ),
             (
                 7,
                 vec![
-                    ValueCmp::new(&Value::Integer(1), &Collation::Binary),
-                    ValueCmp::new(&Value::Text(b"".as_slice().into()), &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
+                    Some(ValueCmp::new(&Value::Integer(1), &Collation::Binary)),
+                    Some(ValueCmp::new(
+                        &Value::Text(b"".as_slice().into()),
+                        &Collation::Binary,
+                    )),
+                    None,
                 ],
             ),
             (
                 8,
                 vec![
-                    ValueCmp::new(&Value::Integer(1), &Collation::Binary),
-                    ValueCmp::new(&Value::Text(b"\0".as_slice().into()), &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
+                    Some(ValueCmp::new(&Value::Integer(1), &Collation::Binary)),
+                    Some(ValueCmp::new(
+                        &Value::Text(b"\0".as_slice().into()),
+                        &Collation::Binary,
+                    )),
+                    None,
                 ],
             ),
             (
                 10,
                 vec![
-                    ValueCmp::new(&Value::Integer(1), &Collation::Binary),
-                    ValueCmp::new(&Value::Text(b"01234".as_slice().into()), &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
+                    Some(ValueCmp::new(&Value::Integer(1), &Collation::Binary)),
+                    Some(ValueCmp::new(
+                        &Value::Text(b"01234".as_slice().into()),
+                        &Collation::Binary,
+                    )),
+                    None,
                 ],
             ),
             (
                 10,
                 vec![
-                    ValueCmp::new(&Value::Integer(1), &Collation::Binary),
-                    ValueCmp::new(&Value::Text(b"0124".as_slice().into()), &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
+                    Some(ValueCmp::new(&Value::Integer(1), &Collation::Binary)),
+                    Some(ValueCmp::new(
+                        &Value::Text(b"0124".as_slice().into()),
+                        &Collation::Binary,
+                    )),
+                    None,
                 ],
             ),
             (
                 13,
                 vec![
-                    ValueCmp::new(&Value::Integer(1), &Collation::Binary),
-                    ValueCmp::new(
+                    Some(ValueCmp::new(&Value::Integer(1), &Collation::Binary)),
+                    Some(ValueCmp::new(
                         &Value::Blob([0x01, 0x24].as_slice().into()),
                         &Collation::Binary,
-                    ),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
+                    )),
+                    None,
                 ],
             ),
             (
                 17,
                 vec![
-                    ValueCmp::new(&Value::Integer(1), &Collation::Binary),
-                    ValueCmp::new(
+                    Some(ValueCmp::new(&Value::Integer(1), &Collation::Binary)),
+                    Some(ValueCmp::new(
                         &Value::Blob([0x01, 0x26].as_slice().into()),
                         &Collation::Binary,
-                    ),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
+                    )),
+                    None,
                 ],
             ),
             (
                 17,
                 vec![
-                    ValueCmp::new(&Value::Integer(2), &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
+                    Some(ValueCmp::new(&Value::Integer(2), &Collation::Binary)),
+                    None,
+                    None,
                 ],
             ),
             (
                 18,
                 vec![
-                    ValueCmp::new(&Value::Integer(3), &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
+                    Some(ValueCmp::new(&Value::Integer(3), &Collation::Binary)),
+                    None,
+                    None,
                 ],
             ),
             (
                 21,
                 vec![
-                    ValueCmp::new(&Value::Text(b"0123".as_slice().into()), &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
+                    Some(ValueCmp::new(
+                        &Value::Text(b"0123".as_slice().into()),
+                        &Collation::Binary,
+                    )),
+                    None,
+                    None,
                 ],
             ),
             (
                 22,
                 vec![
-                    ValueCmp::new(&Value::Text(b"0123".as_slice().into()), &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
-                    ValueCmp::new(&Value::Integer(22), &Collation::Binary),
+                    Some(ValueCmp::new(
+                        &Value::Text(b"0123".as_slice().into()),
+                        &Collation::Binary,
+                    )),
+                    None,
+                    Some(ValueCmp::new(&Value::Integer(22), &Collation::Binary)),
                 ],
             ),
             (
                 24,
                 vec![
-                    ValueCmp::new(&Value::Text(b"0123".as_slice().into()), &Collation::Binary),
-                    ValueCmp::new(&Value::Integer(1), &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
+                    Some(ValueCmp::new(
+                        &Value::Text(b"0123".as_slice().into()),
+                        &Collation::Binary,
+                    )),
+                    Some(ValueCmp::new(&Value::Integer(1), &Collation::Binary)),
+                    None,
                 ],
             ),
             (
                 27,
                 vec![
-                    ValueCmp::new(
+                    Some(ValueCmp::new(
                         &Value::Blob([0x01, 0x24].as_slice().into()),
                         &Collation::Binary,
-                    ),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
-                    ValueCmp::new(&Value::Null, &Collation::Binary),
+                    )),
+                    None,
+                    None,
                 ],
             ),
         ] {
@@ -2108,7 +2131,7 @@ mod tests {
             assert!(payload.is_some());
             let payload = payload.unwrap();
             let mut record = parse_record(&payload).unwrap();
-            if let Value::Integer(rowid) = record.get(record.len() - 1).unwrap() {
+            if let Some(Value::Integer(rowid)) = record.get(record.len() - 1).unwrap() {
                 assert_eq!(rowid, expected, "{:?}", keys);
             } else {
                 panic!("unexpected payload: {:?}", keys);
@@ -2119,20 +2142,31 @@ mod tests {
     #[test]
     fn test_index_move_to_collate_sequence() {
         let file = create_sqlite_database(&[
-            "CREATE TABLE example(col1 COLLATE BINARY, col2 COLLATE NOCASE, col3 COLLATE RTRIM);",
+            "CREATE TABLE example(col1 COLLATE BINARY, col2 COLLATE NOCASE, col3
+    COLLATE RTRIM);",
             "CREATE INDEX index1 ON example(col1);",
             "CREATE INDEX index2 ON example(col2);",
             "CREATE INDEX index3 ON example(col3);",
-            "INSERT INTO example(col1, col2, col3) VALUES ('abcde1', 'abcde1', 'abcde1');",
-            "INSERT INTO example(col1, col2, col3) VALUES ('abcde2', 'abcde2', 'abcde2');",
-            "INSERT INTO example(col1, col2, col3) VALUES ('abcdef  ', 'abcdef  ', 'abcdef  ');",
-            "INSERT INTO example(col1, col2, col3) VALUES ('ABCDEF', 'ABCDEF', 'ABCDEF');",
-            "INSERT INTO example(col1, col2, col3) VALUES ('ABCDE', 'ABCDE', 'ABCDE');",
-            "INSERT INTO example(col1, col2, col3) VALUES ('ABCDE  ', 'ABCDE  ', 'ABCDE  ');",
-            "INSERT INTO example(col1, col2, col3) VALUES ('abcde  ', 'abcde  ', 'abcde  ');",
-            "INSERT INTO example(col1, col2, col3) VALUES ('abcde', 'abcde', 'abcde');",
-            "INSERT INTO example(col1, col2, col3) VALUES ('abcdef', 'abcdef', 'abcdef');",
-            "INSERT INTO example(col1, col2, col3) VALUES ('ABCDEF  ', 'ABCDEF  ', 'ABCDEF  ');",
+            "INSERT INTO example(col1, col2, col3) VALUES ('abcde1', 'abcde1',
+    'abcde1');",
+            "INSERT INTO example(col1, col2, col3) VALUES
+    ('abcde2', 'abcde2', 'abcde2');",
+            "INSERT INTO example(col1,
+    col2, col3) VALUES ('abcdef  ', 'abcdef  ', 'abcdef  ');",
+            "INSERT INTO example(col1, col2, col3) VALUES ('ABCDEF', 'ABCDEF',
+    'ABCDEF');",
+            "INSERT INTO example(col1, col2, col3) VALUES
+    ('ABCDE', 'ABCDE', 'ABCDE');",
+            "INSERT INTO example(col1, col2,
+    col3) VALUES ('ABCDE  ', 'ABCDE  ', 'ABCDE  ');",
+            "INSERT INTO
+    example(col1, col2, col3) VALUES ('abcde  ', 'abcde  ', 'abcde  ');",
+            "INSERT INTO example(col1, col2, col3) VALUES ('abcde', 'abcde',
+    'abcde');",
+            "INSERT INTO example(col1, col2, col3) VALUES
+    ('abcdef', 'abcdef', 'abcdef');",
+            "INSERT INTO example(col1,
+    col2, col3) VALUES ('ABCDEF  ', 'ABCDEF  ', 'ABCDEF  ');",
         ]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let bctx = load_btree_context(file.as_file()).unwrap();
@@ -2153,46 +2187,37 @@ mod tests {
             ([4, 4, 4], Value::Text(b"ABCDEF".as_slice().into())),
             ([10, 3, 4], Value::Text(b"ABCDEF  ".as_slice().into())),
         ] {
-            let keys = vec![
-                ValueCmp::new(&key, &Collation::Binary),
-                ValueCmp::new(&Value::Null, &Collation::Binary),
-            ];
+            let keys = vec![Some(ValueCmp::new(&key, &Collation::Binary)), None];
             cursor1.index_move_to(&keys).unwrap();
             let payload = cursor1.get_index_payload().unwrap();
             assert!(payload.is_some());
             let payload = payload.unwrap();
             let mut record = parse_record(&payload).unwrap();
-            if let Value::Integer(rowid) = record.get(record.len() - 1).unwrap() {
+            if let Some(Value::Integer(rowid)) = record.get(record.len() - 1).unwrap() {
                 assert_eq!(rowid, expected[0], "{:?}", keys);
             } else {
                 panic!("unexpected payload: {:?}", keys);
             }
 
-            let keys = vec![
-                ValueCmp::new(&key, &Collation::NoCase),
-                ValueCmp::new(&Value::Null, &Collation::Binary),
-            ];
+            let keys = vec![Some(ValueCmp::new(&key, &Collation::NoCase)), None];
             cursor2.index_move_to(&keys).unwrap();
             let payload = cursor2.get_index_payload().unwrap();
             assert!(payload.is_some());
             let payload = payload.unwrap();
             let mut record = parse_record(&payload).unwrap();
-            if let Value::Integer(rowid) = record.get(record.len() - 1).unwrap() {
+            if let Some(Value::Integer(rowid)) = record.get(record.len() - 1).unwrap() {
                 assert_eq!(rowid, expected[1], "{:?}", keys);
             } else {
                 panic!("unexpected payload: {:?}", keys);
             }
 
-            let keys = vec![
-                ValueCmp::new(&key, &Collation::RTrim),
-                ValueCmp::new(&Value::Null, &Collation::Binary),
-            ];
+            let keys = vec![Some(ValueCmp::new(&key, &Collation::RTrim)), None];
             cursor3.index_move_to(&keys).unwrap();
             let payload = cursor3.get_index_payload().unwrap();
             assert!(payload.is_some());
             let payload = payload.unwrap();
             let mut record = parse_record(&payload).unwrap();
-            if let Value::Integer(rowid) = record.get(record.len() - 1).unwrap() {
+            if let Some(Value::Integer(rowid)) = record.get(record.len() - 1).unwrap() {
                 assert_eq!(rowid, expected[2], "{:?}", keys);
             } else {
                 panic!("unexpected payload: {:?}", keys);
@@ -2214,7 +2239,7 @@ mod tests {
 
         for i in 0..3 {
             cursor
-                .index_move_to(&[ValueCmp::new(&Value::Integer(i), &Collation::Binary)])
+                .index_move_to(&[Some(ValueCmp::new(&Value::Integer(i), &Collation::Binary))])
                 .unwrap();
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_none());
@@ -2223,8 +2248,8 @@ mod tests {
 
     #[test]
     fn test_index_move_to_multiple_page() {
-        // index record has 1 (header length) + 2 (bytes) + 1 (integer) bytes header +
-        // at most 2 (integer) rowid.
+        // index record has 1 (header length) + 2 (bytes) + 1 (integer) bytes
+        // header + at most 2 (integer) rowid.
         const BUFFER_SIZE: usize = 994;
         let buf = vec![0; BUFFER_SIZE];
         let hex = buffer_to_hex(&buf);
@@ -2241,7 +2266,8 @@ mod tests {
         }
         for i in 4000..5000 {
             inserts.push(format!(
-                "INSERT INTO example(rowid,id, col) VALUES ({},{}, X'FFFFFFFF');",
+                "INSERT INTO example(rowid,id, col) VALUES ({},{},
+    X'FFFFFFFF');",
                 i,
                 2 * i + 1
             ));
@@ -2260,29 +2286,32 @@ mod tests {
 
         for i in 0..2000 {
             cursor
-                .index_move_to(&[ValueCmp::new(&Value::Integer(2 * i), &Collation::Binary)])
+                .index_move_to(&[Some(ValueCmp::new(
+                    &Value::Integer(2 * i),
+                    &Collation::Binary,
+                ))])
                 .unwrap();
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some(), "i = {}", i);
             let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
-            assert_eq!(record.get(0).unwrap(), Value::Integer(2 * i + 1));
-            assert_eq!(record.get(2).unwrap(), Value::Integer(i));
+            assert_eq!(record.get(0).unwrap(), Some(Value::Integer(2 * i + 1)));
+            assert_eq!(record.get(2).unwrap(), Some(Value::Integer(i)));
             drop(payload);
 
             // Reset the cursor.
             cursor.move_to_first().unwrap();
 
             cursor
-                .index_move_to(&[ValueCmp::new(
+                .index_move_to(&[Some(ValueCmp::new(
                     &Value::Integer(2 * i + 1),
                     &Collation::Binary,
-                )])
+                ))])
                 .unwrap();
             let payload = cursor.get_index_payload().unwrap();
             assert!(payload.is_some(), "i = {}", i);
             let mut record = parse_record(payload.as_ref().unwrap()).unwrap();
-            assert_eq!(record.get(0).unwrap(), Value::Integer(2 * i + 1));
-            assert_eq!(record.get(2).unwrap(), Value::Integer(i));
+            assert_eq!(record.get(0).unwrap(), Some(Value::Integer(2 * i + 1)));
+            assert_eq!(record.get(2).unwrap(), Some(Value::Integer(i)));
             drop(payload);
 
             // Reset the cursor.
@@ -2290,7 +2319,10 @@ mod tests {
         }
 
         cursor
-            .index_move_to(&[ValueCmp::new(&Value::Integer(10000), &Collation::Binary)])
+            .index_move_to(&[Some(ValueCmp::new(
+                &Value::Integer(10000),
+                &Collation::Binary,
+            ))])
             .unwrap();
         let payload = cursor.get_index_payload().unwrap();
         assert!(payload.is_none());
@@ -2411,7 +2443,7 @@ mod tests {
         assert_eq!(key, 1);
         assert_eq!(
             parse_record(&payload).unwrap().get(0).unwrap(),
-            Value::Integer(1)
+            Some(Value::Integer(1))
         );
         drop(payload);
 
@@ -2420,7 +2452,7 @@ mod tests {
         assert_eq!(key, 2);
         assert_eq!(
             parse_record(&payload).unwrap().get(0).unwrap(),
-            Value::Integer(2)
+            Some(Value::Integer(2))
         );
         drop(payload);
 
@@ -2435,7 +2467,7 @@ mod tests {
         assert_eq!(key, 5);
         assert_eq!(
             parse_record(&payload).unwrap().get(0).unwrap(),
-            Value::Integer(5)
+            Some(Value::Integer(5))
         );
         drop(payload);
 

@@ -53,7 +53,9 @@ fn main() {
                                 if i > 0 {
                                     print!("|");
                                 }
-                                columns.get(i).display(&mut stdout).expect("display column");
+                                if let Some(v) = columns.get(i) {
+                                    v.display(&mut stdout).expect("display column");
+                                }
                             }
                             println!();
                         }

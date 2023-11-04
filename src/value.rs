@@ -92,7 +92,6 @@ impl From<Vec<u8>> for Buffer<'_> {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Value<'a> {
-    Null,
     Integer(i64),
     Real(f64),
     // NOTE: Any text is not guaranteed to be valid UTF-8.
@@ -103,7 +102,6 @@ pub enum Value<'a> {
 impl<'a> Value<'a> {
     pub fn display<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
         match self {
-            Value::Null => Ok(()),
             Value::Integer(i) => write!(w, "{i}"),
             Value::Real(d) => write!(w, "{d}"),
             Value::Blob(buf) => w.write_all(buf),
@@ -120,7 +118,6 @@ impl<'a> Value<'a> {
         match type_affinity {
             TypeAffinity::Numeric | TypeAffinity::Integer => self.apply_numeric_affinity(),
             TypeAffinity::Real => match self {
-                Value::Null => Value::Null,
                 Value::Integer(i) => Value::Real(i as f64),
                 Value::Real(d) => Value::Real(d),
                 Value::Text(buf) => {
@@ -142,7 +139,6 @@ impl<'a> Value<'a> {
     /// Otherwise, return the original value.
     pub fn apply_numeric_affinity(self) -> Self {
         match self {
-            Value::Null => Value::Null,
             Value::Integer(i) => Value::Integer(i),
             Value::Real(d) => {
                 let di = real_to_int(d);
@@ -183,7 +179,6 @@ impl<'a> Value<'a> {
         // TODO: Consider removing Value::Null from Value and use Option<Value> as the
         // value.
         match self {
-            Value::Null => Value::Null,
             Value::Integer(i) => {
                 // i64 is at most 19 digits. 1 byte is for sign (-).
                 let mut text_buf = Vec::with_capacity(20);
@@ -203,34 +198,25 @@ impl<'a> Value<'a> {
 
     /// Convert the value to an integer value if it is well-formed. otherwise,
     /// convert it to 0.
-    ///
-    /// [Value::Null] is converted to [None].
-    pub fn as_integer(&self) -> Option<i64> {
+    pub fn as_integer(&self) -> i64 {
         match self {
-            Value::Null => None,
-            Value::Integer(i) => Some(*i),
-            Value::Real(d) => Some(real_to_int(*d)),
+            Value::Integer(i) => *i,
+            Value::Real(d) => real_to_int(*d),
             Value::Text(buf) | Value::Blob(buf) => {
                 let (_, parsed_int) = parse_integer(buf);
                 match parsed_int {
-                    ParseIntegerResult::Integer(i) => Some(i),
-                    ParseIntegerResult::Empty => Some(0),
-                    ParseIntegerResult::MaxPlusOne | ParseIntegerResult::TooBig(true) => {
-                        Some(i64::MAX)
-                    }
-                    ParseIntegerResult::TooBig(false) => Some(i64::MIN),
+                    ParseIntegerResult::Integer(i) => i,
+                    ParseIntegerResult::Empty => 0,
+                    ParseIntegerResult::MaxPlusOne | ParseIntegerResult::TooBig(true) => i64::MAX,
+                    ParseIntegerResult::TooBig(false) => i64::MIN,
                 }
             }
         }
     }
 
     /// Convert the value to text and return the [Buffer].
-    ///
-    /// This does not support [Value::Null] values.
     pub fn force_text_buffer(self) -> Buffer<'a> {
-        assert_ne!(self, Value::Null);
         match self {
-            Value::Null => unreachable!(),
             Value::Integer(i) => {
                 // i64 is at most 19 digits. 1 byte is for sign (-).
                 let mut text_buf = Vec::with_capacity(20);
@@ -257,7 +243,6 @@ impl<'a> Value<'a> {
     pub fn force_apply_type_affinity(self, type_affinity: TypeAffinity) -> Self {
         match type_affinity {
             TypeAffinity::Numeric => match self {
-                Value::Null => Value::Null,
                 Value::Integer(i) => Value::Integer(i),
                 Value::Real(d) => Value::Real(d),
                 Value::Text(buf) | Value::Blob(buf) => {
@@ -280,15 +265,8 @@ impl<'a> Value<'a> {
                     v
                 }
             },
-            TypeAffinity::Integer => {
-                if let Some(i) = self.as_integer() {
-                    Value::Integer(i)
-                } else {
-                    Value::Null
-                }
-            }
+            TypeAffinity::Integer => Value::Integer(self.as_integer()),
             TypeAffinity::Real => match self {
-                Value::Null => Value::Null,
                 Value::Integer(i) => Value::Real(i as f64),
                 Value::Real(d) => Value::Real(d),
                 Value::Text(buf) | Value::Blob(buf) => {
@@ -302,10 +280,7 @@ impl<'a> Value<'a> {
                 } else {
                     Value::Blob
                 };
-                match self {
-                    Value::Null => Value::Null,
-                    non_null_value => value_type(non_null_value.force_text_buffer()),
-                }
+                value_type(self.force_text_buffer())
             }
         }
     }
@@ -345,9 +320,6 @@ impl<'a> ValueCmp<'a> {
     pub fn compare(&self, value: &Value) -> Ordering {
         let (left, collation) = self.0;
         match (left, value) {
-            (Value::Null, Value::Null) => Ordering::Equal,
-            (Value::Null, _) => Ordering::Less,
-            (_, Value::Null) => Ordering::Greater,
             (Value::Integer(i1), Value::Integer(i2)) => i1.cmp(i2),
             (Value::Integer(i1), Value::Real(d2)) => cmp_int_real(*i1, *d2),
             (Value::Real(d1), Value::Integer(i2)) => cmp_int_real(*i2, *d1).reverse(),
@@ -419,32 +391,6 @@ mod tests {
     #[test]
     fn test_value_compare() {
         assert_eq!(
-            ValueCmp::new(&Value::Null, &Collation::Binary).compare(&Value::Null),
-            Ordering::Equal
-        );
-        assert_eq!(
-            ValueCmp::new(&Value::Null, &Collation::Binary).compare(&Value::Integer(0)),
-            Ordering::Less
-        );
-        assert_eq!(
-            ValueCmp::new(&Value::Null, &Collation::Binary).compare(&Value::Real(0.0)),
-            Ordering::Less
-        );
-        assert_eq!(
-            ValueCmp::new(&Value::Null, &Collation::Binary)
-                .compare(&Value::Text(b"".as_slice().into())),
-            Ordering::Less
-        );
-        assert_eq!(
-            ValueCmp::new(&Value::Null, &Collation::Binary)
-                .compare(&Value::Blob(b"".as_slice().into())),
-            Ordering::Less
-        );
-        assert_eq!(
-            ValueCmp::new(&Value::Integer(0), &Collation::Binary).compare(&Value::Null),
-            Ordering::Greater
-        );
-        assert_eq!(
             ValueCmp::new(&Value::Integer(12345), &Collation::Binary)
                 .compare(&Value::Integer(12345)),
             Ordering::Equal
@@ -500,10 +446,6 @@ mod tests {
             Ordering::Less
         );
         assert_eq!(
-            ValueCmp::new(&Value::Real(1234.5), &Collation::Binary).compare(&Value::Null),
-            Ordering::Greater
-        );
-        assert_eq!(
             ValueCmp::new(&Value::Real(12345.0), &Collation::Binary)
                 .compare(&Value::Integer(12345)),
             Ordering::Equal
@@ -530,11 +472,6 @@ mod tests {
             ValueCmp::new(&Value::Real(1234.5), &Collation::Binary)
                 .compare(&Value::Blob(b"".as_slice().into())),
             Ordering::Less
-        );
-        assert_eq!(
-            ValueCmp::new(&Value::Text(b"abcde".as_slice().into()), &Collation::Binary)
-                .compare(&Value::Null),
-            Ordering::Greater
         );
         assert_eq!(
             ValueCmp::new(&Value::Text(b"".as_slice().into()), &Collation::Binary)
@@ -628,11 +565,6 @@ mod tests {
         );
         assert_eq!(
             ValueCmp::new(&Value::Blob(b"".as_slice().into()), &Collation::Binary)
-                .compare(&Value::Null),
-            Ordering::Greater
-        );
-        assert_eq!(
-            ValueCmp::new(&Value::Blob(b"".as_slice().into()), &Collation::Binary)
                 .compare(&Value::Integer(i64::MAX)),
             Ordering::Greater
         );
@@ -677,7 +609,6 @@ mod tests {
     #[test]
     fn test_apply_numeric_affinity() {
         for (value, expected) in [
-            (Value::Null.apply_numeric_affinity(), Value::Null),
             (Value::Integer(12345), Value::Integer(12345)),
             (Value::Real(12345.1), Value::Real(12345.1)),
             (Value::Real(12345.0), Value::Integer(12345)),
@@ -792,8 +723,6 @@ mod tests {
 
     #[test]
     fn test_apply_real_affinity() {
-        assert_eq!(Value::Null.apply_affinity(TypeAffinity::Real), Value::Null);
-
         assert_eq!(
             Value::Integer(12345).apply_affinity(TypeAffinity::Real),
             Value::Real(12345.0)
@@ -834,7 +763,6 @@ mod tests {
     #[test]
     fn test_apply_text_affinity() {
         for (value, expected) in [
-            (Value::Null, Value::Null),
             (Value::Integer(12345), Value::Text(b"12345".to_vec().into())),
             (
                 Value::Integer(-12345),
@@ -874,7 +802,6 @@ mod tests {
 
     #[test]
     fn test_apply_blob_affinity() {
-        assert_eq!(Value::Null.apply_affinity(TypeAffinity::Blob), Value::Null);
         assert_eq!(
             Value::Integer(12345).apply_affinity(TypeAffinity::Blob),
             Value::Integer(12345)
@@ -895,11 +822,6 @@ mod tests {
 
     #[test]
     fn test_force_apply_type_affinity_numeric() {
-        assert_eq!(
-            Value::Null.force_apply_type_affinity(TypeAffinity::Numeric),
-            Value::Null
-        );
-
         assert_eq!(
             Value::Integer(12345).force_apply_type_affinity(TypeAffinity::Numeric),
             Value::Integer(12345)
@@ -1053,11 +975,6 @@ mod tests {
     #[test]
     fn test_force_apply_type_affinity_integer() {
         assert_eq!(
-            Value::Null.force_apply_type_affinity(TypeAffinity::Integer),
-            Value::Null
-        );
-
-        assert_eq!(
             Value::Integer(12345).force_apply_type_affinity(TypeAffinity::Integer),
             Value::Integer(12345)
         );
@@ -1168,11 +1085,6 @@ mod tests {
     #[test]
     fn test_force_apply_type_affinity_real() {
         assert_eq!(
-            Value::Null.force_apply_type_affinity(TypeAffinity::Real),
-            Value::Null
-        );
-
-        assert_eq!(
             Value::Integer(12345).force_apply_type_affinity(TypeAffinity::Real),
             Value::Real(12345.0)
         );
@@ -1254,10 +1166,6 @@ mod tests {
     #[test]
     fn test_force_apply_type_affinity_text() {
         assert_eq!(
-            Value::Null.force_apply_type_affinity(TypeAffinity::Text),
-            Value::Null
-        );
-        assert_eq!(
             Value::Integer(12345).force_apply_type_affinity(TypeAffinity::Text),
             Value::Text(b"12345".as_slice().into())
         );
@@ -1285,10 +1193,6 @@ mod tests {
 
     #[test]
     fn test_force_apply_type_affinity_blob() {
-        assert_eq!(
-            Value::Null.force_apply_type_affinity(TypeAffinity::Blob),
-            Value::Null
-        );
         assert_eq!(
             Value::Integer(9223372036854775807).force_apply_type_affinity(TypeAffinity::Blob),
             Value::Blob(b"9223372036854775807".as_slice().into())

@@ -35,8 +35,8 @@ pub fn load_rowids(conn: &Connection, query: &str) -> Vec<i64> {
     while let Some(row) = rows.next_row().unwrap() {
         let columns = row.parse().unwrap();
         assert_eq!(columns.len(), 1);
-        assert!(matches!(columns.get(0), &Value::Integer(_)));
-        let Value::Integer(rowid) = columns.get(0) else {
+        assert!(matches!(columns.get(0), Some(&Value::Integer(_))));
+        let Some(Value::Integer(rowid)) = columns.get(0) else {
             unreachable!()
         };
         results.push(*rowid);
@@ -61,7 +61,7 @@ macro_rules! assert_same_result_prsqlite {
         let row = $rows.next_row().unwrap().unwrap();
         let columns = row.parse().unwrap();
         for (idx, e) in $result.iter().enumerate() {
-            assert_eq!(columns.get(idx), e, "idx: {}, {}", idx, $msg);
+            assert_eq!(&columns.get(idx), e, "idx: {}, {}", idx, $msg);
         }
         drop(row);
     };
@@ -69,7 +69,7 @@ macro_rules! assert_same_result_prsqlite {
 
 #[allow(dead_code)]
 pub fn assert_same_results(
-    expected: &[&[Value]],
+    expected: &[&[Option<&Value>]],
     query: &str,
     test_conn: &rusqlite::Connection,
     conn: &Connection,
@@ -80,13 +80,16 @@ pub fn assert_same_results(
         let row = rows.next().unwrap().unwrap();
         for (j, e) in e.iter().enumerate() {
             let v = match row.get::<_, rusqlite::types::Value>(j).unwrap() {
-                rusqlite::types::Value::Null => Value::Null,
+                rusqlite::types::Value::Null => {
+                    assert!(e.is_none(), "i: {}, j: {}, query: {}", i, j, query);
+                    continue;
+                }
                 rusqlite::types::Value::Integer(v) => Value::Integer(v),
                 rusqlite::types::Value::Real(v) => Value::Real(v),
                 rusqlite::types::Value::Text(v) => Value::Text(v.into_bytes().into()),
                 rusqlite::types::Value::Blob(v) => Value::Blob(v.into()),
             };
-            assert_eq!(&v, e, "i: {}, j: {}, query: {}", i, j, query);
+            assert_eq!(&Some(&v), e, "i: {}, j: {}, query: {}", i, j, query);
         }
     }
     assert!(rows.next().unwrap().is_none());

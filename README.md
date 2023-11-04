@@ -35,7 +35,6 @@ supports.
 use std::path::Path;
 
 use prsqlite::Connection;
-use prsqlite::NextRow;
 use prsqlite::Value;
 
 let conn = Connection::open(Path::new("path/to/sqlite.db")).unwrap();
@@ -48,7 +47,7 @@ let mut rows = stmt.query().unwrap();
 
 let row = rows.next_row().unwrap().unwrap();
 let columns = row.parse().unwrap();
-assert_eq!(columns.get(0), &Value::Integer(1));
+assert_eq!(columns.get(0), Some(&Value::Integer(1)));
 drop(row);
 
 assert!(rows.next_row().unwrap().is_none());

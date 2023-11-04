@@ -48,19 +48,19 @@ struct SchemaRecord<'a> {
 
 impl<'a> SchemaRecord<'a> {
     fn parse(columns: &'a Columns<'a>) -> anyhow::Result<Self> {
-        let Value::Text(type_) = columns.get(0) else {
+        let Some(Value::Text(type_)) = columns.get(0) else {
             bail!("invalid type: {:?}", columns.get(0));
         };
 
-        let Value::Text(name) = columns.get(1) else {
+        let Some(Value::Text(name)) = columns.get(1) else {
             bail!("invalid name: {:?}", columns.get(1));
         };
 
-        let Value::Text(table_name) = columns.get(2) else {
+        let Some(Value::Text(table_name)) = columns.get(2) else {
             bail!("invalid tbl_name: {:?}", columns.get(2));
         };
 
-        let Value::Integer(root_page_id) = columns.get(3) else {
+        let Some(Value::Integer(root_page_id)) = columns.get(3) else {
             bail!("invalid root_page_id: {:?}", columns.get(3));
         };
         let root_page_id = PageId::new(
@@ -71,8 +71,8 @@ impl<'a> SchemaRecord<'a> {
         .ok_or_else(|| anyhow::anyhow!("root_page_id is zero"))?;
 
         let sql: Option<&[u8]> = match columns.get(4) {
-            Value::Null => None,
-            Value::Text(sql) => Some(sql),
+            None => None,
+            Some(Value::Text(sql)) => Some(sql),
             _ => bail!("invalid sql: {:?}", columns.get(4)),
         };
         Ok(Self {

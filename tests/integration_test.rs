@@ -41,19 +41,22 @@ fn test_select_all_from_table() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 3);
-    assert_eq!(columns.get(0), &Value::Null);
-    assert_eq!(columns.get(1), &Value::Integer(1));
-    assert_eq!(columns.get(2), &Value::Integer(0));
-    assert_eq!(columns.get(3), &Value::Null);
+    assert_eq!(columns.get(0), None);
+    assert_eq!(columns.get(1), Some(&Value::Integer(1)));
+    assert_eq!(columns.get(2), Some(&Value::Integer(0)));
+    assert_eq!(columns.get(3), None);
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 3);
-    assert_eq!(columns.get(0), &Value::Integer(10000));
-    assert_eq!(columns.get(1), &Value::Null);
-    assert_eq!(columns.get(2), &Value::Text(b"hello".as_slice().into()));
-    assert_eq!(columns.get(3), &Value::Null);
+    assert_eq!(columns.get(0), Some(&Value::Integer(10000)));
+    assert_eq!(columns.get(1), None);
+    assert_eq!(
+        columns.get(2),
+        Some(&Value::Text(b"hello".as_slice().into()))
+    );
+    assert_eq!(columns.get(3), None);
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
@@ -61,11 +64,11 @@ fn test_select_all_from_table() {
     assert_eq!(columns.len(), 3);
     assert_eq!(
         columns.get(0),
-        &Value::Blob([0xFF; 10000].as_slice().into())
+        Some(&Value::Blob([0xFF; 10000].as_slice().into()))
     );
-    assert_eq!(columns.get(1), &Value::Integer(20000));
-    assert_eq!(columns.get(2), &Value::Null);
-    assert_eq!(columns.get(3), &Value::Null);
+    assert_eq!(columns.get(1), Some(&Value::Integer(20000)));
+    assert_eq!(columns.get(2), None);
+    assert_eq!(columns.get(3), None);
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -82,12 +85,12 @@ fn test_select_reuse_statement() {
     let stmt = conn.prepare("SELECT * FROM example;").unwrap();
 
     let mut rows = stmt.query().unwrap();
-    assert_same_result_prsqlite!(rows, [Value::Integer(1)], "");
-    assert_same_result_prsqlite!(rows, [Value::Integer(2)], "");
+    assert_same_result_prsqlite!(rows, [Some(&Value::Integer(1))], "");
+    assert_same_result_prsqlite!(rows, [Some(&Value::Integer(2))], "");
     assert!(rows.next_row().unwrap().is_none());
 
     let mut rows = stmt.query().unwrap();
-    assert_same_result_prsqlite!(rows, [Value::Integer(1)], "");
+    assert_same_result_prsqlite!(rows, [Some(&Value::Integer(1))], "");
 }
 
 #[test]
@@ -107,12 +110,12 @@ fn test_select_multiple_statements() {
     let mut rows2 = stmt1.query().unwrap();
     let mut rows3 = stmt2.query().unwrap();
     let mut rows4 = stmt2.query().unwrap();
-    assert_same_result_prsqlite!(rows1, [Value::Integer(1)], "");
-    assert_same_result_prsqlite!(rows2, [Value::Integer(1)], "");
-    assert_same_result_prsqlite!(rows3, [Value::Integer(2)], "");
-    assert_same_result_prsqlite!(rows4, [Value::Integer(2)], "");
-    assert_same_result_prsqlite!(rows1, [Value::Integer(2)], "");
-    assert_same_result_prsqlite!(rows2, [Value::Integer(2)], "");
+    assert_same_result_prsqlite!(rows1, [Some(&Value::Integer(1))], "");
+    assert_same_result_prsqlite!(rows2, [Some(&Value::Integer(1))], "");
+    assert_same_result_prsqlite!(rows3, [Some(&Value::Integer(2))], "");
+    assert_same_result_prsqlite!(rows4, [Some(&Value::Integer(2))], "");
+    assert_same_result_prsqlite!(rows1, [Some(&Value::Integer(2))], "");
+    assert_same_result_prsqlite!(rows2, [Some(&Value::Integer(2))], "");
     assert!(rows1.next_row().unwrap().is_none());
     assert!(rows2.next_row().unwrap().is_none());
     assert!(rows3.next_row().unwrap().is_none());
@@ -135,22 +138,22 @@ fn test_select_partial() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(3));
-    assert_eq!(columns.get(1), &Value::Integer(1));
+    assert_eq!(columns.get(0), Some(&Value::Integer(3)));
+    assert_eq!(columns.get(1), Some(&Value::Integer(1)));
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(6));
-    assert_eq!(columns.get(1), &Value::Integer(4));
+    assert_eq!(columns.get(0), Some(&Value::Integer(6)));
+    assert_eq!(columns.get(1), Some(&Value::Integer(4)));
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(9));
-    assert_eq!(columns.get(1), &Value::Integer(7));
+    assert_eq!(columns.get(0), Some(&Value::Integer(9)));
+    assert_eq!(columns.get(1), Some(&Value::Integer(7)));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -174,15 +177,15 @@ fn test_select_rowid() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(10));
-    assert_eq!(columns.get(1), &Value::Integer(1));
+    assert_eq!(columns.get(0), Some(&Value::Integer(10)));
+    assert_eq!(columns.get(1), Some(&Value::Integer(1)));
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(20));
-    assert_eq!(columns.get(1), &Value::Integer(2));
+    assert_eq!(columns.get(0), Some(&Value::Integer(20)));
+    assert_eq!(columns.get(1), Some(&Value::Integer(2)));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -194,15 +197,15 @@ fn test_select_rowid() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(10));
-    assert_eq!(columns.get(1), &Value::Null);
+    assert_eq!(columns.get(0), Some(&Value::Integer(10)));
+    assert_eq!(columns.get(1), None);
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(20));
-    assert_eq!(columns.get(1), &Value::Integer(100));
+    assert_eq!(columns.get(0), Some(&Value::Integer(20)));
+    assert_eq!(columns.get(1), Some(&Value::Integer(100)));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -226,34 +229,34 @@ fn test_select_column_name_and_all() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 6);
-    assert_eq!(columns.get(0), &Value::Integer(3));
-    assert_eq!(columns.get(1), &Value::Integer(3));
-    assert_eq!(columns.get(2), &Value::Integer(1));
-    assert_eq!(columns.get(3), &Value::Integer(2));
-    assert_eq!(columns.get(4), &Value::Integer(3));
-    assert_eq!(columns.get(5), &Value::Integer(1));
+    assert_eq!(columns.get(0), Some(&Value::Integer(3)));
+    assert_eq!(columns.get(1), Some(&Value::Integer(3)));
+    assert_eq!(columns.get(2), Some(&Value::Integer(1)));
+    assert_eq!(columns.get(3), Some(&Value::Integer(2)));
+    assert_eq!(columns.get(4), Some(&Value::Integer(3)));
+    assert_eq!(columns.get(5), Some(&Value::Integer(1)));
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 6);
-    assert_eq!(columns.get(0), &Value::Integer(6));
-    assert_eq!(columns.get(1), &Value::Integer(6));
-    assert_eq!(columns.get(2), &Value::Integer(4));
-    assert_eq!(columns.get(3), &Value::Integer(5));
-    assert_eq!(columns.get(4), &Value::Integer(6));
-    assert_eq!(columns.get(5), &Value::Integer(4));
+    assert_eq!(columns.get(0), Some(&Value::Integer(6)));
+    assert_eq!(columns.get(1), Some(&Value::Integer(6)));
+    assert_eq!(columns.get(2), Some(&Value::Integer(4)));
+    assert_eq!(columns.get(3), Some(&Value::Integer(5)));
+    assert_eq!(columns.get(4), Some(&Value::Integer(6)));
+    assert_eq!(columns.get(5), Some(&Value::Integer(4)));
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 6);
-    assert_eq!(columns.get(0), &Value::Integer(9));
-    assert_eq!(columns.get(1), &Value::Integer(9));
-    assert_eq!(columns.get(2), &Value::Integer(7));
-    assert_eq!(columns.get(3), &Value::Integer(8));
-    assert_eq!(columns.get(4), &Value::Integer(9));
-    assert_eq!(columns.get(5), &Value::Integer(7));
+    assert_eq!(columns.get(0), Some(&Value::Integer(9)));
+    assert_eq!(columns.get(1), Some(&Value::Integer(9)));
+    assert_eq!(columns.get(2), Some(&Value::Integer(7)));
+    assert_eq!(columns.get(3), Some(&Value::Integer(8)));
+    assert_eq!(columns.get(4), Some(&Value::Integer(9)));
+    assert_eq!(columns.get(5), Some(&Value::Integer(7)));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -268,6 +271,9 @@ fn test_select_expression() {
 
     let test_conn = rusqlite::Connection::open(file.path()).unwrap();
     let conn = Connection::open(file.path()).unwrap();
+
+    assert_same_results(&[&[None]], "SELECT NULL FROM example;", &test_conn, &conn);
+    assert_same_results(&[&[None]], "SELECT ~NULL FROM example;", &test_conn, &conn);
 
     for (expected, expr) in [
         // Literals
@@ -298,7 +304,6 @@ fn test_select_expression() {
         (Value::Integer(-124), "~'123'"),
         (Value::Integer(-1), "~'abc'"),
         (Value::Integer(-124), "~x'313233'"),
-        (Value::Null, "~NULL"),
         // Comparison operators
         (Value::Integer(1), "10 > col1"),
         (Value::Integer(0), "10 < col1"),
@@ -381,7 +386,7 @@ fn test_select_expression() {
         ),
     ] {
         let query = format!("SELECT {} FROM example;", expr);
-        assert_same_results(&[&[expected]], &query, &test_conn, &conn);
+        assert_same_results(&[&[Some(&expected)]], &query, &test_conn, &conn);
     }
 }
 
@@ -402,7 +407,7 @@ fn test_select_expression_operators() {
         (Value::Integer(0), "1 = 2 <= 1"),
     ] {
         let query = format!("SELECT {} FROM example;", expr);
-        assert_same_results(&[&[expected]], &query, &test_conn, &conn);
+        assert_same_results(&[&[Some(&expected)]], &query, &test_conn, &conn);
     }
 }
 
@@ -423,22 +428,22 @@ fn test_select_primary_key() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(1));
-    assert_eq!(columns.get(1), &Value::Text(b"10".as_slice().into()));
+    assert_eq!(columns.get(0), Some(&Value::Integer(1)));
+    assert_eq!(columns.get(1), Some(&Value::Text(b"10".as_slice().into())));
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(3));
-    assert_eq!(columns.get(1), &Value::Text(b"30".as_slice().into()));
+    assert_eq!(columns.get(0), Some(&Value::Integer(3)));
+    assert_eq!(columns.get(1), Some(&Value::Text(b"30".as_slice().into())));
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(5));
-    assert_eq!(columns.get(1), &Value::Text(b"20".as_slice().into()));
+    assert_eq!(columns.get(0), Some(&Value::Integer(5)));
+    assert_eq!(columns.get(1), Some(&Value::Text(b"20".as_slice().into())));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -522,7 +527,7 @@ fn test_select_type_conversions_prior_to_comparison() {
         let columns = columns
             .iter()
             .map(|v| {
-                let Value::Integer(i) = *v else {
+                let Some(Value::Integer(i)) = *v else {
                     unreachable!()
                 };
                 i
@@ -681,9 +686,9 @@ fn test_select_filter() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 3);
-    assert_eq!(columns.get(0), &Value::Integer(4));
-    assert_eq!(columns.get(1), &Value::Integer(5));
-    assert_eq!(columns.get(2), &Value::Integer(6));
+    assert_eq!(columns.get(0), Some(&Value::Integer(4)));
+    assert_eq!(columns.get(1), Some(&Value::Integer(5)));
+    assert_eq!(columns.get(2), Some(&Value::Integer(6)));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -696,13 +701,13 @@ fn test_select_filter() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 1);
-    assert_eq!(columns.get(0), &Value::Integer(5));
+    assert_eq!(columns.get(0), Some(&Value::Integer(5)));
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 1);
-    assert_eq!(columns.get(0), &Value::Integer(8));
+    assert_eq!(columns.get(0), Some(&Value::Integer(8)));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -715,13 +720,13 @@ fn test_select_filter() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 1);
-    assert_eq!(columns.get(0), &Value::Integer(2));
+    assert_eq!(columns.get(0), Some(&Value::Integer(2)));
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 1);
-    assert_eq!(columns.get(0), &Value::Integer(8));
+    assert_eq!(columns.get(0), Some(&Value::Integer(8)));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -746,15 +751,21 @@ fn test_select_filter_eq() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(1));
-    assert_eq!(columns.get(1), &Value::Text(b"hello".as_slice().into()));
+    assert_eq!(columns.get(0), Some(&Value::Integer(1)));
+    assert_eq!(
+        columns.get(1),
+        Some(&Value::Text(b"hello".as_slice().into()))
+    );
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(3));
-    assert_eq!(columns.get(1), &Value::Text(b"hello".as_slice().into()));
+    assert_eq!(columns.get(0), Some(&Value::Integer(3)));
+    assert_eq!(
+        columns.get(1),
+        Some(&Value::Text(b"hello".as_slice().into()))
+    );
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -767,15 +778,15 @@ fn test_select_filter_eq() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(1));
-    assert_eq!(columns.get(1), &Value::Real(2.0));
+    assert_eq!(columns.get(0), Some(&Value::Integer(1)));
+    assert_eq!(columns.get(1), Some(&Value::Real(2.0)));
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(2));
-    assert_eq!(columns.get(1), &Value::Real(2.0));
+    assert_eq!(columns.get(0), Some(&Value::Integer(2)));
+    assert_eq!(columns.get(1), Some(&Value::Real(2.0)));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -788,15 +799,15 @@ fn test_select_filter_eq() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(2));
-    assert_eq!(columns.get(1), &Value::Integer(9));
+    assert_eq!(columns.get(0), Some(&Value::Integer(2)));
+    assert_eq!(columns.get(1), Some(&Value::Integer(9)));
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(3));
-    assert_eq!(columns.get(1), &Value::Integer(9));
+    assert_eq!(columns.get(0), Some(&Value::Integer(3)));
+    assert_eq!(columns.get(1), Some(&Value::Integer(9)));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -809,10 +820,10 @@ fn test_select_filter_eq() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(2));
+    assert_eq!(columns.get(0), Some(&Value::Integer(2)));
     assert_eq!(
         columns.get(1),
-        &Value::Blob([0x23, 0x45, 0xab].as_slice().into())
+        Some(&Value::Blob([0x23, 0x45, 0xab].as_slice().into()))
     );
     drop(row);
 
@@ -838,8 +849,11 @@ fn test_select_filter_ne() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(2));
-    assert_eq!(columns.get(1), &Value::Text(b"world".as_slice().into()));
+    assert_eq!(columns.get(0), Some(&Value::Integer(2)));
+    assert_eq!(
+        columns.get(1),
+        Some(&Value::Text(b"world".as_slice().into()))
+    );
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -852,8 +866,8 @@ fn test_select_filter_ne() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(3));
-    assert_eq!(columns.get(1), &Value::Real(5.0));
+    assert_eq!(columns.get(0), Some(&Value::Integer(3)));
+    assert_eq!(columns.get(1), Some(&Value::Real(5.0)));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -866,8 +880,8 @@ fn test_select_filter_ne() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(1));
-    assert_eq!(columns.get(1), &Value::Integer(3));
+    assert_eq!(columns.get(0), Some(&Value::Integer(1)));
+    assert_eq!(columns.get(1), Some(&Value::Integer(3)));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -880,10 +894,10 @@ fn test_select_filter_ne() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(2));
+    assert_eq!(columns.get(0), Some(&Value::Integer(2)));
     assert_eq!(
         columns.get(1),
-        &Value::Blob([0x23, 0x45, 0xab].as_slice().into())
+        Some(&Value::Blob([0x23, 0x45, 0xab].as_slice().into()))
     );
     drop(row);
 
@@ -979,8 +993,8 @@ fn test_select_filter_with_rowid() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Integer(20));
-    assert_eq!(columns.get(1), &Value::Integer(2));
+    assert_eq!(columns.get(0), Some(&Value::Integer(20)));
+    assert_eq!(columns.get(1), Some(&Value::Integer(2)));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -1006,8 +1020,8 @@ fn test_select_filter_with_primary_key() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 2);
-    assert_eq!(columns.get(0), &Value::Text(b"20".as_slice().into()));
-    assert_eq!(columns.get(1), &Value::Integer(3));
+    assert_eq!(columns.get(0), Some(&Value::Text(b"20".as_slice().into())));
+    assert_eq!(columns.get(1), Some(&Value::Integer(3)));
     drop(row);
     assert!(rows.next_row().unwrap().is_none());
 
@@ -1040,17 +1054,17 @@ fn test_select_with_index() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 3);
-    assert_eq!(columns.get(0), &Value::Integer(10));
-    assert_eq!(columns.get(1), &Value::Integer(5));
-    assert_eq!(columns.get(2), &Value::Integer(2));
+    assert_eq!(columns.get(0), Some(&Value::Integer(10)));
+    assert_eq!(columns.get(1), Some(&Value::Integer(5)));
+    assert_eq!(columns.get(2), Some(&Value::Integer(2)));
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 3);
-    assert_eq!(columns.get(0), &Value::Integer(4));
-    assert_eq!(columns.get(1), &Value::Integer(5));
-    assert_eq!(columns.get(2), &Value::Integer(6));
+    assert_eq!(columns.get(0), Some(&Value::Integer(4)));
+    assert_eq!(columns.get(1), Some(&Value::Integer(5)));
+    assert_eq!(columns.get(2), Some(&Value::Integer(6)));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -1063,9 +1077,9 @@ fn test_select_with_index() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 3);
-    assert_eq!(columns.get(0), &Value::Integer(4));
-    assert_eq!(columns.get(1), &Value::Integer(5));
-    assert_eq!(columns.get(2), &Value::Integer(6));
+    assert_eq!(columns.get(0), Some(&Value::Integer(4)));
+    assert_eq!(columns.get(1), Some(&Value::Integer(5)));
+    assert_eq!(columns.get(2), Some(&Value::Integer(6)));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());
@@ -1078,17 +1092,17 @@ fn test_select_with_index() {
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 3);
-    assert_eq!(columns.get(0), &Value::Integer(1));
-    assert_eq!(columns.get(1), &Value::Integer(2));
-    assert_eq!(columns.get(2), &Value::Integer(3));
+    assert_eq!(columns.get(0), Some(&Value::Integer(1)));
+    assert_eq!(columns.get(1), Some(&Value::Integer(2)));
+    assert_eq!(columns.get(2), Some(&Value::Integer(3)));
     drop(row);
 
     let row = rows.next_row().unwrap().unwrap();
     let columns = row.parse().unwrap();
     assert_eq!(columns.len(), 3);
-    assert_eq!(columns.get(0), &Value::Integer(3));
-    assert_eq!(columns.get(1), &Value::Integer(3));
-    assert_eq!(columns.get(2), &Value::Integer(3));
+    assert_eq!(columns.get(0), Some(&Value::Integer(3)));
+    assert_eq!(columns.get(1), Some(&Value::Integer(3)));
+    assert_eq!(columns.get(2), Some(&Value::Integer(3)));
     drop(row);
 
     assert!(rows.next_row().unwrap().is_none());

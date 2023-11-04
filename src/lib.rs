@@ -419,9 +419,7 @@ enum ConstantValue {
 
 impl ConstantValue {
     fn copy_from(value: Value) -> Self {
-        assert!(value != Value::Null);
         match value {
-            Value::Null => unreachable!("null value"),
             Value::Integer(i) => Self::Integer(i),
             Value::Real(f) => Self::Real(f),
             Value::Text(buf) => Self::Text(buf.into_vec()),
@@ -479,7 +477,7 @@ enum Expression {
 }
 
 type ExecutionResult<'a> = (
-    Value<'a>,
+    Option<Value<'a>>,
     Option<TypeAffinity>,
     Option<(&'a Collation, CollateOrigin)>,
 );
@@ -552,19 +550,12 @@ impl Expression {
             Self::UnaryOperator { operator, expr } => {
                 let (value, _, collation) = expr.execute(row)?;
                 let value = match operator {
-                    UnaryOp::BitNot => {
-                        if let Some(i) = value.as_integer() {
-                            Value::Integer(!i)
-                        } else {
-                            Value::Null
-                        }
-                    }
-                    UnaryOp::Minus => match value {
-                        Value::Null => Value::Null,
+                    UnaryOp::BitNot => value.map(|v| Value::Integer(!v.as_integer())),
+                    UnaryOp::Minus => value.map(|v| match v {
                         Value::Integer(i) => Value::Integer(-i),
                         Value::Real(d) => Value::Real(-d),
                         Value::Text(_) | Value::Blob(_) => Value::Integer(0),
-                    },
+                    }),
                 };
                 Ok((value, None, filter_expression_collation(collation)))
             }
@@ -582,15 +573,14 @@ impl Expression {
                 left,
                 right,
             } => {
-                let (mut left_value, left_affinity, left_collation) = left.execute(row)?;
-                let (mut right_value, right_affinity, right_collation) = right.execute(row)?;
+                let (left_value, left_affinity, left_collation) = left.execute(row)?;
+                let (right_value, right_affinity, right_collation) = right.execute(row)?;
 
                 // TODO: Confirm whether collation is preserved after NULL.
-                match (&left_value, &right_value) {
-                    (Value::Null, _) => return Ok((Value::Null, None, None)),
-                    (_, Value::Null) => return Ok((Value::Null, None, None)),
-                    _ => {}
-                }
+                let (mut left_value, mut right_value) = match (left_value, right_value) {
+                    (None, _) | (_, None) => return Ok((None, None, None)),
+                    (Some(left_value), Some(right_value)) => (left_value, right_value),
+                };
 
                 let collation = match (left_collation, right_collation) {
                     (None, _) => right_collation,
@@ -645,9 +635,9 @@ impl Expression {
                             CompareOp::Ge => cmp != Ordering::Less,
                         };
                         if result {
-                            Ok((Value::Integer(1), None, next_collation))
+                            Ok((Some(Value::Integer(1)), None, next_collation))
                         } else {
-                            Ok((Value::Integer(0), None, next_collation))
+                            Ok((Some(Value::Integer(0)), None, next_collation))
                         }
                     }
                     BinaryOp::Concat => {
@@ -664,7 +654,11 @@ impl Expression {
                             }
                         };
                         buffer.extend(right.iter());
-                        Ok((Value::Text(Buffer::Owned(buffer)), None, next_collation))
+                        Ok((
+                            Some(Value::Text(Buffer::Owned(buffer))),
+                            None,
+                            next_collation,
+                        ))
                     }
                 }
             }
@@ -674,13 +668,13 @@ impl Expression {
             } => {
                 let (value, _affinity, collation) = expr.execute(row)?;
                 Ok((
-                    value.force_apply_type_affinity(*type_affinity),
+                    value.map(|v| v.force_apply_type_affinity(*type_affinity)),
                     Some(*type_affinity),
                     collation,
                 ))
             }
-            Self::Null => Ok((Value::Null, None, None)),
-            Self::Const(value) => Ok((value.as_value(), None, None)),
+            Self::Null => Ok((None, None, None)),
+            Self::Const(value) => Ok((Some(value.as_value()), None, None)),
         }
     }
 }
@@ -792,11 +786,9 @@ impl<'conn> SelectStatement<'conn> {
                 .map(|(v, c)| (v.as_value(), c))
                 .collect::<Vec<_>>();
             let mut keys = Vec::with_capacity(index.keys.len() + index.n_extra + 1);
-            keys.extend(tmp_keys.iter().map(|(v, c)| ValueCmp::new(v, c)));
+            keys.extend(tmp_keys.iter().map(|(v, c)| Some(ValueCmp::new(v, c))));
             // +1 for rowid
-            keys.extend(
-                (0..index.n_extra + 1).map(|_| ValueCmp::new(&Value::Null, &DEFAULT_COLLATION)),
-            );
+            keys.extend((0..index.n_extra + 1).map(|_| None));
             index_cursor.index_move_to(&keys)?;
             Some(index_cursor)
         } else {
@@ -881,7 +873,7 @@ impl<'conn> Rows<'conn> {
                 };
                 let skip = matches!(
                     filter.execute(Some(&data))?.0,
-                    Value::Null | Value::Integer(0)
+                    None | Some(Value::Integer(0))
                 );
                 RowData {
                     rowid: _,
@@ -940,13 +932,15 @@ impl<'conn> Rows<'conn> {
                 bail!("index payload is too short");
             }
             for (i, (key, collation)) in keys.iter().enumerate() {
-                if ValueCmp::new(&key.as_value(), collation).compare(&record.get(i)?)
-                    != Ordering::Equal
-                {
-                    return Ok(false);
+                if let Some(value) = record.get(i)? {
+                    if ValueCmp::new(&key.as_value(), collation).compare(&value) == Ordering::Equal
+                    {
+                        continue;
+                    }
                 }
+                return Ok(false);
             }
-            let Value::Integer(rowid) = record.get(record.len() - 1)? else {
+            let Some(Value::Integer(rowid)) = record.get(record.len() - 1)? else {
                 bail!("rowid in index is not integer");
             };
             self.cursor.table_move_to(rowid)?;
@@ -954,8 +948,6 @@ impl<'conn> Rows<'conn> {
         Ok(true)
     }
 }
-
-const STATIC_NULL_VALUE: Value = Value::Null;
 
 struct RowData<'a> {
     rowid: i64,
@@ -967,7 +959,7 @@ struct RowData<'a> {
 }
 
 impl<'a> RowData<'a> {
-    fn get_column_value(&self, column_idx: &ColumnNumber) -> anyhow::Result<Value> {
+    fn get_column_value(&self, column_idx: &ColumnNumber) -> anyhow::Result<Option<Value>> {
         match column_idx {
             ColumnNumber::Column(idx) => {
                 if let Some((serial_type, offset)) = self.headers.get(*idx) {
@@ -980,10 +972,10 @@ impl<'a> RowData<'a> {
                         .parse(&contents_buffer[offset - self.content_offset..])
                         .context("parse value")
                 } else {
-                    Ok(STATIC_NULL_VALUE)
+                    Ok(None)
                 }
             }
-            ColumnNumber::RowId => Ok(Value::Integer(self.rowid)),
+            ColumnNumber::RowId => Ok(Some(Value::Integer(self.rowid))),
         }
     }
 }
@@ -1004,11 +996,15 @@ impl<'a> Row<'a> {
     }
 }
 
-pub struct Columns<'a>(Vec<Value<'a>>);
+pub struct Columns<'a>(Vec<Option<Value<'a>>>);
 
 impl<'a> Columns<'a> {
-    pub fn get(&self, i: usize) -> &Value<'a> {
-        self.0.get(i).unwrap_or(&STATIC_NULL_VALUE)
+    pub fn get(&self, i: usize) -> Option<&Value<'a>> {
+        if let Some(Some(v)) = self.0.get(i) {
+            Some(v)
+        } else {
+            None
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -1019,7 +1015,7 @@ impl<'a> Columns<'a> {
         self.0.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &Value<'a>> {
+    pub fn iter(&self) -> impl Iterator<Item = &Option<Value<'a>>> {
         self.0.iter()
     }
 }
@@ -1046,14 +1042,14 @@ impl<'conn> InsertStatement<'conn> {
             let mut rowid = None;
             if let Some(rowid_expr) = &record.rowid {
                 let (rowid_value, _, _) = rowid_expr.execute(None)?;
-                match rowid_value.apply_numeric_affinity() {
-                    Value::Null => {
-                        // NULL then fallback to generate new rowid.
+                // NULL then fallback to generate new rowid.
+                if let Some(rowid_value) = rowid_value {
+                    match rowid_value.apply_numeric_affinity() {
+                        Value::Integer(rowid_value) => {
+                            rowid = Some(rowid_value);
+                        }
+                        _ => return Err(Error::DataTypeMismatch),
                     }
-                    Value::Integer(rowid_value) => {
-                        rowid = Some(rowid_value);
-                    }
-                    _ => return Err(Error::DataTypeMismatch),
                 }
             }
             let rowid = if let Some(rowid) = rowid {
@@ -1078,7 +1074,7 @@ impl<'conn> InsertStatement<'conn> {
             let mut columns = Vec::with_capacity(record.columns.len());
             for (expr, type_affinity) in record.columns.iter() {
                 let (value, _, _) = expr.execute(None)?;
-                let value = value.apply_affinity(*type_affinity);
+                let value = value.map(|v| v.apply_affinity(*type_affinity));
                 columns.push(value);
             }
 

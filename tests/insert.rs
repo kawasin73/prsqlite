@@ -51,30 +51,30 @@ fn test_insert() {
     assert_same_results(
         &[
             &[
-                Value::Integer(1),
-                Value::Integer(0),
-                Value::Integer(1),
-                Value::Integer(2),
+                Some(&Value::Integer(1)),
+                Some(&Value::Integer(0)),
+                Some(&Value::Integer(1)),
+                Some(&Value::Integer(2)),
             ],
             &[
-                Value::Integer(2),
-                Value::Real(1234.5),
-                Value::Text(b"hello".as_slice().into()),
-                Value::Blob([0x31, 0x32, 0x33].as_slice().into()),
+                Some(&Value::Integer(2)),
+                Some(&Value::Real(1234.5)),
+                Some(&Value::Text(b"hello".as_slice().into())),
+                Some(&Value::Blob([0x31, 0x32, 0x33].as_slice().into())),
             ],
             &[
-                Value::Integer(3),
-                Value::Integer(3),
-                Value::Integer(4),
-                Value::Integer(5),
+                Some(&Value::Integer(3)),
+                Some(&Value::Integer(3)),
+                Some(&Value::Integer(4)),
+                Some(&Value::Integer(5)),
             ],
             &[
-                Value::Integer(4),
-                Value::Integer(10),
-                Value::Text(long_text.as_bytes().into()),
-                Value::Null,
+                Some(&Value::Integer(4)),
+                Some(&Value::Integer(10)),
+                Some(&Value::Text(long_text.as_bytes().into())),
+                None,
             ],
-            &[Value::Integer(5), Value::Null, Value::Null, Value::Null],
+            &[Some(&Value::Integer(5)), None, None, None],
         ],
         "SELECT rowid, * FROM example;",
         &test_conn,
@@ -100,7 +100,7 @@ fn test_insert_per_pagesize() {
 
         let test_conn = rusqlite::Connection::open(file.path()).unwrap();
         assert_same_results(
-            &[&[Value::Integer(123)]],
+            &[&[Some(&Value::Integer(123))]],
             "SELECT col FROM example;",
             &test_conn,
             &conn,
@@ -138,14 +138,14 @@ fn test_insert_with_rowid() {
     let test_conn = rusqlite::Connection::open(file.path()).unwrap();
     assert_same_results(
         &[
-            &[Value::Integer(-11), Value::Integer(1)],
-            &[Value::Integer(-10), Value::Integer(2)],
-            &[Value::Integer(0), Value::Integer(3)],
-            &[Value::Integer(2), Value::Integer(4)],
-            &[Value::Integer(10), Value::Integer(5)],
-            &[Value::Integer(11), Value::Integer(6)],
-            &[Value::Integer(12), Value::Integer(7)],
-            &[Value::Integer(13), Value::Integer(8)],
+            &[Some(&Value::Integer(-11)), Some(&Value::Integer(1))],
+            &[Some(&Value::Integer(-10)), Some(&Value::Integer(2))],
+            &[Some(&Value::Integer(0)), Some(&Value::Integer(3))],
+            &[Some(&Value::Integer(2)), Some(&Value::Integer(4))],
+            &[Some(&Value::Integer(10)), Some(&Value::Integer(5))],
+            &[Some(&Value::Integer(11)), Some(&Value::Integer(6))],
+            &[Some(&Value::Integer(12)), Some(&Value::Integer(7))],
+            &[Some(&Value::Integer(13)), Some(&Value::Integer(8))],
         ],
         "SELECT rowid, * FROM example;",
         &test_conn,
@@ -175,11 +175,11 @@ fn test_insert_into_existing_table() {
     let test_conn = rusqlite::Connection::open(file.path()).unwrap();
     assert_same_results(
         &[
-            &[Value::Integer(1), Value::Integer(1)],
-            &[Value::Integer(2), Value::Integer(3)],
-            &[Value::Integer(8), Value::Integer(4)],
-            &[Value::Integer(10), Value::Integer(2)],
-            &[Value::Integer(11), Value::Integer(5)],
+            &[Some(&Value::Integer(1)), Some(&Value::Integer(1))],
+            &[Some(&Value::Integer(2)), Some(&Value::Integer(3))],
+            &[Some(&Value::Integer(8)), Some(&Value::Integer(4))],
+            &[Some(&Value::Integer(10)), Some(&Value::Integer(2))],
+            &[Some(&Value::Integer(11)), Some(&Value::Integer(5))],
         ],
         "SELECT rowid, * FROM example;",
         &test_conn,
@@ -229,8 +229,8 @@ fn test_insert_rowid_conflict() {
     let test_conn = rusqlite::Connection::open(file.path()).unwrap();
     assert_same_results(
         &[
-            &[Value::Integer(1), Value::Integer(123)],
-            &[Value::Integer(2), Value::Integer(890)],
+            &[Some(&Value::Integer(1)), Some(&Value::Integer(123))],
+            &[Some(&Value::Integer(2)), Some(&Value::Integer(890))],
         ],
         "SELECT rowid, * FROM example;",
         &test_conn,
@@ -258,25 +258,25 @@ fn test_insert_multiple_statements() {
     assert_eq!(stmt_i1.execute().unwrap(), 1);
 
     let mut rows = stmt_s1.query().unwrap();
-    assert_same_result_prsqlite!(rows, [Value::Integer(123)], "");
+    assert_same_result_prsqlite!(rows, [Some(&Value::Integer(123))], "");
     assert!(rows.next_row().unwrap().is_none());
     drop(rows);
     let mut rows = stmt_s2.query().unwrap();
-    assert_same_result_prsqlite!(rows, [Value::Integer(123)], "");
+    assert_same_result_prsqlite!(rows, [Some(&Value::Integer(123))], "");
     assert!(rows.next_row().unwrap().is_none());
     drop(rows);
 
     assert_eq!(stmt_i2.execute().unwrap(), 1);
 
     let mut rows = stmt_s1.query().unwrap();
-    assert_same_result_prsqlite!(rows, [Value::Integer(123)], "");
-    assert_same_result_prsqlite!(rows, [Value::Integer(456)], "");
+    assert_same_result_prsqlite!(rows, [Some(&Value::Integer(123))], "");
+    assert_same_result_prsqlite!(rows, [Some(&Value::Integer(456))], "");
     assert!(rows.next_row().unwrap().is_none());
     let mut rows = stmt_s2.query().unwrap();
     // INSERT fails while SELECT is running.
     assert!(stmt_i3.execute().is_err());
-    assert_same_result_prsqlite!(rows, [Value::Integer(123)], "");
-    assert_same_result_prsqlite!(rows, [Value::Integer(456)], "");
+    assert_same_result_prsqlite!(rows, [Some(&Value::Integer(123))], "");
+    assert_same_result_prsqlite!(rows, [Some(&Value::Integer(456))], "");
     assert!(rows.next_row().unwrap().is_none());
 }
 
@@ -303,14 +303,14 @@ fn test_insert_reuse_statement() {
     let test_conn = rusqlite::Connection::open(file.path()).unwrap();
     assert_same_results(
         &[
-            &[Value::Integer(123)],
-            &[Value::Integer(123)],
-            &[Value::Integer(123)],
-            &[Value::Integer(456)],
-            &[Value::Integer(789)],
-            &[Value::Integer(456)],
-            &[Value::Integer(789)],
-            &[Value::Integer(123)],
+            &[Some(&Value::Integer(123))],
+            &[Some(&Value::Integer(123))],
+            &[Some(&Value::Integer(123))],
+            &[Some(&Value::Integer(456))],
+            &[Some(&Value::Integer(789))],
+            &[Some(&Value::Integer(456))],
+            &[Some(&Value::Integer(789))],
+            &[Some(&Value::Integer(123))],
         ],
         "SELECT * FROM example;",
         &test_conn,
@@ -337,7 +337,7 @@ fn test_insert_overflow() {
 
     let test_conn = rusqlite::Connection::open(file.path()).unwrap();
     assert_same_results(
-        &[&[Value::Text(long_text.as_bytes().into())]],
+        &[&[Some(&Value::Text(long_text.as_bytes().into()))]],
         "SELECT * FROM example;",
         &test_conn,
         &conn,
@@ -380,34 +380,36 @@ fn test_insert_freeblock() {
     let test_conn = rusqlite::Connection::open(file.path()).unwrap();
     assert_same_results(
         &[
-            &[Value::Blob([0x02, 0x02].as_slice().into())],
-            &[Value::Blob([0x04, 0x04, 0x04, 0x04].as_slice().into())],
-            &[Value::Blob(
+            &[Some(&Value::Blob([0x02, 0x02].as_slice().into()))],
+            &[Some(&Value::Blob(
+                [0x04, 0x04, 0x04, 0x04].as_slice().into(),
+            ))],
+            &[Some(&Value::Blob(
                 [0x06, 0x06, 0x06, 0x06, 0x06, 0x06].as_slice().into(),
-            )],
-            &[Value::Blob(
+            ))],
+            &[Some(&Value::Blob(
                 [0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08]
                     .as_slice()
                     .into(),
-            )],
-            &[Value::Blob(
+            ))],
+            &[Some(&Value::Blob(
                 [0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a]
                     .as_slice()
                     .into(),
-            )],
-            &[Value::Blob(
+            ))],
+            &[Some(&Value::Blob(
                 [
                     0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
                 ]
                 .as_slice()
                 .into(),
-            )],
-            &[Value::Blob(
+            ))],
+            &[Some(&Value::Blob(
                 [0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09]
                     .as_slice()
                     .into(),
-            )],
-            &[Value::Blob([0x01].as_slice().into())],
+            ))],
+            &[Some(&Value::Blob([0x01].as_slice().into()))],
         ],
         "SELECT col FROM example;",
         &test_conn,
@@ -451,8 +453,11 @@ fn test_insert_split() {
         let row = rows.next_row().unwrap().unwrap();
         let columns = row.parse().unwrap();
         assert_eq!(columns.len(), 2);
-        assert_eq!(columns.get(0), &Value::Integer(i));
-        assert_eq!(columns.get(1), &Value::Text(expected.as_bytes().into()));
+        assert_eq!(columns.get(0), Some(&Value::Integer(i)));
+        assert_eq!(
+            columns.get(1),
+            Some(&Value::Text(expected.as_bytes().into()))
+        );
     }
     assert!(test_rows.next().unwrap().is_none());
     assert!(rows.next_row().unwrap().is_none());
@@ -510,10 +515,13 @@ fn test_insert_rowid_type_affinity() {
     let test_conn = rusqlite::Connection::open(file.path()).unwrap();
     assert_same_results(
         &[
-            &[Value::Integer(1), Value::Null],
-            &[Value::Integer(2), Value::Integer(2)],
-            &[Value::Integer(4), Value::Real(4.0)],
-            &[Value::Integer(10), Value::Text(b"10".as_slice().into())],
+            &[Some(&Value::Integer(1)), None],
+            &[Some(&Value::Integer(2)), Some(&Value::Integer(2))],
+            &[Some(&Value::Integer(4)), Some(&Value::Real(4.0))],
+            &[
+                Some(&Value::Integer(10)),
+                Some(&Value::Text(b"10".as_slice().into())),
+            ],
         ],
         "SELECT rowid, * FROM example;",
         &test_conn,
@@ -577,40 +585,34 @@ fn test_insert_type_affinity() {
     assert_same_results(
         &[
             &[
-                Value::Text(b"500.0".as_slice().into()),
-                Value::Integer(500),
-                Value::Integer(500),
-                Value::Real(500.0),
-                Value::Text(b"500.0".as_slice().into()),
+                Some(&Value::Text(b"500.0".as_slice().into())),
+                Some(&Value::Integer(500)),
+                Some(&Value::Integer(500)),
+                Some(&Value::Real(500.0)),
+                Some(&Value::Text(b"500.0".as_slice().into())),
             ],
             &[
-                Value::Text(b"500".as_slice().into()),
-                Value::Integer(500),
-                Value::Integer(500),
-                Value::Real(500.0),
-                Value::Real(500.0),
+                Some(&Value::Text(b"500".as_slice().into())),
+                Some(&Value::Integer(500)),
+                Some(&Value::Integer(500)),
+                Some(&Value::Real(500.0)),
+                Some(&Value::Real(500.0)),
             ],
             &[
-                Value::Text(b"500".as_slice().into()),
-                Value::Integer(500),
-                Value::Integer(500),
-                Value::Real(500.0),
-                Value::Integer(500),
+                Some(&Value::Text(b"500".as_slice().into())),
+                Some(&Value::Integer(500)),
+                Some(&Value::Integer(500)),
+                Some(&Value::Real(500.0)),
+                Some(&Value::Integer(500)),
             ],
             &[
-                Value::Blob([0x05, 0x00].as_slice().into()),
-                Value::Blob([0x05, 0x00].as_slice().into()),
-                Value::Blob([0x05, 0x00].as_slice().into()),
-                Value::Blob([0x05, 0x00].as_slice().into()),
-                Value::Blob([0x05, 0x00].as_slice().into()),
+                Some(&Value::Blob([0x05, 0x00].as_slice().into())),
+                Some(&Value::Blob([0x05, 0x00].as_slice().into())),
+                Some(&Value::Blob([0x05, 0x00].as_slice().into())),
+                Some(&Value::Blob([0x05, 0x00].as_slice().into())),
+                Some(&Value::Blob([0x05, 0x00].as_slice().into())),
             ],
-            &[
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Null,
-            ],
+            &[None, None, None, None, None],
         ],
         "SELECT * FROM t1;",
         &test_conn,

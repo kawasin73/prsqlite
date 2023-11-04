@@ -25,16 +25,24 @@ use crate::value::Buffer;
 use crate::value::Value;
 use crate::value::ValueCmp;
 
-pub fn compare_record(keys: &[ValueCmp<'_>], payload: &BtreePayload) -> anyhow::Result<Ordering> {
+pub fn compare_record(
+    keys: &[Option<ValueCmp<'_>>],
+    payload: &BtreePayload,
+) -> anyhow::Result<Ordering> {
     let mut record = parse_record(payload)?;
     if record.len() < keys.len() {
         bail!("keys is more than index columns");
     }
     for (i, key) in keys.iter().enumerate() {
         let index_value = record.get(i)?;
-        match key.compare(&index_value) {
-            Ordering::Equal => continue,
-            o => return Ok(o),
+        match (key, index_value) {
+            (None, None) => continue,
+            (None, Some(_)) => return Ok(Ordering::Less),
+            (Some(_), None) => return Ok(Ordering::Greater),
+            (Some(key), Some(index_value)) => match key.compare(&index_value) {
+                Ordering::Equal => continue,
+                o => return Ok(o),
+            },
         }
     }
     Ok(Ordering::Equal)
@@ -57,27 +65,33 @@ impl SerialType {
         }
     }
 
-    pub fn parse<'a>(&self, buf: &'a [u8]) -> anyhow::Result<Value<'a>> {
+    pub fn parse<'a>(&self, buf: &'a [u8]) -> anyhow::Result<Option<Value<'a>>> {
         let v = match self.0 {
-            0 => Value::Null,
-            1 => Value::Integer(i8::from_be_bytes(buf[..1].try_into()?) as i64),
-            2 => Value::Integer(i16::from_be_bytes(buf[..2].try_into()?) as i64),
+            0 => None,
+            1 => Some(Value::Integer(
+                i8::from_be_bytes(buf[..1].try_into()?) as i64
+            )),
+            2 => Some(Value::Integer(
+                i16::from_be_bytes(buf[..2].try_into()?) as i64
+            )),
             // TODO: use std::mem::transmute.
             3 => {
                 if buf.len() < 3 {
                     bail!("buffer size {} does not match integer 3", buf.len());
                 }
-                Value::Integer(
+                Some(Value::Integer(
                     ((buf[0] as i64) << 56 | (buf[1] as i64) << 48 | (buf[2] as i64) << 40) >> 40,
-                )
+                ))
             }
-            4 => Value::Integer(i32::from_be_bytes(buf[..4].try_into()?) as i64),
+            4 => Some(Value::Integer(
+                i32::from_be_bytes(buf[..4].try_into()?) as i64
+            )),
             // TODO: use std::mem::transmute.
             5 => {
                 if buf.len() < 6 {
                     bail!("buffer size {} does not match integer 6", buf.len());
                 }
-                Value::Integer(
+                Some(Value::Integer(
                     ((buf[0] as i64) << 56
                         | (buf[1] as i64) << 48
                         | (buf[2] as i64) << 40
@@ -85,19 +99,19 @@ impl SerialType {
                         | (buf[4] as i64) << 24
                         | (buf[5] as i64) << 16)
                         >> 16,
-                )
+                ))
             }
-            6 => Value::Integer(i64::from_be_bytes(buf[..8].try_into()?)),
+            6 => Some(Value::Integer(i64::from_be_bytes(buf[..8].try_into()?))),
             7 => {
                 let f = f64::from_be_bytes(buf[..8].try_into()?);
                 if f.is_nan() {
-                    Value::Null
+                    None
                 } else {
-                    Value::Real(f)
+                    Some(Value::Real(f))
                 }
             }
-            8 => Value::Integer(0),
-            9 => Value::Integer(1),
+            8 => Some(Value::Integer(0)),
+            9 => Some(Value::Integer(1)),
             10 | 11 => {
                 bail!("reserved record is not implemented");
             }
@@ -111,11 +125,12 @@ impl SerialType {
                     );
                 }
                 let buf = &buf[..size];
-                if n & 1 == 0 {
+                let v = if n & 1 == 0 {
                     Value::Blob(Buffer::Ref(buf))
                 } else {
                     Value::Text(Buffer::Ref(buf))
-                }
+                };
+                Some(v)
             }
         };
         Ok(v)
@@ -184,7 +199,7 @@ impl<P: RecordPayload> Record<P> {
         self.header.len()
     }
 
-    pub fn get(&mut self, i: usize) -> anyhow::Result<Value<'_>> {
+    pub fn get(&mut self, i: usize) -> anyhow::Result<Option<Value<'_>>> {
         let Some((serial_type, offset)) = &self.header.get(i) else {
             bail!("index out of range");
         };
@@ -259,18 +274,18 @@ fn parse_record_header_payload<P: RecordPayload>(
 ///
 /// TODO: Consider reduce memory copy. The returned temporary Vec<u8> is not
 /// necessary?
-pub fn build_record(record: &[Value<'_>]) -> Vec<u8> {
+pub fn build_record(record: &[Option<Value<'_>>]) -> Vec<u8> {
     // TODO: How to avoid Vec allocation?
     let mut values = Vec::with_capacity(record.len());
     let mut header_size = 0;
     let mut data_size = 0;
     for value in record {
         let serial_type = match value {
-            Value::Null => {
+            None => {
                 header_size += 1;
                 0
             }
-            Value::Integer(i) => {
+            Some(Value::Integer(i)) => {
                 let u = if *i < 0 { (!*i) as u64 } else { *i as u64 };
                 header_size += 1;
                 if u <= 127 {
@@ -298,14 +313,14 @@ pub fn build_record(record: &[Value<'_>]) -> Vec<u8> {
                     6
                 }
             }
-            Value::Real(_) => {
+            Some(Value::Real(_)) => {
                 header_size += 1;
                 data_size += 8;
                 7
             }
-            Value::Text(buf) | Value::Blob(buf) => {
+            Some(Value::Text(buf)) | Some(Value::Blob(buf)) => {
                 let serial_type =
-                    (buf.len() << 1) + 12 + (matches!(value, Value::Text(_)) as usize);
+                    (buf.len() << 1) + 12 + (matches!(value, Some(Value::Text(_))) as usize);
                 // TODO: how to guarantee serial_type <= u32::MAX?
                 assert!(serial_type <= u32::MAX as usize);
                 let serial_type = serial_type as u32;
@@ -344,7 +359,7 @@ pub fn build_record(record: &[Value<'_>]) -> Vec<u8> {
             0 | 8 | 9 => {}
             st if st <= 6 => {
                 // TODO: Confirm the unreachable has no overhead.
-                let Value::Integer(i) = value else {
+                let Some(Value::Integer(i)) = value else {
                     unreachable!("serial type 1 ~ 6 must be Value::Integer");
                 };
                 let mut i = *i;
@@ -357,7 +372,7 @@ pub fn build_record(record: &[Value<'_>]) -> Vec<u8> {
                 i_data += n;
             }
             7 => {
-                let Value::Real(d) = value else {
+                let Some(Value::Real(d)) = value else {
                     unreachable!("serial type 7 must be Value::Real");
                 };
                 buf[i_data..i_data + 8].copy_from_slice(&d.to_be_bytes());
@@ -365,7 +380,7 @@ pub fn build_record(record: &[Value<'_>]) -> Vec<u8> {
             }
             _ => {
                 let data = match value {
-                    Value::Text(buf) | Value::Blob(buf) => buf,
+                    Some(Value::Text(buf)) | Some(Value::Blob(buf)) => buf,
                     _ => unreachable!("serial type must be Value::Text or Value::Blob"),
                 };
                 buf[i_data..i_data + data.len()].copy_from_slice(data);
@@ -429,82 +444,100 @@ mod tests {
 
         let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
         let mut record = parse_record(&payload).unwrap();
-        assert_eq!(record.get(0).unwrap(), Value::Null);
-        assert_eq!(record.get(1).unwrap(), Value::Integer(1));
-        assert_eq!(record.get(2).unwrap(), Value::Null);
-        assert_eq!(record.get(3).unwrap(), Value::Integer(0));
+        assert_eq!(record.get(0).unwrap(), None);
+        assert_eq!(record.get(1).unwrap(), Some(Value::Integer(1)));
+        assert_eq!(record.get(2).unwrap(), None);
+        assert_eq!(record.get(3).unwrap(), Some(Value::Integer(0)));
         drop(payload);
 
         cursor.move_next().unwrap();
         let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
         let mut record = parse_record(&payload).unwrap();
-        assert_eq!(record.get(0).unwrap(), Value::Integer(i8::MAX as i64));
-        assert_eq!(record.get(1).unwrap(), Value::Integer(i8::MIN as i64));
-        assert_eq!(record.get(2).unwrap(), Value::Integer(i16::MAX as i64));
-        assert_eq!(record.get(3).unwrap(), Value::Integer(i16::MIN as i64));
-        drop(payload);
-
-        cursor.move_next().unwrap();
-        let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
-        let mut record = parse_record(&payload).unwrap();
-        assert_eq!(record.get(0).unwrap(), Value::Integer((ONE << 23) - 1));
-        assert_eq!(record.get(1).unwrap(), Value::Integer(-(ONE << 23)));
-        assert_eq!(record.get(2).unwrap(), Value::Integer(i32::MAX as i64));
-        assert_eq!(record.get(3).unwrap(), Value::Integer(i32::MIN as i64));
-        drop(payload);
-
-        cursor.move_next().unwrap();
-        let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
-        let mut record = parse_record(&payload).unwrap();
-        assert_eq!(record.get(0).unwrap(), Value::Integer((ONE << 47) - 1));
-        assert_eq!(record.get(1).unwrap(), Value::Integer(-(ONE << 47)));
-        assert_eq!(record.get(2).unwrap(), Value::Integer(i64::MAX));
-        assert_eq!(record.get(3).unwrap(), Value::Integer(i64::MIN));
-        drop(payload);
-
-        cursor.move_next().unwrap();
-        let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
-        let mut record = parse_record(&payload).unwrap();
-        assert_eq!(record.get(0).unwrap(), Value::Integer(0));
-        assert_eq!(record.get(1).unwrap(), Value::Integer(1));
+        assert_eq!(record.get(0).unwrap(), Some(Value::Integer(i8::MAX as i64)));
+        assert_eq!(record.get(1).unwrap(), Some(Value::Integer(i8::MIN as i64)));
         assert_eq!(
             record.get(2).unwrap(),
-            Value::Text(b"hello".as_slice().into())
+            Some(Value::Integer(i16::MAX as i64))
         );
         assert_eq!(
             record.get(3).unwrap(),
-            Value::Blob(
-                [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]
-                    .as_slice()
-                    .into()
-            )
+            Some(Value::Integer(i16::MIN as i64))
         );
         drop(payload);
 
         cursor.move_next().unwrap();
         let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
         let mut record = parse_record(&payload).unwrap();
-        assert_eq!(record.get(0).unwrap(), Value::Real(0.5));
+        assert_eq!(
+            record.get(0).unwrap(),
+            Some(Value::Integer((ONE << 23) - 1))
+        );
+        assert_eq!(record.get(1).unwrap(), Some(Value::Integer(-(ONE << 23))));
+        assert_eq!(
+            record.get(2).unwrap(),
+            Some(Value::Integer(i32::MAX as i64))
+        );
+        assert_eq!(
+            record.get(3).unwrap(),
+            Some(Value::Integer(i32::MIN as i64))
+        );
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
+        let mut record = parse_record(&payload).unwrap();
+        assert_eq!(
+            record.get(0).unwrap(),
+            Some(Value::Integer((ONE << 47) - 1))
+        );
+        assert_eq!(record.get(1).unwrap(), Some(Value::Integer(-(ONE << 47))));
+        assert_eq!(record.get(2).unwrap(), Some(Value::Integer(i64::MAX)));
+        assert_eq!(record.get(3).unwrap(), Some(Value::Integer(i64::MIN)));
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
+        let mut record = parse_record(&payload).unwrap();
+        assert_eq!(record.get(0).unwrap(), Some(Value::Integer(0)));
+        assert_eq!(record.get(1).unwrap(), Some(Value::Integer(1)));
+        assert_eq!(
+            record.get(2).unwrap(),
+            Some(Value::Text(b"hello".as_slice().into()))
+        );
+        assert_eq!(
+            record.get(3).unwrap(),
+            Some(Value::Blob(
+                [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]
+                    .as_slice()
+                    .into()
+            ))
+        );
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let (_, payload) = cursor.get_table_payload().unwrap().unwrap();
+        let mut record = parse_record(&payload).unwrap();
+        assert_eq!(record.get(0).unwrap(), Some(Value::Real(0.5)));
     }
 
     #[test]
     fn test_parse_real() {
         assert_eq!(
             SerialType(7).parse(0_f64.to_be_bytes().as_slice()).unwrap(),
-            Value::Real(0.0)
+            Some(Value::Real(0.0))
         );
         assert_eq!(
             SerialType(7)
                 .parse(1.1_f64.to_be_bytes().as_slice())
                 .unwrap(),
-            Value::Real(1.1)
+            Some(Value::Real(1.1))
         );
         // NaN
         assert_eq!(
             SerialType(7)
                 .parse(f64::NAN.to_be_bytes().as_slice())
                 .unwrap(),
-            Value::Null
+            None
         );
     }
 
@@ -531,27 +564,27 @@ mod tests {
     #[test]
     fn test_build_record() {
         let values = vec![
-            Value::Null,
-            Value::Integer(0),
-            Value::Integer(-1),
-            Value::Integer(1),
-            Value::Integer(2),
-            Value::Integer(i8::MIN as i64),
-            Value::Integer(i8::MAX as i64),
-            Value::Integer(i16::MIN as i64),
-            Value::Integer(i16::MAX as i64),
-            Value::Integer((ONE << 23) - 1),
-            Value::Integer(-(ONE << 23)),
-            Value::Integer(i32::MIN as i64),
-            Value::Integer(i32::MAX as i64),
-            Value::Integer((ONE << 47) - 1),
-            Value::Integer(-(ONE << 47)),
-            Value::Integer(i64::MIN),
-            Value::Integer(i64::MAX),
-            Value::Real(0.0),
-            Value::Real(12345.6),
-            Value::Text(Buffer::Owned(b"hello".to_vec())),
-            Value::Blob(Buffer::Owned(b"world".to_vec())),
+            None,
+            Some(Value::Integer(0)),
+            Some(Value::Integer(-1)),
+            Some(Value::Integer(1)),
+            Some(Value::Integer(2)),
+            Some(Value::Integer(i8::MIN as i64)),
+            Some(Value::Integer(i8::MAX as i64)),
+            Some(Value::Integer(i16::MIN as i64)),
+            Some(Value::Integer(i16::MAX as i64)),
+            Some(Value::Integer((ONE << 23) - 1)),
+            Some(Value::Integer(-(ONE << 23))),
+            Some(Value::Integer(i32::MIN as i64)),
+            Some(Value::Integer(i32::MAX as i64)),
+            Some(Value::Integer((ONE << 47) - 1)),
+            Some(Value::Integer(-(ONE << 47))),
+            Some(Value::Integer(i64::MIN)),
+            Some(Value::Integer(i64::MAX)),
+            Some(Value::Real(0.0)),
+            Some(Value::Real(12345.6)),
+            Some(Value::Text(Buffer::Owned(b"hello".to_vec()))),
+            Some(Value::Blob(Buffer::Owned(b"world".to_vec()))),
         ];
         let buf = build_record(&values);
         let mut record = Record::parse(FakePayload { buf: &buf }).unwrap();
@@ -560,38 +593,38 @@ mod tests {
         }
 
         // No data but header only.
-        assert_eq!(build_record(&[Value::Null]), vec![2, 0]);
-        let buf = build_record(&vec![Value::Null; 126]);
+        assert_eq!(build_record(&[None]), vec![2, 0]);
+        let buf = build_record(&vec![None; 126]);
         assert_eq!(buf[0], 127);
         assert_eq!(&buf[1..], &[0; 126]);
         assert_eq!(Record::parse(FakePayload { buf: &buf }).unwrap().len(), 126);
-        let buf = build_record(&vec![Value::Null; 127]);
+        let buf = build_record(&vec![None; 127]);
         assert_eq!(&buf[..2], &[129, 1]);
         assert_eq!(&buf[2..], &[0; 127]);
         assert_eq!(Record::parse(FakePayload { buf: &buf }).unwrap().len(), 127);
-        let buf = build_record(&vec![Value::Null; 128]);
+        let buf = build_record(&vec![None; 128]);
         assert_eq!(&buf[..2], &[129, 2]);
         assert_eq!(&buf[2..], &[0; 128]);
         assert_eq!(Record::parse(FakePayload { buf: &buf }).unwrap().len(), 128);
 
         // Multi byte header (text).
-        let buf = build_record(&[Value::Text(Buffer::Owned(vec![0; 58]))]);
+        let buf = build_record(&[Some(Value::Text(Buffer::Owned(vec![0; 58])))]);
         assert_eq!(buf[..3], vec![3, 129, 1]);
         assert_eq!(buf.len() - 3, 58);
         let mut record = Record::parse(FakePayload { buf: &buf }).unwrap();
         assert_eq!(
             record.get(0).unwrap(),
-            Value::Text(Buffer::Owned(vec![0; 58]))
+            Some(Value::Text(Buffer::Owned(vec![0; 58])))
         );
 
         // Multi byte header (blob).
-        let buf = build_record(&[Value::Blob(Buffer::Owned(vec![0; 58]))]);
+        let buf = build_record(&[Some(Value::Blob(Buffer::Owned(vec![0; 58])))]);
         assert_eq!(buf[..3], vec![3, 129, 0]);
         assert_eq!(buf.len() - 3, 58);
         let mut record = Record::parse(FakePayload { buf: &buf }).unwrap();
         assert_eq!(
             record.get(0).unwrap(),
-            Value::Blob(Buffer::Owned(vec![0; 58]))
+            Some(Value::Blob(Buffer::Owned(vec![0; 58])))
         );
     }
 }
