@@ -49,7 +49,6 @@ use parser::expect_semicolon;
 use parser::parse_sql;
 use parser::BinaryOp;
 use parser::CompareOp;
-use parser::Error as ParseError;
 use parser::Expr;
 use parser::Insert;
 use parser::Parser;
@@ -79,13 +78,23 @@ const MAX_ROWID: i64 = i64::MAX;
 
 #[derive(Debug)]
 pub enum Error<'a> {
-    Parse(ParseError<'a>),
+    Parse(parser::Error<'a>),
+    Cursor(cursor::Error),
+    UniqueConstraintViolation,
+    DataTypeMismatch,
+    Unsupported(&'static str),
     Other(anyhow::Error),
 }
 
-impl<'a> From<ParseError<'a>> for Error<'a> {
-    fn from(e: ParseError<'a>) -> Self {
+impl<'a> From<parser::Error<'a>> for Error<'a> {
+    fn from(e: parser::Error<'a>) -> Self {
         Self::Parse(e)
+    }
+}
+
+impl From<cursor::Error> for Error<'_> {
+    fn from(e: cursor::Error) -> Self {
+        Self::Cursor(e)
     }
 }
 
@@ -100,6 +109,18 @@ impl Display for Error<'_> {
         match self {
             Error::Parse(e) => {
                 write!(f, "SQL parser error: {}", e)
+            }
+            Error::Cursor(e) => {
+                write!(f, "Btree cursor error: {}", e)
+            }
+            Error::DataTypeMismatch => {
+                write!(f, "data type mismatch")
+            }
+            Error::UniqueConstraintViolation => {
+                write!(f, "unique constraint violation")
+            }
+            Error::Unsupported(msg) => {
+                write!(f, "unsupported: {}", msg)
             }
             Error::Other(e) => write!(f, "{}", e),
         }
@@ -683,9 +704,9 @@ impl<'conn> Statement<'conn> {
         }
     }
 
-    pub fn execute(&'conn self) -> anyhow::Result<usize> {
+    pub fn execute(&'conn self) -> Result<usize> {
         match self {
-            Self::Query(_) => bail!("select statement not support execute"),
+            Self::Query(_) => Err(Error::Unsupported("select statement not support execute")),
             Self::Execution(stmt) => stmt.execute(),
         }
     }
@@ -1015,7 +1036,7 @@ pub struct InsertStatement<'conn> {
 }
 
 impl<'conn> InsertStatement<'conn> {
-    pub fn execute(&self) -> anyhow::Result<usize> {
+    pub fn execute(&self) -> Result<usize> {
         let write_txn = self.conn.start_write()?;
 
         let mut cursor =
@@ -1032,7 +1053,7 @@ impl<'conn> InsertStatement<'conn> {
                     Value::Integer(rowid_value) => {
                         rowid = Some(rowid_value);
                     }
-                    _ => bail!("rowid is not integer"),
+                    _ => return Err(Error::DataTypeMismatch),
                 }
             }
             let rowid = if let Some(rowid) = rowid {
@@ -1051,7 +1072,7 @@ impl<'conn> InsertStatement<'conn> {
             // Check rowid conflict
             let current_rowid = cursor.table_move_to(rowid)?;
             if current_rowid.is_some() && current_rowid.unwrap() == rowid {
-                bail!("the rowid already exists");
+                return Err(Error::UniqueConstraintViolation);
             }
 
             let mut columns = Vec::with_capacity(record.columns.len());

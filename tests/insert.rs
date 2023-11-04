@@ -16,6 +16,7 @@ mod common;
 
 use common::*;
 use prsqlite::Connection;
+use prsqlite::Error;
 use prsqlite::Value;
 
 #[test]
@@ -128,6 +129,12 @@ fn test_insert_with_rowid() {
         .unwrap();
     assert_eq!(stmt.execute().unwrap(), 1);
 
+    // NULL rowid is treated as the tail.
+    let stmt = conn
+        .prepare("INSERT INTO example (rowid, col) VALUES (NULL, 8);")
+        .unwrap();
+    assert_eq!(stmt.execute().unwrap(), 1);
+
     let test_conn = rusqlite::Connection::open(file.path()).unwrap();
     assert_same_results(
         &[
@@ -138,6 +145,7 @@ fn test_insert_with_rowid() {
             &[Value::Integer(10), Value::Integer(5)],
             &[Value::Integer(11), Value::Integer(6)],
             &[Value::Integer(12), Value::Integer(7)],
+            &[Value::Integer(13), Value::Integer(8)],
         ],
         "SELECT rowid, * FROM example;",
         &test_conn,
@@ -190,13 +198,40 @@ fn test_insert_rowid_conflict() {
     assert_eq!(stmt.execute().unwrap(), 1);
 
     let stmt = conn
-        .prepare("INSERT INTO example (rowid, col) VALUES (1, 456), (2, 567);")
+        .prepare("INSERT INTO example (rowid, col) VALUES (1, 234), (2, 345);")
         .unwrap();
-    assert!(stmt.execute().is_err());
+    assert!(matches!(
+        stmt.execute().err().unwrap(),
+        Error::UniqueConstraintViolation
+    ));
+
+    let stmt = conn
+        .prepare("INSERT INTO example (rowid, col) VALUES (2, 456), (1, 567);")
+        .unwrap();
+    assert!(matches!(
+        stmt.execute().err().unwrap(),
+        Error::UniqueConstraintViolation
+    ));
+
+    let stmt = conn
+        .prepare("INSERT INTO example (rowid, col) VALUES (2, 678), (2, 789);")
+        .unwrap();
+    assert!(matches!(
+        stmt.execute().err().unwrap(),
+        Error::UniqueConstraintViolation
+    ));
+
+    let stmt = conn
+        .prepare("INSERT INTO example (col) VALUES (890);")
+        .unwrap();
+    assert_eq!(stmt.execute().unwrap(), 1);
 
     let test_conn = rusqlite::Connection::open(file.path()).unwrap();
     assert_same_results(
-        &[&[Value::Integer(1), Value::Integer(123)]],
+        &[
+            &[Value::Integer(1), Value::Integer(123)],
+            &[Value::Integer(2), Value::Integer(890)],
+        ],
         "SELECT rowid, * FROM example;",
         &test_conn,
         &conn,
@@ -421,4 +456,67 @@ fn test_insert_split() {
     }
     assert!(test_rows.next().unwrap().is_none());
     assert!(rows.next_row().unwrap().is_none());
+}
+
+#[test]
+fn test_insert_rowid_type_affinity() {
+    let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
+    let conn = Connection::open(file.path()).unwrap();
+
+    let stmt = conn
+        .prepare("INSERT INTO example (rowid, col) VALUES (NULL, NULL);")
+        .unwrap();
+    assert_eq!(stmt.execute().unwrap(), 1);
+
+    let stmt = conn
+        .prepare("INSERT INTO example (rowid, col) VALUES (2, 2);")
+        .unwrap();
+    assert_eq!(stmt.execute().unwrap(), 1);
+
+    let stmt = conn
+        .prepare("INSERT INTO example (rowid, col) VALUES (4.0, 4.0);")
+        .unwrap();
+    assert_eq!(stmt.execute().unwrap(), 1);
+
+    let stmt = conn
+        .prepare("INSERT INTO example (rowid, col) VALUES ('10', '10');")
+        .unwrap();
+    assert_eq!(stmt.execute().unwrap(), 1);
+
+    let stmt = conn
+        .prepare("INSERT INTO example (rowid, col) VALUES (12.1, 12.1);")
+        .unwrap();
+    assert!(matches!(
+        stmt.execute().err().unwrap(),
+        Error::DataTypeMismatch
+    ));
+
+    let stmt = conn
+        .prepare("INSERT INTO example (rowid, col) VALUES ('14a', '14a');")
+        .unwrap();
+    assert!(matches!(
+        stmt.execute().err().unwrap(),
+        Error::DataTypeMismatch
+    ));
+
+    let stmt = conn
+        .prepare("INSERT INTO example (rowid, col) VALUES ('14a', '14a');")
+        .unwrap();
+    assert!(matches!(
+        stmt.execute().err().unwrap(),
+        Error::DataTypeMismatch
+    ));
+
+    let test_conn = rusqlite::Connection::open(file.path()).unwrap();
+    assert_same_results(
+        &[
+            &[Value::Integer(1), Value::Null],
+            &[Value::Integer(2), Value::Integer(2)],
+            &[Value::Integer(4), Value::Real(4.0)],
+            &[Value::Integer(10), Value::Text(b"10".as_slice().into())],
+        ],
+        "SELECT rowid, * FROM example;",
+        &test_conn,
+        &conn,
+    )
 }

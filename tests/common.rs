@@ -89,10 +89,12 @@ pub fn assert_same_results(
             assert_eq!(&v, e, "i: {}, j: {}, query: {}", i, j, query);
         }
     }
+    assert!(rows.next().unwrap().is_none());
 
     let stmt = conn.prepare(query).unwrap();
     let mut rows = stmt.query().unwrap();
     for (i, e) in expected.iter().enumerate() {
         assert_same_result_prsqlite!(rows, e, format!("i: {i}, query: {query}"));
     }
+    assert!(rows.next_row().unwrap().is_none());
 }
