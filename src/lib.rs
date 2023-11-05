@@ -58,10 +58,9 @@ use parser::Select;
 use parser::Stmt;
 use parser::UnaryOp;
 use payload::Payload;
-use payload::SlicePayload;
-use record::build_record;
 use record::parse_record;
 use record::parse_record_header;
+use record::RecordPayload;
 use record::SerialType;
 use schema::calc_collation;
 use schema::calc_type_affinity;
@@ -1111,9 +1110,10 @@ impl<'conn> InsertStatement<'conn> {
                 columns.push(value);
             }
 
-            let payload = build_record(&columns.iter().map(|v| v.as_ref()).collect::<Vec<_>>());
-
-            cursor.table_insert(rowid, &SlicePayload::new(&payload)?)?;
+            cursor.table_insert(
+                rowid,
+                &RecordPayload::new(&columns.iter().map(|v| v.as_ref()).collect::<Vec<_>>())?,
+            )?;
 
             let row_id = Value::Integer(rowid);
             for index in self.indexes.iter() {
@@ -1133,8 +1133,7 @@ impl<'conn> InsertStatement<'conn> {
                     .collect::<Vec<_>>();
                 let mut index_cursor =
                     BtreeCursor::new(index.root_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
-                let payload = build_record(&index_columns);
-                index_cursor.index_insert(&comparators, &SlicePayload::new(&payload)?)?;
+                index_cursor.index_insert(&comparators, &RecordPayload::new(&index_columns)?)?;
             }
 
             n += 1;

@@ -22,7 +22,6 @@ use crate::pager::PageBufferMut;
 use crate::pager::PageId;
 use crate::payload::Payload;
 use crate::payload::PayloadSize;
-use crate::payload::SlicePayload;
 use crate::utils::len_varint_buffer;
 use crate::utils::parse_varint;
 use crate::utils::u64_to_i64;
@@ -727,11 +726,11 @@ pub fn allocate_from_unallocated_space(
 }
 
 /// Write a table leaf cell to the specified offset.
-pub fn write_leaf_cell(
+pub fn write_leaf_cell<P: Payload<()>>(
     buffer: &mut PageBufferMut,
     offset: usize,
     cell_header: &[u8],
-    payload: &SlicePayload<'_>,
+    payload: &P,
     n_local: u16,
     overflow_page_id: Option<PageId>,
 ) {

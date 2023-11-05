@@ -22,7 +22,10 @@ use tempfile::NamedTempFile;
 use crate::btree::BtreeContext;
 use crate::pager::PageId;
 use crate::pager::Pager;
+use crate::payload::Payload;
+use crate::record::RecordPayload;
 use crate::schema::Schema;
+use crate::value::Value;
 use crate::Connection;
 use crate::DatabaseHeader;
 use crate::Expression;
@@ -99,4 +102,14 @@ pub fn find_index_page_id(index: &str, filepath: &Path) -> PageId {
     )
     .unwrap();
     schema.get_index(index.as_bytes()).unwrap().root_page_id
+}
+
+pub fn build_record(record: &[Option<&Value>]) -> Vec<u8> {
+    let payload = RecordPayload::new(record).unwrap();
+    let mut buf = vec![0; payload.size().get() as usize];
+    assert_eq!(
+        payload.load(0, &mut buf).unwrap(),
+        payload.size().get() as usize
+    );
+    buf
 }

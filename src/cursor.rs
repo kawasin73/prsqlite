@@ -43,7 +43,6 @@ use crate::pager::PageId;
 use crate::pager::Pager;
 use crate::payload::Payload;
 use crate::payload::PayloadSize;
-use crate::payload::SlicePayload;
 use crate::record::compare_record;
 use crate::utils::i64_to_u64;
 use crate::utils::len_varint_buffer;
@@ -511,10 +510,10 @@ impl<'a> BtreeCursor<'a> {
     ///
     /// This fails if the key already exists. If you need to update the key for
     /// an entry, delete the key in the index first.
-    pub fn index_insert(
+    pub fn index_insert<P: Payload<()>>(
         &mut self,
         comparators: &[Option<ValueCmp>],
-        payload: &SlicePayload<'_>,
+        payload: &P,
     ) -> Result<()> {
         if self.index_move_to_leaf(comparators)? {
             // index_insert() does not support updating a key.
@@ -537,7 +536,7 @@ impl<'a> BtreeCursor<'a> {
     ///
     /// There should not be other [BtreeCursor]s pointing the same btree.
     /// Otherwise, this fails.
-    pub fn table_insert(&mut self, key: i64, payload: &SlicePayload<'_>) -> Result<()> {
+    pub fn table_insert<P: Payload<()>>(&mut self, key: i64, payload: &P) -> Result<()> {
         let current_cell_key = self.table_move_to(key)?;
 
         assert!(self.current_page.page_type.is_table());
@@ -558,10 +557,10 @@ impl<'a> BtreeCursor<'a> {
         self.insert_cell(cell_header, payload, n_local, overflow_page_id)
     }
 
-    fn pack_cell<'b>(
+    fn pack_cell<'b, P: Payload<()>>(
         &self,
         cell_header_buf: &'b mut [u8],
-        payload: &SlicePayload<'_>,
+        payload: &P,
         table_key: Option<i64>,
     ) -> Result<(&'b [u8], u16, Option<PageId>)> {
         assert!(cell_header_buf.len() >= 9);
@@ -626,10 +625,10 @@ impl<'a> BtreeCursor<'a> {
         }
     }
 
-    fn insert_cell(
+    fn insert_cell<P: Payload<()>>(
         &mut self,
         cell_header: &[u8],
-        payload: &SlicePayload<'_>,
+        payload: &P,
         n_local: u16,
         overflow_page_id: Option<PageId>,
     ) -> Result<()> {
@@ -1308,7 +1307,7 @@ mod tests {
     use crate::header::DATABASE_HEADER_SIZE;
     use crate::pager::MAX_PAGE_SIZE;
     use crate::pager::PAGE_ID_1;
-    use crate::record::build_record;
+    use crate::payload::SlicePayload;
     use crate::record::parse_record;
     use crate::test_utils::*;
     use crate::value::Collation;
