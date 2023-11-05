@@ -337,10 +337,34 @@ impl Connection {
         }
 
         let table_page_id = table.root_page_id;
+        let mut indexes = Vec::new();
+        let mut index_schema = table.indexes.clone();
+        while let Some(index) = index_schema {
+            let mut columns = index
+                .columns
+                .iter()
+                .map(|column_number| {
+                    let collation = if let ColumnNumber::Column(column_idx) = column_number {
+                        &table.columns[*column_idx].collation
+                    } else {
+                        &DEFAULT_COLLATION
+                    };
+                    (*column_number, collation.clone())
+                })
+                .collect::<Vec<_>>();
+            columns.push((ColumnNumber::RowId, DEFAULT_COLLATION.clone()));
+
+            indexes.push(IndexSchema {
+                root_page_id: index.root_page_id,
+                columns,
+            });
+            index_schema = index.next.clone();
+        }
         Ok(InsertStatement {
             conn: self,
             table_page_id,
             records,
+            indexes,
         })
     }
 
@@ -1025,10 +1049,16 @@ struct InsertRecord {
     columns: Vec<(Expression, TypeAffinity)>,
 }
 
+struct IndexSchema {
+    root_page_id: PageId,
+    columns: Vec<(ColumnNumber, Collation)>,
+}
+
 pub struct InsertStatement<'conn> {
     conn: &'conn Connection,
     table_page_id: PageId,
     records: Vec<InsertRecord>,
+    indexes: Vec<IndexSchema>,
 }
 
 impl<'conn> InsertStatement<'conn> {
@@ -1078,11 +1108,31 @@ impl<'conn> InsertStatement<'conn> {
                 columns.push(value);
             }
 
-            let record = build_record(&columns);
+            let payload = build_record(&columns.iter().map(|v| v.as_ref()).collect::<Vec<_>>());
 
-            cursor.table_insert(rowid, &record)?;
+            cursor.table_insert(rowid, &payload)?;
 
-            // TODO: insert into index if exists.
+            let row_id = Value::Integer(rowid);
+            for index in self.indexes.iter() {
+                let index_columns = index
+                    .columns
+                    .iter()
+                    .map(|(column_number, _)| match column_number {
+                        ColumnNumber::RowId => Some(&row_id),
+                        ColumnNumber::Column(column_idx) => columns[*column_idx].as_ref(),
+                    })
+                    .collect::<Vec<_>>();
+                let comparators = index
+                    .columns
+                    .iter()
+                    .zip(index_columns.iter())
+                    .map(|((_, collation), v)| v.map(|v| ValueCmp::new(v, collation)))
+                    .collect::<Vec<_>>();
+                let mut index_cursor =
+                    BtreeCursor::new(index.root_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
+                let payload = build_record(&index_columns);
+                index_cursor.index_insert(&comparators, &payload)?;
+            }
 
             n += 1;
         }

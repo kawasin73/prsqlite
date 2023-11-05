@@ -537,7 +537,6 @@ impl<'a> BtreeCursor<'a> {
     ///
     /// This fails if the key already exists. If you need to update the key for
     /// an entry, delete the key in the index first.
-    #[allow(dead_code)]
     pub fn index_insert(&mut self, comparators: &[Option<ValueCmp>], payload: &[u8]) -> Result<()> {
         let payload_size: PayloadSize = (payload.len() as u64)
             .try_into()
@@ -3273,7 +3272,7 @@ mod tests {
 
         let mut cursor = BtreeCursor::new(index_page_id, &pager, &bctx).unwrap();
 
-        let payload1 = build_record(&[Some(Value::Integer(1)), Some(Value::Integer(1))]);
+        let payload1 = build_record(&[Some(&Value::Integer(1)), Some(&Value::Integer(1))]);
         cursor
             .index_insert(
                 &[
@@ -3293,8 +3292,8 @@ mod tests {
         assert!(payload.is_none());
         drop(payload);
 
-        let payload2 = build_record(&[Some(Value::Integer(1)), Some(Value::Integer(4))]);
-        let payload3 = build_record(&[Some(Value::Integer(4)), Some(Value::Integer(3))]);
+        let payload2 = build_record(&[Some(&Value::Integer(1)), Some(&Value::Integer(4))]);
+        let payload3 = build_record(&[Some(&Value::Integer(4)), Some(&Value::Integer(3))]);
         cursor
             .index_insert(
                 &[
@@ -3334,9 +3333,9 @@ mod tests {
         assert!(payload.is_none());
         drop(payload);
 
-        let payload4 = build_record(&[Some(Value::Integer(1)), Some(Value::Integer(-1))]);
-        let payload5 = build_record(&[Some(Value::Integer(1)), Some(Value::Integer(2))]);
-        let payload6 = build_record(&[Some(Value::Integer(2)), Some(Value::Integer(5))]);
+        let payload4 = build_record(&[Some(&Value::Integer(1)), Some(&Value::Integer(-1))]);
+        let payload5 = build_record(&[Some(&Value::Integer(1)), Some(&Value::Integer(2))]);
+        let payload6 = build_record(&[Some(&Value::Integer(2)), Some(&Value::Integer(5))]);
         cursor
             .index_insert(
                 &[
@@ -3423,7 +3422,7 @@ mod tests {
         {
             let mut cursor = BtreeCursor::new(index_page_id, &pager, &bctx).unwrap();
             let value = Value::Blob(data[..max_local - 3].into());
-            let record_payload = build_record(&[Some(value.clone())]);
+            let record_payload = build_record(&[Some(&value)]);
             assert_eq!(record_payload.len(), max_local);
             let comparator = [Some(ValueCmp::new(&value, &Collation::Binary))];
             cursor.index_insert(&comparator, &record_payload).unwrap();
@@ -3440,7 +3439,7 @@ mod tests {
         {
             let mut cursor = BtreeCursor::new(index_page_id, &pager, &bctx).unwrap();
             let value = Value::Blob(data[..payload_size - 3].into());
-            let record_payload = build_record(&[Some(value.clone())]);
+            let record_payload = build_record(&[Some(&value)]);
             assert_eq!(record_payload.len(), payload_size);
             let comparator = [Some(ValueCmp::new(&value, &Collation::Binary))];
             cursor.index_insert(&comparator, &record_payload).unwrap();
@@ -3472,7 +3471,7 @@ mod tests {
         {
             let mut cursor = BtreeCursor::new(index_page_id, &pager, &bctx).unwrap();
             let value = Value::Blob(data[..payload_size - 3].into());
-            let record_payload = build_record(&[Some(value.clone())]);
+            let record_payload = build_record(&[Some(&value)]);
             assert_eq!(record_payload.len(), payload_size);
             let comparator = [Some(ValueCmp::new(&value, &Collation::Binary))];
             cursor.index_insert(&comparator, &record_payload).unwrap();
@@ -3492,7 +3491,7 @@ mod tests {
         {
             let mut cursor = BtreeCursor::new(index_page_id, &pager, &bctx).unwrap();
             let value = Value::Blob(data[..payload_size - 4].into());
-            let record_payload = build_record(&[Some(value.clone())]);
+            let record_payload = build_record(&[Some(&value)]);
             assert_eq!(record_payload.len(), payload_size);
             let comparator = [Some(ValueCmp::new(&value, &Collation::Binary))];
             cursor.index_insert(&comparator, &record_payload).unwrap();
@@ -3571,7 +3570,7 @@ mod tests {
 
         let rowid_value = Value::Integer(6);
         let value = Value::Blob(vec![0x66; 902].into());
-        let payload6 = build_record(&[Some(value.clone()), Some(rowid_value.clone())]);
+        let payload6 = build_record(&[Some(&value), Some(&rowid_value)]);
         let comparator = [
             Some(ValueCmp::new(&value, &Collation::Binary)),
             Some(ValueCmp::new(&rowid_value, &Collation::Binary)),
@@ -3589,16 +3588,16 @@ mod tests {
         cursor.move_to_first().unwrap();
 
         let payload3 = build_record(&[
-            Some(Value::Blob([0x33; 901].as_slice().into())),
-            Some(Value::Integer(3)),
+            Some(&Value::Blob([0x33; 901].as_slice().into())),
+            Some(&Value::Integer(3)),
         ]);
         let payload4 = build_record(&[
-            Some(Value::Blob([0x44; 900].as_slice().into())),
-            Some(Value::Integer(4)),
+            Some(&Value::Blob([0x44; 900].as_slice().into())),
+            Some(&Value::Integer(4)),
         ]);
         let payload5 = build_record(&[
-            Some(Value::Blob([0x55; 2000].as_slice().into())),
-            Some(Value::Integer(5)),
+            Some(&Value::Blob([0x55; 2000].as_slice().into())),
+            Some(&Value::Integer(5)),
         ]);
         assert_all_local_in_index_cursor(
             &mut cursor,
@@ -3630,7 +3629,7 @@ mod tests {
             let mut buf = (i as u16).to_be_bytes().to_vec();
             buf.extend(&[(i % 256) as u8; 90]);
             let value = Value::Blob(buf.into());
-            let payload = build_record(&[Some(value.clone()), Some(rowid_value.clone())]);
+            let payload = build_record(&[Some(&value), Some(&rowid_value)]);
             let comparator = [
                 Some(ValueCmp::new(&value, &Collation::Binary)),
                 Some(ValueCmp::new(&rowid_value, &Collation::Binary)),
@@ -3644,7 +3643,7 @@ mod tests {
             let mut buf = (i as u16).to_be_bytes().to_vec();
             buf.extend(&[(i % 256) as u8; 90]);
             let value = Value::Blob(buf.into());
-            let expected = build_record(&[Some(value.clone()), Some(rowid_value.clone())]);
+            let expected = build_record(&[Some(&value), Some(&rowid_value)]);
             let payload = cursor.get_index_payload().unwrap().unwrap();
             assert_eq!(payload.buf(), &expected, "i = {}", i);
             drop(payload);
@@ -3672,7 +3671,7 @@ mod tests {
             let mut buf = (rowid as u16).to_be_bytes().to_vec();
             buf.extend(&[(rowid % 256) as u8; 90]);
             let value = Value::Blob(buf.into());
-            let payload = build_record(&[Some(value.clone()), Some(rowid_value.clone())]);
+            let payload = build_record(&[Some(&value), Some(&rowid_value)]);
             let comparator = [
                 Some(ValueCmp::new(&value, &Collation::Binary)),
                 Some(ValueCmp::new(&rowid_value, &Collation::Binary)),
@@ -3687,7 +3686,7 @@ mod tests {
             let mut buf = (rowid as u16).to_be_bytes().to_vec();
             buf.extend(&[(rowid % 256) as u8; 90]);
             let value = Value::Blob(buf.into());
-            let expected = build_record(&[Some(value.clone()), Some(rowid_value.clone())]);
+            let expected = build_record(&[Some(&value), Some(&rowid_value)]);
             let payload = cursor.get_index_payload().unwrap().unwrap();
             assert_eq!(payload.buf(), &expected, "i = {}", i);
             drop(payload);
@@ -3716,7 +3715,7 @@ mod tests {
                 let mut buf = (rowid as u16).to_be_bytes().to_vec();
                 buf.extend(&[(rowid % 256) as u8; 90]);
                 let value = Value::Blob(buf.into());
-                let payload = build_record(&[Some(value.clone()), Some(rowid_value.clone())]);
+                let payload = build_record(&[Some(&value), Some(&rowid_value)]);
                 let comparator = [
                     Some(ValueCmp::new(&value, &Collation::Binary)),
                     Some(ValueCmp::new(&rowid_value, &Collation::Binary)),
@@ -3732,7 +3731,7 @@ mod tests {
             let mut buf = (rowid as u16).to_be_bytes().to_vec();
             buf.extend(&[(rowid % 256) as u8; 90]);
             let value = Value::Blob(buf.into());
-            let expected = build_record(&[Some(value.clone()), Some(rowid_value.clone())]);
+            let expected = build_record(&[Some(&value), Some(&rowid_value)]);
             let payload = cursor.get_index_payload().unwrap().unwrap();
             assert_eq!(payload.buf(), &expected, "i = {}", i);
             drop(payload);

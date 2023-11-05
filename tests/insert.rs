@@ -419,7 +419,11 @@ fn test_insert_freeblock() {
 
 #[test]
 fn test_insert_split() {
-    let file = create_sqlite_database(&["PRAGMA page_size = 512;", "CREATE TABLE example(col);"]);
+    let file = create_sqlite_database(&[
+        "PRAGMA page_size = 512;",
+        "CREATE TABLE example(col);",
+        "CREATE INDEX index1 ON example(col);",
+    ]);
     let conn = Connection::open(file.path()).unwrap();
     let magic_v = "abc".repeat(50);
 
@@ -461,6 +465,67 @@ fn test_insert_split() {
     }
     assert!(test_rows.next().unwrap().is_none());
     assert!(rows.next_row().unwrap().is_none());
+
+    for rowid in 0..3 * 5 * 500 {
+        assert_same_results(
+            &[&[Some(&Value::Integer(rowid))]],
+            &format!(
+                "SELECT rowid from example WHERE col = '{}{}{}';",
+                rowid, &magic_v, rowid
+            ),
+            &test_conn,
+            &conn,
+        );
+    }
+}
+
+#[test]
+fn test_insert_index() {
+    let file = create_sqlite_database(&[
+        "PRAGMA page_size = 512;",
+        "CREATE TABLE example(col1, col2);",
+        "CREATE INDEX index1 ON example(col1);",
+        "CREATE INDEX index2 ON example(col2, col1);",
+    ]);
+    let conn = Connection::open(file.path()).unwrap();
+
+    assert_eq!(
+        conn.prepare("INSERT INTO example (col1, col2) VALUES (1, 2);")
+            .unwrap()
+            .execute()
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        conn.prepare("INSERT INTO example (col1, col2) VALUES (1, 3), (3, 3), (2, 3), (1, 3);")
+            .unwrap()
+            .execute()
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        conn.prepare("INSERT INTO example (col2) VALUES (3);")
+            .unwrap()
+            .execute()
+            .unwrap(),
+        1
+    );
+
+    let test_conn = rusqlite::Connection::open(file.path()).unwrap();
+    let sql = "SELECT rowid FROM example WHERE col1 = 1;";
+    let rowids = [1, 2, 5];
+    assert_eq!(&load_rowids(&conn, sql), &rowids, "{}", sql);
+    assert_eq!(&load_test_rowids(&test_conn, sql), &rowids, "{}", sql);
+
+    let sql = "SELECT rowid FROM example WHERE col2 = 3;";
+    let rowids = [6, 2, 5, 4, 3];
+    assert_eq!(&load_rowids(&conn, sql), &rowids, "{}", sql);
+    assert_eq!(&load_test_rowids(&test_conn, sql), &rowids, "{}", sql);
+
+    let sql = "SELECT rowid FROM example WHERE col2 = 3 AND col1 = 1;";
+    let rowids = [2, 5];
+    // TODO: Support multiple conditions in prsqlite.
+    assert_eq!(&load_test_rowids(&test_conn, sql), &rowids, "{}", sql);
 }
 
 #[test]

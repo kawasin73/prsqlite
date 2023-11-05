@@ -205,7 +205,10 @@ impl<P: RecordPayload> Record<P> {
         };
         let offset = *offset;
         let content_size = serial_type.content_size() as usize;
-        let buf = if offset + content_size > self.payload.buf().len() {
+        let buf = if content_size == 0 {
+            // Workaround because if offset is the tail, self.payload.load() fails.
+            &[]
+        } else if offset + content_size > self.payload.buf().len() {
             self.tmp_buf.resize(content_size, 0);
             let n = self.payload.load(offset, &mut self.tmp_buf)?;
             if n != content_size {
@@ -274,7 +277,7 @@ fn parse_record_header_payload<P: RecordPayload>(
 ///
 /// TODO: Consider reduce memory copy. The returned temporary Vec<u8> is not
 /// necessary?
-pub fn build_record(record: &[Option<Value<'_>>]) -> Vec<u8> {
+pub fn build_record(record: &[Option<&Value<'_>>]) -> Vec<u8> {
     // TODO: How to avoid Vec allocation?
     let mut values = Vec::with_capacity(record.len());
     let mut header_size = 0;
@@ -586,7 +589,7 @@ mod tests {
             Some(Value::Text(Buffer::Owned(b"hello".to_vec()))),
             Some(Value::Blob(Buffer::Owned(b"world".to_vec()))),
         ];
-        let buf = build_record(&values);
+        let buf = build_record(&values.iter().map(|v| v.as_ref()).collect::<Vec<_>>());
         let mut record = Record::parse(FakePayload { buf: &buf }).unwrap();
         for (i, value) in values.iter().enumerate() {
             assert_eq!(record.get(i).unwrap(), *value, "index {}", i);
@@ -608,7 +611,7 @@ mod tests {
         assert_eq!(Record::parse(FakePayload { buf: &buf }).unwrap().len(), 128);
 
         // Multi byte header (text).
-        let buf = build_record(&[Some(Value::Text(Buffer::Owned(vec![0; 58])))]);
+        let buf = build_record(&[Some(&Value::Text(Buffer::Owned(vec![0; 58])))]);
         assert_eq!(buf[..3], vec![3, 129, 1]);
         assert_eq!(buf.len() - 3, 58);
         let mut record = Record::parse(FakePayload { buf: &buf }).unwrap();
@@ -618,7 +621,7 @@ mod tests {
         );
 
         // Multi byte header (blob).
-        let buf = build_record(&[Some(Value::Blob(Buffer::Owned(vec![0; 58])))]);
+        let buf = build_record(&[Some(&Value::Blob(Buffer::Owned(vec![0; 58])))]);
         assert_eq!(buf[..3], vec![3, 129, 0]);
         assert_eq!(buf.len() - 3, 58);
         let mut record = Record::parse(FakePayload { buf: &buf }).unwrap();
