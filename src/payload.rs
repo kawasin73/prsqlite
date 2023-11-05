@@ -43,7 +43,7 @@ impl Payload<()> for SlicePayload<'_> {
     }
 
     fn load(&self, offset: usize, buf: &mut [u8]) -> std::result::Result<usize, ()> {
-        assert!(offset < self.buf.len());
+        assert!(offset <= self.buf.len());
         let n = buf.len().min(self.buf.len() - offset);
         buf[..n].copy_from_slice(&self.buf[offset..offset + n]);
         Ok(n)

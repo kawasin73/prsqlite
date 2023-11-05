@@ -58,6 +58,7 @@ use parser::Select;
 use parser::Stmt;
 use parser::UnaryOp;
 use payload::Payload;
+use payload::SlicePayload;
 use record::build_record;
 use record::parse_record;
 use record::parse_record_header;
@@ -1112,7 +1113,7 @@ impl<'conn> InsertStatement<'conn> {
 
             let payload = build_record(&columns.iter().map(|v| v.as_ref()).collect::<Vec<_>>());
 
-            cursor.table_insert(rowid, &payload)?;
+            cursor.table_insert(rowid, &SlicePayload::new(&payload)?)?;
 
             let row_id = Value::Integer(rowid);
             for index in self.indexes.iter() {
@@ -1133,7 +1134,7 @@ impl<'conn> InsertStatement<'conn> {
                 let mut index_cursor =
                     BtreeCursor::new(index.root_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
                 let payload = build_record(&index_columns);
-                index_cursor.index_insert(&comparators, &payload)?;
+                index_cursor.index_insert(&comparators, &SlicePayload::new(&payload)?)?;
             }
 
             n += 1;

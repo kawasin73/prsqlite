@@ -20,7 +20,9 @@ use crate::pager::MemPage;
 use crate::pager::PageBuffer;
 use crate::pager::PageBufferMut;
 use crate::pager::PageId;
+use crate::payload::Payload;
 use crate::payload::PayloadSize;
+use crate::payload::SlicePayload;
 use crate::utils::len_varint_buffer;
 use crate::utils::parse_varint;
 use crate::utils::u64_to_i64;
@@ -729,14 +731,20 @@ pub fn write_leaf_cell(
     buffer: &mut PageBufferMut,
     offset: usize,
     cell_header: &[u8],
-    local_payload: &[u8],
+    payload: &SlicePayload<'_>,
+    n_local: u16,
     overflow_page_id: Option<PageId>,
 ) {
     // Copy payload to the btree page.
     let payload_offset = offset + cell_header.len();
     buffer[offset..payload_offset].copy_from_slice(cell_header);
-    let payload_tail_offset = payload_offset + local_payload.len();
-    buffer[payload_offset..payload_tail_offset].copy_from_slice(local_payload);
+    let payload_tail_offset = payload_offset + n_local as usize;
+    assert_eq!(
+        payload
+            .load(0, &mut buffer[payload_offset..payload_tail_offset])
+            .unwrap(),
+        n_local as usize
+    );
     if let Some(overflow_page_id) = overflow_page_id {
         let overflow_page_id = overflow_page_id.get().to_be_bytes();
         buffer[payload_tail_offset..payload_tail_offset + overflow_page_id.len()]
