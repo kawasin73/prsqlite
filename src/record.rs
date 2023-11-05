@@ -13,11 +13,14 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
+use std::fmt::Debug;
+use std::marker::PhantomData;
 
 use anyhow::bail;
 use anyhow::Context;
 
 use crate::cursor::BtreePayload;
+use crate::payload::Payload;
 use crate::utils::len_varint;
 use crate::utils::parse_varint;
 use crate::utils::put_varint;
@@ -137,61 +140,28 @@ impl SerialType {
     }
 }
 
-pub trait RecordPayload {
-    fn size(&self) -> u32;
-    fn buf(&self) -> &[u8];
-    fn load(&self, offset: usize, buf: &mut [u8]) -> anyhow::Result<usize>;
-}
-
-/// A wrapper of BtreePayload to implement RecordPayload.
-///
-/// TODO: This abstraction was introduced for FakePayload in tests. Consider
-/// better abstraction.
-pub struct BtreeRecordPayload<'a>(&'a BtreePayload<'a>);
-
-impl RecordPayload for BtreeRecordPayload<'_> {
-    #[inline]
-    fn size(&self) -> u32 {
-        self.0.size()
-    }
-
-    #[inline]
-    fn buf(&self) -> &[u8] {
-        self.0.buf()
-    }
-
-    #[inline]
-    fn load(&self, offset: usize, buf: &mut [u8]) -> anyhow::Result<usize> {
-        Ok(self.0.load(offset, buf)?)
-    }
-}
-
-impl<'a> From<&'a BtreePayload<'a>> for BtreeRecordPayload<'a> {
-    fn from(payload: &'a BtreePayload<'a>) -> Self {
-        Self(payload)
-    }
-}
-
-pub struct Record<P: RecordPayload> {
-    payload: P,
+pub struct Record<'a, P: Payload<E>, E> {
+    payload: &'a P,
     header: Vec<(SerialType, usize)>,
     tmp_buf: Vec<u8>,
+    error_type: PhantomData<E>,
 }
 
 #[inline]
 pub fn parse_record<'a>(
     payload: &'a BtreePayload<'a>,
-) -> anyhow::Result<Record<BtreeRecordPayload<'a>>> {
-    Record::parse(payload.into())
+) -> anyhow::Result<Record<BtreePayload<'a>, crate::cursor::Error>> {
+    Record::parse(payload)
 }
 
-impl<P: RecordPayload> Record<P> {
-    pub fn parse(payload: P) -> anyhow::Result<Self> {
-        let header = parse_record_header_payload(&payload)?;
+impl<'a, P: Payload<E>, E: Debug> Record<'a, P, E> {
+    pub fn parse(payload: &'a P) -> anyhow::Result<Self> {
+        let header = parse_record_header_payload(payload)?;
         Ok(Self {
             payload,
             header,
             tmp_buf: Vec::new(),
+            error_type: PhantomData,
         })
     }
 
@@ -210,7 +180,10 @@ impl<P: RecordPayload> Record<P> {
             &[]
         } else if offset + content_size > self.payload.buf().len() {
             self.tmp_buf.resize(content_size, 0);
-            let n = self.payload.load(offset, &mut self.tmp_buf)?;
+            let n = self
+                .payload
+                .load(offset, &mut self.tmp_buf)
+                .map_err(|e| anyhow::anyhow!("payload load: {:?}", e))?;
             if n != content_size {
                 bail!("failed to load rowid from index payload");
             }
@@ -224,13 +197,13 @@ impl<P: RecordPayload> Record<P> {
 
 #[inline]
 pub fn parse_record_header(payload: &BtreePayload) -> anyhow::Result<Vec<(SerialType, usize)>> {
-    parse_record_header_payload::<BtreeRecordPayload>(&payload.into())
+    parse_record_header_payload::<BtreePayload, crate::cursor::Error>(payload)
 }
 
 /// Parse record header and return a list of serial types and content offsets.
 ///
 /// TODO: support partial parsing.
-fn parse_record_header_payload<P: RecordPayload>(
+fn parse_record_header_payload<P: Payload<E>, E: Debug>(
     payload: &P,
 ) -> anyhow::Result<Vec<(SerialType, usize)>> {
     let local_buf = payload.buf();
@@ -244,7 +217,7 @@ fn parse_record_header_payload<P: RecordPayload>(
         buf_loaded = vec![0; header_size];
         let n = payload
             .load(0, &mut buf_loaded)
-            .context("load record header")?;
+            .map_err(|e| anyhow::anyhow!("load record header: {:?}", e))?;
         if n != header_size {
             bail!(
                 "record header size {} does not match with loaded size {}",
@@ -401,6 +374,7 @@ mod tests {
 
     use super::*;
     use crate::cursor::BtreeCursor;
+    use crate::payload::SlicePayload;
     use crate::test_utils::*;
 
     const ONE: i64 = 1;
@@ -544,26 +518,6 @@ mod tests {
         );
     }
 
-    struct FakePayload<'a> {
-        buf: &'a [u8],
-    }
-
-    impl RecordPayload for FakePayload<'_> {
-        fn size(&self) -> u32 {
-            self.buf.len() as u32
-        }
-
-        fn buf(&self) -> &[u8] {
-            self.buf
-        }
-
-        fn load(&self, offset: usize, buf: &mut [u8]) -> anyhow::Result<usize> {
-            let n = buf.len().min(self.buf.len() - offset);
-            buf[..n].copy_from_slice(&self.buf[offset..offset + n]);
-            Ok(n)
-        }
-    }
-
     #[test]
     fn test_build_record() {
         let values = vec![
@@ -590,7 +544,8 @@ mod tests {
             Some(Value::Blob(Buffer::Owned(b"world".to_vec()))),
         ];
         let buf = build_record(&values.iter().map(|v| v.as_ref()).collect::<Vec<_>>());
-        let mut record = Record::parse(FakePayload { buf: &buf }).unwrap();
+        let payload = SlicePayload::new(&buf).unwrap();
+        let mut record = Record::parse(&payload).unwrap();
         for (i, value) in values.iter().enumerate() {
             assert_eq!(record.get(i).unwrap(), *value, "index {}", i);
         }
@@ -600,23 +555,40 @@ mod tests {
         let buf = build_record(&vec![None; 126]);
         assert_eq!(buf[0], 127);
         assert_eq!(&buf[1..], &[0; 126]);
-        assert_eq!(Record::parse(FakePayload { buf: &buf }).unwrap().len(), 126);
+        assert_eq!(
+            Record::parse(&SlicePayload::new(&buf).unwrap())
+                .unwrap()
+                .len(),
+            126
+        );
         let buf = build_record(&vec![None; 127]);
         assert_eq!(&buf[..2], &[129, 1]);
         assert_eq!(&buf[2..], &[0; 127]);
-        assert_eq!(Record::parse(FakePayload { buf: &buf }).unwrap().len(), 127);
+        assert_eq!(
+            Record::parse(&SlicePayload::new(&buf).unwrap())
+                .unwrap()
+                .len(),
+            127
+        );
         let buf = build_record(&vec![None; 128]);
         assert_eq!(&buf[..2], &[129, 2]);
         assert_eq!(&buf[2..], &[0; 128]);
-        assert_eq!(Record::parse(FakePayload { buf: &buf }).unwrap().len(), 128);
+        assert_eq!(
+            Record::parse(&SlicePayload::new(&buf).unwrap())
+                .unwrap()
+                .len(),
+            128
+        );
 
         // Multi byte header (text).
         let buf = build_record(&[Some(&Value::Text(Buffer::Owned(vec![0; 58])))]);
         assert_eq!(buf[..3], vec![3, 129, 1]);
         assert_eq!(buf.len() - 3, 58);
-        let mut record = Record::parse(FakePayload { buf: &buf }).unwrap();
         assert_eq!(
-            record.get(0).unwrap(),
+            Record::parse(&SlicePayload::new(&buf).unwrap())
+                .unwrap()
+                .get(0)
+                .unwrap(),
             Some(Value::Text(Buffer::Owned(vec![0; 58])))
         );
 
@@ -624,9 +596,11 @@ mod tests {
         let buf = build_record(&[Some(&Value::Blob(Buffer::Owned(vec![0; 58])))]);
         assert_eq!(buf[..3], vec![3, 129, 0]);
         assert_eq!(buf.len() - 3, 58);
-        let mut record = Record::parse(FakePayload { buf: &buf }).unwrap();
         assert_eq!(
-            record.get(0).unwrap(),
+            Record::parse(&SlicePayload::new(&buf).unwrap())
+                .unwrap()
+                .get(0)
+                .unwrap(),
             Some(Value::Blob(Buffer::Owned(vec![0; 58])))
         );
     }

@@ -20,6 +20,7 @@ use crate::pager::MemPage;
 use crate::pager::PageBuffer;
 use crate::pager::PageBufferMut;
 use crate::pager::PageId;
+use crate::payload::PayloadSize;
 use crate::utils::len_varint_buffer;
 use crate::utils::parse_varint;
 use crate::utils::u64_to_i64;
@@ -88,28 +89,6 @@ pub fn set_u16(buf: &mut [u8], offset: usize, value: u16) {
     buf[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
 }
 
-/// This is to guarantee that payload size is less than or equal to 2147483647
-/// (= i32::MAX).
-#[derive(Clone, Copy, Debug)]
-pub struct PayloadSize(u32);
-
-impl PayloadSize {
-    #[inline]
-    pub fn get(&self) -> u32 {
-        self.0
-    }
-}
-
-impl TryFrom<u64> for PayloadSize {
-    type Error = FileCorrupt;
-
-    fn try_from(value: u64) -> Result<Self, Self::Error> {
-        // The maximum payload length is 2147483647 (= i32::MAX).
-        check_corrupt!(value <= i32::MAX as u64, "payload size too large");
-        Ok(Self(value as u32))
-    }
-}
-
 /// Context containing constant values to parse btree page.
 #[derive(Debug)]
 pub struct BtreeContext {
@@ -148,7 +127,7 @@ impl BtreeContext {
     #[inline]
     pub fn n_local(&self, is_table: bool, payload_size: PayloadSize) -> u16 {
         let surplus = self.min_local as u32
-            + ((payload_size.0 - self.min_local as u32)
+            + ((payload_size.get() - self.min_local as u32)
                 % (self.usable_size - BTREE_OVERFLOW_PAGE_ID_BYTES as u32));
         if surplus <= self.max_local[is_table as usize] as u32 {
             surplus as u16
@@ -419,7 +398,9 @@ impl<'a> IndexCellKeyParser<'a> {
         let offset = offset + self.offset_in_cell as usize;
         let (payload_size, n) = parse_varint(&self.buffer[offset..])
             .ok_or(FileCorrupt("parse payload length varint"))?;
-        let payload_size: PayloadSize = payload_size.try_into()?;
+        let payload_size: PayloadSize = payload_size
+            .try_into()
+            .map_err(|_| FileCorrupt("payload size too large"))?;
         PayloadInfo::parse(self.ctx, false, self.buffer, offset + n, payload_size)
     }
 }
@@ -471,7 +452,9 @@ fn compute_table_leaf_cell_size(
     let n_local = if payload_size <= ctx.max_local(true) as u64 {
         payload_size as u16
     } else {
-        let payload_size: PayloadSize = payload_size.try_into()?;
+        let payload_size: PayloadSize = payload_size
+            .try_into()
+            .map_err(|_| FileCorrupt("payload size too large"))?;
         ctx.n_local(true, payload_size)
     };
     Ok(payload_size_length as u16 + key_length as u16 + n_local)
@@ -498,7 +481,9 @@ fn compute_index_leaf_cell_size(
     let n_local = if payload_size <= ctx.max_local(false) as u64 {
         payload_size as u16
     } else {
-        let payload_size: PayloadSize = payload_size.try_into()?;
+        let payload_size: PayloadSize = payload_size
+            .try_into()
+            .map_err(|_| FileCorrupt("payload size too large"))?;
         ctx.n_local(false, payload_size) + BTREE_OVERFLOW_PAGE_ID_BYTES as u16
     };
     Ok(payload_size_length as u16 + n_local)
@@ -577,14 +562,14 @@ impl PayloadInfo {
         offset: usize,
         payload_size: PayloadSize,
     ) -> ParseResult<Self> {
-        if payload_size.0 <= ctx.max_local(is_table) as u32 {
+        if payload_size.get() <= ctx.max_local(is_table) as u32 {
             check_corrupt!(
-                buffer.len() >= offset + payload_size.0 as usize,
+                buffer.len() >= offset + payload_size.get() as usize,
                 "payload length is too large in single cell"
             );
             Ok(Self {
                 payload_size,
-                local_range: offset..offset + payload_size.0 as usize,
+                local_range: offset..offset + payload_size.get() as usize,
                 overflow: None,
             })
         } else {
@@ -604,7 +589,7 @@ impl PayloadInfo {
                     local_range: offset..tail_payload,
                     overflow: Some(OverflowPage {
                         page_id: next_page_id,
-                        remaining_size: payload_size.0 as usize - payload_size_in_cell as usize,
+                        remaining_size: payload_size.get() as usize - payload_size_in_cell as usize,
                     }),
                 })
             } else {
@@ -625,7 +610,9 @@ pub fn parse_btree_leaf_table_cell(
         get_cell_offset(page, buffer, cell_idx, BTREE_PAGE_LEAF_HEADER_SIZE as u8).unwrap();
     let (payload_size, consumed1) =
         parse_varint(&buffer[cell_offset..]).ok_or(FileCorrupt("parse payload length varint"))?;
-    let payload_size = payload_size.try_into()?;
+    let payload_size = payload_size
+        .try_into()
+        .map_err(|_| FileCorrupt("payload size too large"))?;
     let (key, consumed2) =
         parse_varint(&buffer[cell_offset + consumed1..]).ok_or(FileCorrupt("parse key varint"))?;
     let key = u64_to_i64(key);
@@ -995,7 +982,7 @@ mod tests {
         let (key, payload_info) = parse_btree_leaf_table_cell(&bctx, &page1, &buffer1, 0).unwrap();
         let payload = &buffer1[payload_info.local_range.clone()];
         assert_eq!(key, 1);
-        assert_eq!(payload_info.payload_size.0 as usize, payload.len());
+        assert_eq!(payload_info.payload_size.get() as usize, payload.len());
         assert_eq!(
             payload,
             &[

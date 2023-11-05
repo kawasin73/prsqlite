@@ -17,6 +17,7 @@ mod cursor;
 mod header;
 mod pager;
 mod parser;
+mod payload;
 mod record;
 mod schema;
 #[cfg(test)]
@@ -56,6 +57,7 @@ use parser::ResultColumn;
 use parser::Select;
 use parser::Stmt;
 use parser::UnaryOp;
+use payload::Payload;
 use record::build_record;
 use record::parse_record;
 use record::parse_record_header;
@@ -876,7 +878,7 @@ impl<'conn> Rows<'conn> {
             let last_header = &headers[headers.len() - 1];
             let content_size =
                 last_header.1 + last_header.0.content_size() as usize - content_offset;
-            assert!(content_offset + content_size <= payload.size() as usize);
+            assert!(content_offset + content_size <= payload.size().get() as usize);
             use_local_buffer = payload.buf().len() >= (content_offset + content_size);
             if !use_local_buffer {
                 tmp_buf.resize(content_size, 0);

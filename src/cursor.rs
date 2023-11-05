@@ -32,7 +32,6 @@ use crate::btree::BtreePageType;
 use crate::btree::FileCorrupt;
 use crate::btree::IndexCellKeyParser;
 use crate::btree::PayloadInfo;
-use crate::btree::PayloadSize;
 use crate::btree::TableCellKeyParser;
 use crate::btree::BTREE_OVERFLOW_PAGE_ID_BYTES;
 use crate::btree::BTREE_PAGE_CELL_POINTER_SIZE;
@@ -42,6 +41,8 @@ use crate::pager::MemPage;
 use crate::pager::PageBuffer;
 use crate::pager::PageId;
 use crate::pager::Pager;
+use crate::payload::Payload;
+use crate::payload::PayloadSize;
 use crate::record::compare_record;
 use crate::utils::i64_to_u64;
 use crate::utils::len_varint_buffer;
@@ -50,20 +51,9 @@ use crate::value::ValueCmp;
 
 #[derive(Debug)]
 pub enum Error {
-    FileCorrupt {
-        page_id: PageId,
-        e: FileCorrupt,
-    },
-    Pager {
-        page_id: PageId,
-        e: PagerError,
-    },
+    FileCorrupt { page_id: PageId, e: FileCorrupt },
+    Pager { page_id: PageId, e: PagerError },
     AllocatePage(PagerError),
-    InvalidOffset {
-        page_id: PageId,
-        offset: usize,
-        payload_size: PayloadSize,
-    },
     NotTable,
     NotIndex,
     NotInitialized,
@@ -78,7 +68,6 @@ impl std::error::Error for Error {
             Self::FileCorrupt { e, .. } => Some(e),
             Self::Pager { e, .. } => Some(e),
             Self::AllocatePage(e) => Some(e),
-            Self::InvalidOffset { .. } => None,
             Self::NotTable => None,
             Self::NotIndex => None,
             Self::NotInitialized => None,
@@ -99,16 +88,6 @@ impl Display for Error {
                 f.write_fmt(format_args!("pager(page_id: {}): {}", page_id.get(), e))
             }
             Self::AllocatePage(e) => f.write_fmt(format_args!("allocate new page: {e}")),
-            Self::InvalidOffset {
-                page_id,
-                offset,
-                payload_size,
-            } => f.write_fmt(format_args!(
-                "invalid offset for payload (page_id: {}): offset: {}, payload_size: {}",
-                page_id.get(),
-                offset,
-                payload_size.get()
-            )),
             Self::NotTable => f.write_str("not a table page"),
             Self::NotIndex => f.write_str("not an index page"),
             Self::NotInitialized => f.write_str("cursor is not initialized"),
@@ -129,16 +108,16 @@ pub struct BtreePayload<'a> {
     payload_info: PayloadInfo,
 }
 
-impl<'a> BtreePayload<'a> {
+impl<'a> Payload<Error> for BtreePayload<'a> {
     /// The size of the payload.
-    pub fn size(&self) -> u32 {
-        self.payload_info.payload_size.get()
+    fn size(&self) -> PayloadSize {
+        self.payload_info.payload_size
     }
 
     /// The local payload.
     ///
     /// This may not be the entire payload if there is overflow page.
-    pub fn buf(&self) -> &[u8] {
+    fn buf(&self) -> &[u8] {
         &self.local_payload_buffer[self.payload_info.local_range.clone()]
     }
 
@@ -147,14 +126,8 @@ impl<'a> BtreePayload<'a> {
     /// Returns the number of bytes loaded.
     ///
     /// The offset must be less than the size of the payload.
-    pub fn load(&self, offset: usize, buf: &mut [u8]) -> Result<usize> {
-        if offset >= self.payload_info.payload_size.get() as usize {
-            return Err(Error::InvalidOffset {
-                page_id: self.local_page_id,
-                offset,
-                payload_size: self.payload_info.payload_size,
-            });
-        }
+    fn load(&self, offset: usize, buf: &mut [u8]) -> Result<usize> {
+        assert!(offset <= self.payload_info.payload_size.get() as usize);
         let mut n_loaded = 0;
         let mut offset = offset;
         let mut buf = buf;
@@ -1361,7 +1334,7 @@ mod tests {
         let (key, payload) = payload.unwrap();
         assert_eq!(key, 1);
         assert_eq!(payload.buf(), &[2, 8]);
-        assert_eq!(payload.size(), payload.buf().len() as u32);
+        assert_eq!(payload.size().get(), payload.buf().len() as u32);
         assert!(cursor.get_index_payload().is_err());
         drop(payload);
         assert_eq!(cursor.get_table_key().unwrap().unwrap(), 1);
@@ -1372,7 +1345,7 @@ mod tests {
         let (key, payload) = payload.unwrap();
         assert_eq!(key, 2);
         assert_eq!(payload.buf(), &[2, 9]);
-        assert_eq!(payload.size(), payload.buf().len() as u32);
+        assert_eq!(payload.size().get(), payload.buf().len() as u32);
         assert!(cursor.get_index_payload().is_err());
         drop(payload);
         assert_eq!(cursor.get_table_key().unwrap().unwrap(), 2);
@@ -1383,7 +1356,7 @@ mod tests {
         let (key, payload) = payload.unwrap();
         assert_eq!(key, 3);
         assert_eq!(payload.buf(), &[2, 1, 2]);
-        assert_eq!(payload.size(), payload.buf().len() as u32);
+        assert_eq!(payload.size().get(), payload.buf().len() as u32);
         assert!(cursor.get_index_payload().is_err());
         drop(payload);
         assert_eq!(cursor.get_table_key().unwrap().unwrap(), 3);
@@ -1421,7 +1394,7 @@ mod tests {
         assert!(payload.is_some());
         let payload = payload.unwrap();
         assert_eq!(payload.buf(), &[3, 8, 1, 2]);
-        assert_eq!(payload.size(), payload.buf().len() as u32);
+        assert_eq!(payload.size().get(), payload.buf().len() as u32);
         assert!(cursor.get_table_payload().is_err());
         drop(payload);
 
@@ -1430,7 +1403,7 @@ mod tests {
         assert!(payload.is_some());
         let payload = payload.unwrap();
         assert_eq!(payload.buf(), &[3, 9, 9]);
-        assert_eq!(payload.size(), payload.buf().len() as u32);
+        assert_eq!(payload.size().get(), payload.buf().len() as u32);
         assert!(cursor.get_table_payload().is_err());
         drop(payload);
 
@@ -1439,7 +1412,7 @@ mod tests {
         assert!(payload.is_some());
         let payload = payload.unwrap();
         assert_eq!(payload.buf(), &[3, 1, 1, 2, 3]);
-        assert_eq!(payload.size(), payload.buf().len() as u32);
+        assert_eq!(payload.size().get(), payload.buf().len() as u32);
         assert!(cursor.get_table_payload().is_err());
         drop(payload);
 
@@ -1573,8 +1546,8 @@ mod tests {
             assert!(payload.is_some());
             let (rowid, payload) = payload.unwrap();
             assert_eq!(rowid, i + 1);
-            assert!(payload.size() > BUFFER_SIZE as u32);
-            assert_eq!(payload.size(), payload.buf().len() as u32);
+            assert!(payload.size().get() > BUFFER_SIZE as u32);
+            assert_eq!(payload.size().get(), payload.buf().len() as u32);
             let mut table_record = parse_record(&payload).unwrap();
             assert_eq!(table_record.get(0).unwrap(), Some(Value::Integer(i)));
             drop(payload);
@@ -1585,8 +1558,8 @@ mod tests {
             let payload = payload.unwrap();
             let mut index_record = parse_record(&payload).unwrap();
             assert_eq!(index_record.get(1).unwrap(), Some(Value::Integer(i + 1)));
-            assert!(payload.size() > BUFFER_SIZE as u32, "{}", i);
-            assert_eq!(payload.size(), payload.buf().len() as u32);
+            assert!(payload.size().get() > BUFFER_SIZE as u32, "{}", i);
+            assert_eq!(payload.size().get(), payload.buf().len() as u32);
             drop(payload);
             index1_cursor.move_next().unwrap();
 
@@ -1595,7 +1568,7 @@ mod tests {
             let mut index_record = parse_record(&payload).unwrap();
             assert_eq!(index_record.get(0).unwrap(), Some(Value::Integer(i)));
             assert_eq!(index_record.get(1).unwrap(), Some(Value::Integer(i + 1)));
-            assert_eq!(payload.size(), payload.buf().len() as u32);
+            assert_eq!(payload.size().get(), payload.buf().len() as u32);
             drop(payload);
             index2_cursor.move_next().unwrap();
         }
@@ -1606,7 +1579,7 @@ mod tests {
             assert_eq!(rowid, i + 1);
             let col_buf = (i as u16).to_be_bytes();
             assert_eq!(payload.buf(), &[3, 2, 14, col_buf[0], col_buf[1], 0xff]);
-            assert_eq!(payload.size(), payload.buf().len() as u32);
+            assert_eq!(payload.size().get(), payload.buf().len() as u32);
             drop(payload);
             assert_eq!(table_cursor.get_table_key().unwrap().unwrap(), i + 1);
             table_cursor.move_next().unwrap();
@@ -1617,7 +1590,7 @@ mod tests {
             assert_eq!(index_record.get(1).unwrap(), Some(Value::Integer(i + 1)));
             let rowid_buf = (i as u16 + 1).to_be_bytes();
             assert_eq!(payload.buf(), &[3, 14, 2, 0xff, rowid_buf[0], rowid_buf[1]]);
-            assert_eq!(payload.size(), payload.buf().len() as u32);
+            assert_eq!(payload.size().get(), payload.buf().len() as u32);
             drop(payload);
             index1_cursor.move_next().unwrap();
 
@@ -1626,7 +1599,7 @@ mod tests {
             let mut index_record = parse_record(&payload).unwrap();
             assert_eq!(index_record.get(0).unwrap(), Some(Value::Integer(i)));
             assert_eq!(index_record.get(1).unwrap(), Some(Value::Integer(i + 1)));
-            assert_eq!(payload.size(), payload.buf().len() as u32);
+            assert_eq!(payload.size().get(), payload.buf().len() as u32);
             drop(payload);
             index2_cursor.move_next().unwrap();
         }
@@ -1682,7 +1655,7 @@ mod tests {
         let mut index_record = parse_record(&payload).unwrap();
         assert_eq!(index_record.get(0).unwrap(), Some(Value::Integer(2000)));
         assert_eq!(index_record.get(1).unwrap(), Some(Value::Integer(2001)));
-        assert_eq!(payload.size(), payload.buf().len() as u32);
+        assert_eq!(payload.size().get(), payload.buf().len() as u32);
         drop(payload);
 
         assert!(index2_cursor
@@ -1696,7 +1669,7 @@ mod tests {
         let mut index_record = parse_record(&payload).unwrap();
         assert_eq!(index_record.get(0).unwrap(), Some(Value::Integer(3000)));
         assert_eq!(index_record.get(1).unwrap(), Some(Value::Integer(3001)));
-        assert_eq!(payload.size(), payload.buf().len() as u32);
+        assert_eq!(payload.size().get(), payload.buf().len() as u32);
         drop(payload);
 
         assert!(!index2_cursor
@@ -1710,7 +1683,7 @@ mod tests {
         let mut index_record = parse_record(&payload).unwrap();
         assert_eq!(index_record.get(0).unwrap(), Some(Value::Integer(3001)));
         assert_eq!(index_record.get(1).unwrap(), Some(Value::Integer(3002)));
-        assert_eq!(payload.size(), payload.buf().len() as u32);
+        assert_eq!(payload.size().get(), payload.buf().len() as u32);
         drop(payload);
     }
 
@@ -1742,7 +1715,7 @@ mod tests {
         let (_, payload) = payload.unwrap();
 
         assert_eq!(payload.buf().len(), 1820);
-        assert_eq!(payload.size(), 10004);
+        assert_eq!(payload.size().get(), 10004);
 
         let mut payload_buf = vec![0; 10010];
         let n = payload.load(0, &mut payload_buf).unwrap();
@@ -1763,8 +1736,8 @@ mod tests {
         assert_eq!(n, 100);
         assert_eq!(payload_buf[..100], buf[2996..3096]);
 
-        let result = payload.load(10004, &mut payload_buf);
-        assert!(result.is_err());
+        let n = payload.load(10003, &mut payload_buf).unwrap();
+        assert_eq!(n, 1);
 
         let index_page_id = find_index_page_id("index1", file.path());
 
@@ -1776,7 +1749,7 @@ mod tests {
         let payload = payload.unwrap();
 
         assert_eq!(payload.buf().len(), 489);
-        assert_eq!(payload.size(), 10004 + 1);
+        assert_eq!(payload.size().get(), 10004 + 1);
 
         let mut payload_buf = vec![0; 10010];
         let n = payload.load(0, &mut payload_buf).unwrap();
@@ -1797,8 +1770,8 @@ mod tests {
         assert_eq!(n, 100);
         assert_eq!(payload_buf[..100], buf[2996..3096]);
 
-        let result = payload.load(10005, &mut payload_buf);
-        assert!(result.is_err());
+        let n = payload.load(10004, &mut payload_buf).unwrap();
+        assert_eq!(n, 1);
     }
 
     #[test]
@@ -2659,7 +2632,7 @@ mod tests {
             cursor.table_move_to(1).unwrap();
             let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
             assert_eq!(key, 1);
-            assert_eq!(payload.size() as usize, max_local);
+            assert_eq!(payload.size().get() as usize, max_local);
             assert_eq!(payload.buf().len(), max_local);
             assert_eq!(payload.buf(), &data[..max_local]);
         }
@@ -2673,7 +2646,7 @@ mod tests {
             cursor.table_move_to(2).unwrap();
             let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
             assert_eq!(key, 2);
-            assert_eq!(payload.size() as usize, payload_size);
+            assert_eq!(payload.size().get() as usize, payload_size);
             assert!(payload.buf().len() < payload_size);
             let mut buf = vec![0; payload_size + 1];
             let loaded = payload.load(0, &mut buf).unwrap();
@@ -2702,7 +2675,7 @@ mod tests {
             cursor.table_move_to(3).unwrap();
             let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
             assert_eq!(key, 3);
-            assert_eq!(payload.size() as usize, payload_size);
+            assert_eq!(payload.size().get() as usize, payload_size);
             assert!(payload.buf().len() < payload_size);
             let mut buf = vec![0; payload_size + 1];
             let loaded = payload.load(0, &mut buf).unwrap();
@@ -2719,7 +2692,7 @@ mod tests {
             cursor.table_move_to(4).unwrap();
             let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
             assert_eq!(key, 4);
-            assert_eq!(payload.size() as usize, payload_size);
+            assert_eq!(payload.size().get() as usize, payload_size);
             assert!(payload.buf().len() < payload_size);
             let mut buf = vec![0; payload_size + 1];
             let loaded = payload.load(0, &mut buf).unwrap();
@@ -3234,7 +3207,7 @@ mod tests {
         cursor.move_to_first().unwrap();
         let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
         assert_eq!(key, 1);
-        assert_eq!(payload.buf().len(), payload.size() as usize);
+        assert_eq!(payload.buf().len(), payload.size().get() as usize);
         let payload1 = payload.buf().to_vec();
         drop(payload);
 
@@ -3428,7 +3401,7 @@ mod tests {
             cursor.index_insert(&comparator, &record_payload).unwrap();
             cursor.index_move_to(&comparator).unwrap();
             let payload = cursor.get_index_payload().unwrap().unwrap();
-            assert_eq!(payload.size() as usize, max_local);
+            assert_eq!(payload.size().get() as usize, max_local);
             assert_eq!(payload.buf().len(), max_local);
             assert_eq!(payload.buf(), &record_payload);
         }
@@ -3445,7 +3418,7 @@ mod tests {
             cursor.index_insert(&comparator, &record_payload).unwrap();
             cursor.index_move_to(&comparator).unwrap();
             let payload = cursor.get_index_payload().unwrap().unwrap();
-            assert_eq!(payload.size() as usize, payload_size);
+            assert_eq!(payload.size().get() as usize, payload_size);
             assert!(payload.buf().len() < payload_size);
             let mut buf = vec![0; payload_size + 1];
             let loaded = payload.load(0, &mut buf).unwrap();
@@ -3477,7 +3450,7 @@ mod tests {
             cursor.index_insert(&comparator, &record_payload).unwrap();
             cursor.index_move_to(&comparator).unwrap();
             let payload = cursor.get_index_payload().unwrap().unwrap();
-            assert_eq!(payload.size() as usize, payload_size);
+            assert_eq!(payload.size().get() as usize, payload_size);
             assert!(payload.buf().len() < payload_size);
             let mut buf = vec![0; payload_size + 1];
             let loaded = payload.load(0, &mut buf).unwrap();
@@ -3497,7 +3470,7 @@ mod tests {
             cursor.index_insert(&comparator, &record_payload).unwrap();
             cursor.index_move_to(&comparator).unwrap();
             let payload = cursor.get_index_payload().unwrap().unwrap();
-            assert_eq!(payload.size() as usize, payload_size);
+            assert_eq!(payload.size().get() as usize, payload_size);
             assert!(payload.buf().len() < payload_size);
             let mut buf = vec![0; payload_size + 1];
             let loaded = payload.load(0, &mut buf).unwrap();
