@@ -175,6 +175,7 @@ impl Connection {
         match statement {
             Stmt::Select(select) => Ok(Statement::Query(self.prepare_select(select)?)),
             Stmt::Insert(insert) => Ok(Statement::Execution(self.prepare_insert(insert)?)),
+            Stmt::Delete(_) => todo!("implement delete statement"),
         }
     }
 

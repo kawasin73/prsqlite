@@ -134,6 +134,7 @@ impl<'a> Parser<'a> {
 pub enum Stmt<'a> {
     Select(Select<'a>),
     Insert(Insert<'a>),
+    Delete(Delete<'a>),
 }
 
 pub fn parse_sql<'a>(p: &mut Parser<'a>) -> Result<'a, Stmt<'a>> {
@@ -145,6 +146,10 @@ pub fn parse_sql<'a>(p: &mut Parser<'a>) -> Result<'a, Stmt<'a>> {
         Some(Token::Insert) => {
             let select = parse_insert(p)?;
             Ok(Stmt::Insert(select))
+        }
+        Some(Token::Delete) => {
+            let delete = parse_delete(p)?;
+            Ok(Stmt::Delete(delete))
         }
         _ => Err(p.error("no statement")),
     }
@@ -577,6 +582,38 @@ pub fn parse_insert<'a>(p: &mut Parser<'a>) -> Result<'a, Insert<'a>> {
         columns,
         values,
     })
+}
+
+#[derive(Debug)]
+pub struct Delete<'a> {
+    pub table_name: MaybeQuotedBytes<'a>,
+    pub filter: Option<Expr<'a>>,
+}
+
+// Parse DELETE statement.
+//
+// https://www.sqlite.org/lang_delete.html
+pub fn parse_delete<'a>(p: &mut Parser<'a>) -> Result<'a, Delete<'a>> {
+    let Some(Token::Delete) = p.peek() else {
+        return Err(p.error("no delete"));
+    };
+    let Some(Token::From) = p.next() else {
+        return Err(p.error("no from"));
+    };
+    let Some(Token::Identifier(table_name)) = p.next() else {
+        return Err(p.error("no table_name"));
+    };
+    let table_name = *table_name;
+
+    let filter = if let Some(Token::Where) = p.next() {
+        p.next();
+        let expr = parse_expr(p)?;
+        Some(expr)
+    } else {
+        None
+    };
+
+    Ok(Delete { table_name, filter })
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -1229,6 +1266,42 @@ mod tests {
         assert_eq!(r.unwrap_err().cursor(), 25);
         // no table name.
         let r = parse_insert(&mut Parser::new(b"insert into (col) values (1)"));
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().cursor(), 12);
+    }
+
+    #[test]
+    fn test_parse_delete_all() {
+        let input = b"delete from foo";
+        let mut parser = Parser::new(input);
+        let delete = parse_delete(&mut parser).unwrap();
+        assert_eq!(parser.n_consumed(), input.len());
+        assert_eq!(delete.table_name, b"foo".as_slice().into());
+        assert!(delete.filter.is_none());
+    }
+
+    #[test]
+    fn test_parse_delete_where() {
+        let input = b"delete from foo where id = 5";
+        let mut parser = Parser::new(input);
+        let delete = parse_delete(&mut parser).unwrap();
+        assert_eq!(parser.n_consumed(), input.len());
+        assert_eq!(delete.table_name, b"foo".as_slice().into());
+        assert!(delete.filter.is_some());
+        assert_eq!(
+            delete.filter.unwrap(),
+            Expr::BinaryOperator {
+                operator: BinaryOp::Compare(CompareOp::Eq),
+                left: Box::new(Expr::Column(b"id".as_slice().into())),
+                right: Box::new(Expr::Integer(5)),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_delete_fail() {
+        // no table name.
+        let r = parse_delete(&mut Parser::new(b"delete from ;"));
         assert!(r.is_err());
         assert_eq!(r.unwrap_err().cursor(), 12);
     }
