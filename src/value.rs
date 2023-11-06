@@ -384,6 +384,34 @@ fn cmp_int_real(i: i64, r: f64) -> Ordering {
     Ordering::Equal
 }
 
+#[derive(Debug, Clone)]
+pub enum ConstantValue {
+    Integer(i64),
+    Real(f64),
+    Text(Vec<u8>),
+    Blob(Vec<u8>),
+}
+
+impl ConstantValue {
+    pub fn copy_from(value: Value) -> Self {
+        match value {
+            Value::Integer(i) => Self::Integer(i),
+            Value::Real(f) => Self::Real(f),
+            Value::Text(buf) => Self::Text(buf.into_vec()),
+            Value::Blob(buf) => Self::Blob(buf.into_vec()),
+        }
+    }
+
+    pub fn as_value(&self) -> Value {
+        match self {
+            Self::Integer(i) => Value::Integer(*i),
+            Self::Real(f) => Value::Real(*f),
+            Self::Text(text) => Value::Text(text.as_slice().into()),
+            Self::Blob(blob) => Value::Blob(blob.as_slice().into()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -14,6 +14,7 @@
 
 mod btree;
 mod cursor;
+mod expression;
 mod header;
 mod pager;
 mod parser;
@@ -39,6 +40,8 @@ use anyhow::Context;
 use btree::BtreeContext;
 use cursor::BtreeCursor;
 use cursor::BtreePayload;
+use expression::DataContext;
+use expression::Expression;
 use header::DatabaseHeader;
 use header::DatabaseHeaderMut;
 use header::DATABASE_HEADER_SIZE;
@@ -50,25 +53,21 @@ use parser::expect_semicolon;
 use parser::parse_sql;
 use parser::BinaryOp;
 use parser::CompareOp;
-use parser::Expr;
 use parser::Insert;
 use parser::Parser;
 use parser::ResultColumn;
 use parser::Select;
 use parser::Stmt;
-use parser::UnaryOp;
 use payload::Payload;
 use record::parse_record;
 use record::parse_record_header;
 use record::RecordPayload;
 use record::SerialType;
-use schema::calc_collation;
-use schema::calc_type_affinity;
 use schema::ColumnNumber;
 use schema::Schema;
-use schema::Table;
 pub use value::Buffer;
 use value::Collation;
+use value::ConstantValue;
 use value::TypeAffinity;
 pub use value::Value;
 use value::ValueCmp;
@@ -435,276 +434,6 @@ impl Drop for WriteTransaction<'_> {
     }
 }
 
-#[derive(Debug, Clone)]
-enum ConstantValue {
-    Integer(i64),
-    Real(f64),
-    Text(Vec<u8>),
-    Blob(Vec<u8>),
-}
-
-impl ConstantValue {
-    fn copy_from(value: Value) -> Self {
-        match value {
-            Value::Integer(i) => Self::Integer(i),
-            Value::Real(f) => Self::Real(f),
-            Value::Text(buf) => Self::Text(buf.into_vec()),
-            Value::Blob(buf) => Self::Blob(buf.into_vec()),
-        }
-    }
-
-    fn as_value(&self) -> Value {
-        match self {
-            Self::Integer(i) => Value::Integer(*i),
-            Self::Real(f) => Value::Real(*f),
-            Self::Text(text) => Value::Text(text.as_slice().into()),
-            Self::Blob(blob) => Value::Blob(blob.as_slice().into()),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-enum CollateOrigin {
-    Column,
-    Expression,
-}
-
-fn filter_expression_collation(
-    collation: Option<(&Collation, CollateOrigin)>,
-) -> Option<(&Collation, CollateOrigin)> {
-    match collation {
-        Some((_, CollateOrigin::Expression)) => collation,
-        _ => None,
-    }
-}
-
-#[derive(Debug, Clone)]
-enum Expression {
-    Column((ColumnNumber, TypeAffinity, Collation)),
-    UnaryOperator {
-        operator: UnaryOp,
-        expr: Box<Expression>,
-    },
-    Collate {
-        expr: Box<Expression>,
-        collation: Collation,
-    },
-    BinaryOperator {
-        operator: BinaryOp,
-        left: Box<Expression>,
-        right: Box<Expression>,
-    },
-    Cast {
-        expr: Box<Expression>,
-        type_affinity: TypeAffinity,
-    },
-    Null,
-    Const(ConstantValue),
-}
-
-type ExecutionResult<'a> = (
-    Option<Value<'a>>,
-    Option<TypeAffinity>,
-    Option<(&'a Collation, CollateOrigin)>,
-);
-
-impl Expression {
-    fn from(expr: Expr, table: Option<&Table>) -> anyhow::Result<Self> {
-        match expr {
-            Expr::Null => Ok(Self::Null),
-            Expr::Integer(i) => Ok(Self::Const(ConstantValue::Integer(i))),
-            Expr::Real(f) => Ok(Self::Const(ConstantValue::Real(f))),
-            Expr::Text(text) => Ok(Self::Const(ConstantValue::Text(text.dequote()))),
-            Expr::Blob(hex) => Ok(Self::Const(ConstantValue::Blob(hex.decode()))),
-            Expr::UnaryOperator { operator, expr } => Ok(Self::UnaryOperator {
-                operator,
-                expr: Box::new(Self::from(*expr, table)?),
-            }),
-            Expr::Collate {
-                expr,
-                collation_name,
-            } => Ok(Self::Collate {
-                expr: Box::new(Self::from(*expr, table)?),
-                collation: calc_collation(&collation_name)?,
-            }),
-            Expr::BinaryOperator {
-                operator,
-                left,
-                right,
-            } => Ok(Self::BinaryOperator {
-                operator,
-                left: Box::new(Self::from(*left, table)?),
-                right: Box::new(Self::from(*right, table)?),
-            }),
-            Expr::Column(column_name) => {
-                if let Some(table) = table {
-                    let column_name = column_name.dequote();
-                    table
-                        .get_column(&column_name)
-                        .map(Self::Column)
-                        .ok_or(anyhow::anyhow!(
-                            "column not found: {}",
-                            std::str::from_utf8(&column_name).unwrap_or_default()
-                        ))
-                } else {
-                    bail!("no table context is not specified");
-                }
-            }
-            Expr::Cast { expr, type_name } => Ok(Self::Cast {
-                expr: Box::new(Self::from(*expr, table)?),
-                type_affinity: calc_type_affinity(&type_name),
-            }),
-        }
-    }
-
-    /// Execute the expression and return the result.
-    ///
-    /// TODO: The row should be a context object.
-    fn execute<'a>(&'a self, row: Option<&'a RowData>) -> anyhow::Result<ExecutionResult<'a>> {
-        match self {
-            Self::Column((idx, affinity, collation)) => {
-                if let Some(row) = row {
-                    Ok((
-                        row.get_column_value(idx)?,
-                        Some(*affinity),
-                        Some((collation, CollateOrigin::Column)),
-                    ))
-                } else {
-                    bail!("column value is not available");
-                }
-            }
-            Self::UnaryOperator { operator, expr } => {
-                let (value, _, collation) = expr.execute(row)?;
-                let value = match operator {
-                    UnaryOp::BitNot => value.map(|v| Value::Integer(!v.as_integer())),
-                    UnaryOp::Minus => value.map(|v| match v {
-                        Value::Integer(i) => Value::Integer(-i),
-                        Value::Real(d) => Value::Real(-d),
-                        Value::Text(_) | Value::Blob(_) => Value::Integer(0),
-                    }),
-                };
-                Ok((value, None, filter_expression_collation(collation)))
-            }
-            Self::Collate { expr, collation } => {
-                let (value, affinity, _) = expr.execute(row)?;
-                Ok((
-                    value,
-                    // Type affinity is preserved.
-                    affinity,
-                    Some((collation, CollateOrigin::Expression)),
-                ))
-            }
-            Self::BinaryOperator {
-                operator,
-                left,
-                right,
-            } => {
-                let (left_value, left_affinity, left_collation) = left.execute(row)?;
-                let (right_value, right_affinity, right_collation) = right.execute(row)?;
-
-                // TODO: Confirm whether collation is preserved after NULL.
-                let (mut left_value, mut right_value) = match (left_value, right_value) {
-                    (None, _) | (_, None) => return Ok((None, None, None)),
-                    (Some(left_value), Some(right_value)) => (left_value, right_value),
-                };
-
-                let collation = match (left_collation, right_collation) {
-                    (None, _) => right_collation,
-                    (Some((_, CollateOrigin::Column)), Some((_, CollateOrigin::Expression))) => {
-                        right_collation
-                    }
-                    _ => left_collation,
-                };
-                let next_collation = filter_expression_collation(collation);
-
-                match operator {
-                    BinaryOp::Compare(compare_op) => {
-                        // Type Conversions Prior To Comparison
-                        match (left_affinity, right_affinity) {
-                            (
-                                Some(TypeAffinity::Integer)
-                                | Some(TypeAffinity::Real)
-                                | Some(TypeAffinity::Numeric),
-                                Some(TypeAffinity::Text) | Some(TypeAffinity::Blob) | None,
-                            ) => {
-                                right_value = right_value.apply_numeric_affinity();
-                            }
-                            (
-                                Some(TypeAffinity::Text) | Some(TypeAffinity::Blob) | None,
-                                Some(TypeAffinity::Integer)
-                                | Some(TypeAffinity::Real)
-                                | Some(TypeAffinity::Numeric),
-                            ) => {
-                                left_value = left_value.apply_numeric_affinity();
-                            }
-                            (Some(TypeAffinity::Text), None) => {
-                                right_value = right_value.apply_text_affinity();
-                            }
-                            (None, Some(TypeAffinity::Text)) => {
-                                left_value = left_value.apply_text_affinity();
-                            }
-                            _ => {}
-                        }
-
-                        let cmp = ValueCmp::new(
-                            &left_value,
-                            collation.map(|(c, _)| c).unwrap_or(&DEFAULT_COLLATION),
-                        )
-                        .compare(&right_value);
-
-                        let result = match compare_op {
-                            CompareOp::Eq => cmp == Ordering::Equal,
-                            CompareOp::Ne => cmp != Ordering::Equal,
-                            CompareOp::Lt => cmp == Ordering::Less,
-                            CompareOp::Le => cmp != Ordering::Greater,
-                            CompareOp::Gt => cmp == Ordering::Greater,
-                            CompareOp::Ge => cmp != Ordering::Less,
-                        };
-                        if result {
-                            Ok((Some(Value::Integer(1)), None, next_collation))
-                        } else {
-                            Ok((Some(Value::Integer(0)), None, next_collation))
-                        }
-                    }
-                    BinaryOp::Concat => {
-                        // Both operands are forcibly converted to text before concatination. Both
-                        // are not null.
-                        let left = left_value.force_text_buffer();
-                        let right = right_value.force_text_buffer();
-                        let mut buffer = match left {
-                            Buffer::Owned(buf) => buf,
-                            Buffer::Ref(buf) => {
-                                let mut buffer = Vec::with_capacity(buf.len() + right.len());
-                                buffer.extend(buf);
-                                buffer
-                            }
-                        };
-                        buffer.extend(right.iter());
-                        Ok((
-                            Some(Value::Text(Buffer::Owned(buffer))),
-                            None,
-                            next_collation,
-                        ))
-                    }
-                }
-            }
-            Self::Cast {
-                expr,
-                type_affinity,
-            } => {
-                let (value, _affinity, collation) = expr.execute(row)?;
-                Ok((
-                    value.map(|v| v.force_apply_type_affinity(*type_affinity)),
-                    Some(*type_affinity),
-                    collation,
-                ))
-            }
-            Self::Null => Ok((None, None, None)),
-            Self::Const(value) => Ok((Some(value.as_value()), None, None)),
-        }
-    }
-}
-
 struct IndexInfo {
     page_id: PageId,
     keys: Vec<(ConstantValue, Collation)>,
@@ -975,7 +704,7 @@ impl<'conn> Rows<'conn> {
     }
 }
 
-struct RowData<'a> {
+pub struct RowData<'a> {
     rowid: i64,
     payload: BtreePayload<'a>,
     headers: Vec<(SerialType, usize)>,
@@ -984,7 +713,7 @@ struct RowData<'a> {
     tmp_buf: Vec<u8>,
 }
 
-impl<'a> RowData<'a> {
+impl<'a> DataContext for RowData<'a> {
     fn get_column_value(&self, column_idx: &ColumnNumber) -> anyhow::Result<Option<Value>> {
         match column_idx {
             ColumnNumber::Column(idx) => {
@@ -1073,7 +802,7 @@ impl<'conn> InsertStatement<'conn> {
         for record in self.records.iter() {
             let mut rowid = None;
             if let Some(rowid_expr) = &record.rowid {
-                let (rowid_value, _, _) = rowid_expr.execute(None)?;
+                let (rowid_value, _, _) = rowid_expr.execute::<RowData>(None)?;
                 // NULL then fallback to generate new rowid.
                 if let Some(rowid_value) = rowid_value {
                     match rowid_value.apply_numeric_affinity() {
@@ -1105,7 +834,7 @@ impl<'conn> InsertStatement<'conn> {
 
             let mut columns = Vec::with_capacity(record.columns.len());
             for (expr, type_affinity) in record.columns.iter() {
-                let (value, _, _) = expr.execute(None)?;
+                let (value, _, _) = expr.execute::<RowData>(None)?;
                 let value = value.map(|v| v.apply_affinity(*type_affinity));
                 columns.push(value);
             }
