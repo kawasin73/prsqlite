@@ -143,6 +143,11 @@ pub struct BtreePageType(u8);
 
 impl BtreePageType {
     #[inline]
+    pub fn leaf_type(&self) -> Self {
+        Self(self.0 | LEAF_FLAG)
+    }
+
+    #[inline]
     pub fn interior_type(&self) -> Self {
         Self(self.0 & !LEAF_FLAG)
     }
@@ -194,6 +199,30 @@ impl BtreePageType {
                 compute_index_leaf_cell_size
             } else {
                 compute_index_interior_cell_size
+            }
+        } else {
+            unreachable!("invalid page type must be asserted");
+        }
+    }
+
+    pub fn compute_overflow_page_fn(
+        &self,
+    ) -> fn(
+        ctx: &BtreeContext,
+        buffer: &PageBuffer,
+        cell_offset: usize,
+    ) -> ParseResult<Option<OverflowPage>> {
+        if self.is_table() {
+            if self.is_leaf() {
+                parse_btree_table_leaf_overflow_page_id
+            } else {
+                unreachable!("table interior page does not have overflow page id");
+            }
+        } else if self.is_index() {
+            if self.is_leaf() {
+                parse_btree_index_leaf_overflow_page_id
+            } else {
+                parse_btree_index_interior_overflow_page_id
             }
         } else {
             unreachable!("invalid page type must be asserted");
@@ -600,8 +629,56 @@ impl PayloadInfo {
     }
 }
 
+fn parse_btree_table_leaf_overflow_page_id(
+    ctx: &BtreeContext,
+    buffer: &PageBuffer,
+    cell_offset: usize,
+) -> ParseResult<Option<OverflowPage>> {
+    let (payload_size, consumed1) =
+        parse_varint(&buffer[cell_offset..]).ok_or(FileCorrupt("parse payload length varint"))?;
+    let payload_size = payload_size
+        .try_into()
+        .map_err(|_| FileCorrupt("payload size too large"))?;
+    let consumed2 = len_varint_buffer(&buffer[cell_offset + consumed1..])
+        .ok_or(FileCorrupt("parse key varint"))?;
+
+    let payload = PayloadInfo::parse(
+        ctx,
+        /* is_table */ true,
+        buffer,
+        cell_offset + consumed1 + consumed2,
+        payload_size,
+    )?;
+
+    Ok(payload.overflow)
+}
+
+fn parse_btree_index_leaf_overflow_page_id(
+    ctx: &BtreeContext,
+    buffer: &PageBuffer,
+    cell_offset: usize,
+) -> ParseResult<Option<OverflowPage>> {
+    let (payload_size, n) =
+        parse_varint(&buffer[cell_offset..]).ok_or(FileCorrupt("parse payload length varint"))?;
+    let payload_size: PayloadSize = payload_size
+        .try_into()
+        .map_err(|_| FileCorrupt("payload size too large"))?;
+
+    let payload = PayloadInfo::parse(ctx, false, buffer, cell_offset + n, payload_size)?;
+
+    Ok(payload.overflow)
+}
+
+fn parse_btree_index_interior_overflow_page_id(
+    ctx: &BtreeContext,
+    buffer: &PageBuffer,
+    cell_offset: usize,
+) -> ParseResult<Option<OverflowPage>> {
+    parse_btree_index_leaf_overflow_page_id(ctx, buffer, cell_offset + 4)
+}
+
 /// Parses a b-tree table leaf page.
-pub fn parse_btree_leaf_table_cell(
+pub fn parse_btree_table_leaf_cell(
     ctx: &BtreeContext,
     page: &MemPage,
     buffer: &PageBuffer,
@@ -977,7 +1054,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_btree_leaf_table_cell() {
+    fn test_parse_btree_table_leaf_cell() {
         let file = create_sqlite_database(&["CREATE TABLE example(col);"]);
         let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
         let page1 = pager.get_page(PAGE_ID_1).unwrap();
@@ -986,7 +1063,7 @@ mod tests {
         let page1_header = BtreePageHeader::from_page(&page1, &buffer1);
         assert_eq!(page1_header.n_cells(), 1);
 
-        let (key, payload_info) = parse_btree_leaf_table_cell(&bctx, &page1, &buffer1, 0).unwrap();
+        let (key, payload_info) = parse_btree_table_leaf_cell(&bctx, &page1, &buffer1, 0).unwrap();
         let payload = &buffer1[payload_info.local_range.clone()];
         assert_eq!(key, 1);
         assert_eq!(payload_info.payload_size.get() as usize, payload.len());
@@ -1020,7 +1097,7 @@ mod tests {
         let buffer = page.buffer();
         assert_eq!(BtreePageHeader::from_page(&page, &buffer).n_cells(), 1);
 
-        let (_, payload_info) = parse_btree_leaf_table_cell(&bctx, &page, &buffer, 0).unwrap();
+        let (_, payload_info) = parse_btree_table_leaf_cell(&bctx, &page, &buffer, 0).unwrap();
 
         let mut payload = &buffer[payload_info.local_range.clone()];
         let (header_size, c1) = unsafe_parse_varint(payload);

@@ -318,7 +318,6 @@ impl Pager {
     /// Delete a page and add it to the freelist.
     ///
     /// TODO: Shrink the database file if the page is the tail.
-    #[allow(dead_code)]
     pub fn delete_page(&self, page_id: PageId) -> Result<()> {
         if page_id == PAGE_ID_1 || page_id.get() > self.n_pages.get() {
             return Err(Error::InvalidPageId);
@@ -454,6 +453,14 @@ impl Pager {
         self.n_pages.get()
     }
 
+    /// The number of free pages in the database.
+    ///
+    /// This is used by test only.
+    #[allow(dead_code)]
+    pub fn num_free_pages(&self) -> u32 {
+        self.n_freelist_pages.get()
+    }
+
     #[inline]
     fn page_offset(&self, page_id: PageId) -> u64 {
         (page_id.get() - 1) as u64 * self.cache.pagesize as u64
@@ -466,6 +473,7 @@ pub struct MemPage {
 }
 
 impl MemPage {
+    #[inline(always)]
     pub fn buffer(&self) -> PageBuffer {
         PageBuffer(self.page.borrow())
     }
