@@ -46,16 +46,26 @@ pub fn create_pager(file: File) -> anyhow::Result<Pager> {
     let mut header_buf = [0_u8; DATABASE_HEADER_SIZE];
     file.read_exact_at(&mut header_buf, 0)?;
     let header = DatabaseHeader::from(&header_buf);
-    Ok(Pager::new(file, header.n_pages(), header.pagesize())?)
+    Ok(Pager::new(
+        file,
+        header.n_pages(),
+        header.pagesize(),
+        header.pagesize() - header.reserved() as u32,
+        header.first_freelist_trunk_page_id(),
+        header.n_freelist_pages(),
+    )?)
 }
 
-pub fn create_empty_pager(file_content: &[u8], pagesize: u32) -> Pager {
+pub fn create_empty_pager(file_content: &[u8], pagesize: u32, usable_size: u32) -> Pager {
     let file = NamedTempFile::new().unwrap();
     file.as_file().write_all_at(file_content, 0).unwrap();
     Pager::new(
         file.as_file().try_clone().unwrap(),
         file_content.len() as u32 / pagesize,
         pagesize,
+        usable_size,
+        None,
+        0,
     )
     .unwrap()
 }
@@ -64,7 +74,9 @@ pub fn load_btree_context(file: &File) -> anyhow::Result<BtreeContext> {
     let mut header_buf = [0_u8; DATABASE_HEADER_SIZE];
     file.read_exact_at(&mut header_buf, 0)?;
     let header = DatabaseHeader::from(&header_buf);
-    Ok(BtreeContext::new(header.usable_size()))
+    Ok(BtreeContext::new(
+        header.pagesize() - header.reserved() as u32,
+    ))
 }
 
 pub fn buffer_to_hex(buf: &[u8]) -> String {

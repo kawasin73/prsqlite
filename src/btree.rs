@@ -965,7 +965,7 @@ mod tests {
         // page 2 has 100 for cell 0 offset.
         content[MAX_PAGESIZE + header_size..MAX_PAGESIZE + header_size + 2]
             .copy_from_slice(&1000_u16.to_be_bytes());
-        let pager = create_empty_pager(&content, MAX_PAGESIZE as u32);
+        let pager = create_empty_pager(&content, MAX_PAGESIZE as u32, MAX_PAGESIZE as u32);
         let page = pager.get_page(PAGE_ID_1).unwrap();
         let buffer = page.buffer();
         // offset 0 is before the cell pointer.
@@ -1047,7 +1047,7 @@ mod tests {
 
     #[test]
     fn test_allocate_from_freeblocks() {
-        let pager = create_empty_pager(&[], 4096 * 2);
+        let pager = create_empty_pager(&[], 4096 * 2, 2 * 4096);
 
         let (page_id, _) = pager.allocate_page().unwrap();
         assert_eq!(page_id, PAGE_ID_1);
@@ -1141,7 +1141,7 @@ mod tests {
 
     #[test]
     fn test_allocate_from_unallocated_space() {
-        let pager = create_empty_pager(&[], 2 * 4096);
+        let pager = create_empty_pager(&[], 2 * 4096, 2 * 4096);
         let page_type = BtreePageType(BTREE_PAGE_TYPE_LEAF_TABLE);
         let header_size = page_type.header_size();
 
@@ -1206,7 +1206,7 @@ mod tests {
 
     #[test]
     fn test_compute_free_size() {
-        let pager = create_empty_pager(&[], 2 * 4096);
+        let pager = create_empty_pager(&[], 2 * 4096, 2 * 4096);
         let page_type = BtreePageType(BTREE_PAGE_TYPE_LEAF_TABLE);
 
         let (page_id, page) = pager.allocate_page().unwrap();

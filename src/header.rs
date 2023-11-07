@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::pager::PageId;
 use crate::pager::MAX_PAGE_SIZE;
 
 const MAGIC_HEADER: &[u8; 16] = b"SQLite format 3\0";
@@ -30,9 +31,6 @@ impl<'a> DatabaseHeader<'a> {
         if !self.validate_pagesize() {
             return Err("Invalid pagesize");
         }
-        if !self.validate_reserved() {
-            return Err("Invalid reserved");
-        }
         Ok(())
     }
 
@@ -46,10 +44,6 @@ impl<'a> DatabaseHeader<'a> {
         (512..=MAX_PAGE_SIZE as u32).contains(&pagesize) && (pagesize - 1) & pagesize == 0
     }
 
-    fn validate_reserved(&self) -> bool {
-        self.pagesize() > self.reserved() as u32
-    }
-
     pub fn pagesize(&self) -> u32 {
         // If the original big endian value is 1, it means 65536.
         (self.0[16] as u32) << 8 | (self.0[17] as u32) << 16
@@ -59,14 +53,16 @@ impl<'a> DatabaseHeader<'a> {
         self.0[20]
     }
 
-    pub fn usable_size(&self) -> u32 {
-        // pagesize is bigger than or equal to 512.
-        // reserved is smaller than or equal to 255.
-        self.pagesize() - self.reserved() as u32
-    }
-
     pub fn n_pages(&self) -> u32 {
         u32::from_be_bytes(self.0[28..32].try_into().unwrap())
+    }
+
+    pub fn first_freelist_trunk_page_id(&self) -> Option<PageId> {
+        PageId::new(u32::from_be_bytes(self.0[32..36].try_into().unwrap()))
+    }
+
+    pub fn n_freelist_pages(&self) -> u32 {
+        u32::from_be_bytes(self.0[36..40].try_into().unwrap())
     }
 }
 
@@ -79,6 +75,19 @@ impl<'a> DatabaseHeaderMut<'a> {
 
     pub fn set_n_pages(&mut self, n_pages: u32) {
         self.0[28..32].copy_from_slice(&n_pages.to_be_bytes());
+    }
+
+    pub fn set_first_freelist_trunk_page_id(&mut self, page_id: Option<PageId>) {
+        let page_id = page_id.map(|id| id.get()).unwrap_or(0);
+        self.0[32..36].copy_from_slice(&page_id.to_be_bytes());
+    }
+
+    pub fn set_first_freelist_trunk_page_id_raw(&mut self, page_id: &[u8; 4]) {
+        self.0[32..36].copy_from_slice(page_id);
+    }
+
+    pub fn set_n_freelist_pages(&mut self, pages: u32) {
+        self.0[36..40].copy_from_slice(&pages.to_be_bytes());
     }
 }
 
@@ -147,6 +156,5 @@ mod tests {
         assert!(header.validate_magic_header());
         assert_eq!(header.pagesize(), 4096);
         assert!(header.validate_pagesize());
-        assert!(header.validate_reserved());
     }
 }

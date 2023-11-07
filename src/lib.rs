@@ -156,10 +156,21 @@ impl Connection {
         header
             .validate()
             .map_err(|e| anyhow::anyhow!("database header invalid: {e}"))?;
-        let pager = Pager::new(file, header.n_pages(), header.pagesize())?;
+        let pagesize = header.pagesize();
+        // pagesize is bigger than or equal to 512.
+        // reserved is smaller than or equal to 255.
+        let usable_size = pagesize - header.reserved() as u32;
+        let pager = Pager::new(
+            file,
+            header.n_pages(),
+            pagesize,
+            usable_size,
+            header.first_freelist_trunk_page_id(),
+            header.n_freelist_pages(),
+        )?;
         Ok(Self {
             pager,
-            btree_ctx: BtreeContext::new(header.usable_size()),
+            btree_ctx: BtreeContext::new(usable_size),
             schema: RefCell::new(None),
             ref_count: Cell::new(0),
         })
