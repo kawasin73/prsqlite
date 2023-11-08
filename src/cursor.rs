@@ -1127,7 +1127,6 @@ impl<'a> BtreeCursor<'a> {
     /// Delete all entries in the tree.
     ///
     /// Returns the number of entries deleted.
-    #[allow(dead_code)]
     pub fn clear(&mut self) -> Result<u64> {
         self.move_to_first()?;
         let mut n_deleted = 0;

@@ -53,6 +53,7 @@ use parser::expect_semicolon;
 use parser::parse_sql;
 use parser::BinaryOp;
 use parser::CompareOp;
+use parser::Delete;
 use parser::Insert;
 use parser::Parser;
 use parser::ResultColumn;
@@ -176,7 +177,7 @@ impl Connection {
         })
     }
 
-    pub fn prepare<'a>(&self, sql: &'a str) -> Result<'a, Statement> {
+    pub fn prepare<'a, 'conn>(&'conn self, sql: &'a str) -> Result<'a, Statement<'conn>> {
         let input = sql.as_bytes();
         let mut parser = Parser::new(input);
         let statement = parse_sql(&mut parser)?;
@@ -185,8 +186,12 @@ impl Connection {
 
         match statement {
             Stmt::Select(select) => Ok(Statement::Query(self.prepare_select(select)?)),
-            Stmt::Insert(insert) => Ok(Statement::Execution(self.prepare_insert(insert)?)),
-            Stmt::Delete(_) => todo!("implement delete statement"),
+            Stmt::Insert(insert) => Ok(Statement::Execution(ExecutionStatement::Insert(
+                self.prepare_insert(insert)?,
+            ))),
+            Stmt::Delete(delete) => Ok(Statement::Execution(ExecutionStatement::Delete(
+                self.prepare_delete(delete)?,
+            ))),
         }
     }
 
@@ -381,6 +386,41 @@ impl Connection {
         })
     }
 
+    fn prepare_delete<'a>(&self, delete: Delete<'a>) -> Result<'a, DeleteStatement> {
+        if self.schema.borrow().is_none() {
+            self.load_schema()?;
+        }
+        let schema_cell = self.schema.borrow();
+        let schema = schema_cell.as_ref().unwrap();
+        let table_name = delete.table_name.dequote();
+        let table = schema.get_table(&table_name).ok_or(anyhow::anyhow!(
+            "table not found: {:?}",
+            std::str::from_utf8(&table_name).unwrap_or_default()
+        ))?;
+
+        let filter = delete
+            .filter
+            .map(|expr| Expression::from(expr, Some(table)))
+            .transpose()?;
+
+        if filter.is_some() {
+            todo!("filter");
+        }
+
+        let table_page_id = table.root_page_id;
+        let mut index_page_ids = Vec::new();
+        let mut index_schema = table.indexes.clone();
+        while let Some(index) = index_schema {
+            index_page_ids.push(index.root_page_id);
+            index_schema = index.next.clone();
+        }
+        Ok(DeleteStatement {
+            conn: self,
+            table_page_id,
+            index_page_ids,
+        })
+    }
+
     fn start_read(&self) -> anyhow::Result<ReadTransaction> {
         // TODO: Lock across processes
         let ref_count = self.ref_count.get();
@@ -452,9 +492,23 @@ struct IndexInfo {
     n_extra: usize,
 }
 
+pub enum ExecutionStatement<'conn> {
+    Insert(InsertStatement<'conn>),
+    Delete(DeleteStatement<'conn>),
+}
+
+impl ExecutionStatement<'_> {
+    pub fn execute(&self) -> Result<u64> {
+        match self {
+            Self::Insert(stmt) => stmt.execute(),
+            Self::Delete(stmt) => stmt.execute(),
+        }
+    }
+}
+
 pub enum Statement<'conn> {
     Query(SelectStatement<'conn>),
-    Execution(InsertStatement<'conn>),
+    Execution(ExecutionStatement<'conn>),
 }
 
 impl<'conn> Statement<'conn> {
@@ -465,7 +519,7 @@ impl<'conn> Statement<'conn> {
         }
     }
 
-    pub fn execute(&'conn self) -> Result<usize> {
+    pub fn execute(&'conn self) -> Result<u64> {
         match self {
             Self::Query(_) => Err(Error::Unsupported("select statement not support execute")),
             Self::Execution(stmt) => stmt.execute(),
@@ -805,7 +859,7 @@ pub struct InsertStatement<'conn> {
 }
 
 impl<'conn> InsertStatement<'conn> {
-    pub fn execute(&self) -> Result<usize> {
+    pub fn execute(&self) -> Result<u64> {
         let write_txn = self.conn.start_write()?;
 
         let mut cursor =
@@ -883,5 +937,37 @@ impl<'conn> InsertStatement<'conn> {
         write_txn.commit()?;
 
         Ok(n)
+    }
+}
+
+pub struct DeleteStatement<'conn> {
+    conn: &'conn Connection,
+    table_page_id: PageId,
+    index_page_ids: Vec<PageId>,
+}
+
+impl<'conn> DeleteStatement<'conn> {
+    pub fn execute(&self) -> Result<u64> {
+        let write_txn = self.conn.start_write()?;
+
+        let mut cursor =
+            BtreeCursor::new(self.table_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
+
+        let n_deleted = cursor.clear()?;
+
+        for index_page_id in self.index_page_ids.iter() {
+            let mut cursor =
+                BtreeCursor::new(*index_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
+            let n = cursor.clear()?;
+            if n != n_deleted {
+                return Err(Error::Other(anyhow::anyhow!(
+                    "number of deleted rows in table and index does not match"
+                )));
+            }
+        }
+
+        write_txn.commit()?;
+
+        Ok(n_deleted)
     }
 }
