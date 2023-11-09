@@ -896,8 +896,10 @@ impl<'a> BtreeCursor<'a> {
                 // make_page_mut() must succeed for allocated pages.
                 let mut new_buffer = self.pager.make_page_mut(&new_page).unwrap();
 
-                const CELL_POINTER_SIZE: u16 = BTREE_PAGE_CELL_POINTER_SIZE as u16;
-                let mut total_size = new_cell_size + CELL_POINTER_SIZE * (current_page.n_cells + 1);
+                const CELL_POINTER_SIZE: u32 = BTREE_PAGE_CELL_POINTER_SIZE as u32;
+                // total_size is u32 because it may overflow u16 size.
+                let mut total_size =
+                    new_cell_size as u32 + CELL_POINTER_SIZE * (current_page.n_cells as u32 + 1);
                 let mut cells = Vec::with_capacity(current_page.n_cells as usize);
                 let compute_cell_size = current_page.page_type.compute_cell_size_fn();
                 for i in 0..current_page.n_cells {
@@ -914,47 +916,63 @@ impl<'a> BtreeCursor<'a> {
                             }
                         })?;
                     cells.push((offset, cell_size));
-                    total_size += cell_size;
+                    total_size += cell_size as u32;
                 }
-                let mut left_size = 0;
-                let mut right_size = total_size;
+                let mut left_size: u32 = 0;
+                let mut right_size: u32 = total_size;
                 let mut i_right = None;
                 for i in 0..current_page.idx_cell {
-                    left_size += cells[i as usize].1 + CELL_POINTER_SIZE;
-                    right_size -= cells[i as usize].1 + CELL_POINTER_SIZE;
+                    left_size += cells[i as usize].1 as u32 + CELL_POINTER_SIZE;
+                    right_size -= cells[i as usize].1 as u32 + CELL_POINTER_SIZE;
+                    // left_size is guaranteed to be fit in a page because the cells were present in
+                    // the overflowing page.
                     if left_size >= right_size {
                         i_right = Some(i + 1);
                         break;
                     }
                 }
                 let (move_to_right, idx_cells) = if let Some(i_right) = i_right {
-                    // Move right half of cells to a new page.
+                    // Move right half of cells and the new cell to a new page.
                     (true, i_right..current_page.n_cells)
                 } else {
-                    left_size += new_cell_size + CELL_POINTER_SIZE;
-                    right_size -= new_cell_size + CELL_POINTER_SIZE;
-                    let mut i_right = current_page.n_cells;
-                    for i in current_page.idx_cell..current_page.n_cells {
-                        if left_size >= right_size {
-                            i_right = i;
-                            break;
+                    let capacity = self.btree_ctx.usable_size - header_size as u32;
+                    left_size += new_cell_size as u32 + CELL_POINTER_SIZE;
+                    if left_size > capacity {
+                        if right_size > capacity {
+                            todo!("split into 3 pages");
+                        } else {
+                            // Move right half of cells and the new cell to a new page.
+                            (true, current_page.idx_cell..current_page.n_cells)
                         }
-                        left_size += cells[i as usize].1 + CELL_POINTER_SIZE;
-                        right_size -= cells[i as usize].1 + CELL_POINTER_SIZE;
-                    }
+                    } else {
+                        right_size -= new_cell_size as u32 + CELL_POINTER_SIZE;
+                        let mut i_right = current_page.n_cells;
+                        for i in current_page.idx_cell..current_page.n_cells {
+                            if left_size >= right_size {
+                                i_right = i;
+                                break;
+                            }
+                            left_size += cells[i as usize].1 as u32 + CELL_POINTER_SIZE;
+                            if left_size > capacity {
+                                i_right = i;
+                                break;
+                            }
+                            right_size -= cells[i as usize].1 as u32 + CELL_POINTER_SIZE;
+                        }
 
-                    // Move remaining cell pointers
-                    buffer.copy_within(
-                        cell_pointer_offset(&current_page.mem, i_right, header_size)
-                            ..cell_pointer_offset(
-                                &current_page.mem,
-                                current_page.n_cells,
-                                header_size,
-                            ),
-                        cell_pointer_offset(&current_page.mem, 0, header_size),
-                    );
-                    // Move left half of cells to a new page.
-                    (false, 0..i_right)
+                        // Move remaining cell pointers
+                        buffer.copy_within(
+                            cell_pointer_offset(&current_page.mem, i_right, header_size)
+                                ..cell_pointer_offset(
+                                    &current_page.mem,
+                                    current_page.n_cells,
+                                    header_size,
+                                ),
+                            cell_pointer_offset(&current_page.mem, 0, header_size),
+                        );
+                        // Move left half of cells to a new page.
+                        (false, 0..i_right)
+                    }
                 };
                 assert!(current_page.idx_cell >= idx_cells.start);
                 assert!(current_page.idx_cell <= idx_cells.end);
@@ -2625,6 +2643,39 @@ mod tests {
         let payload = cursor.get_table_payload().unwrap();
         assert!(payload.is_none());
         drop(payload);
+
+        assert_eq!(bctx.max_local(true), 65501);
+        cursor
+            .table_insert(2, &SlicePayload::new(&[2; 65490]).unwrap())
+            .unwrap();
+        cursor
+            .table_insert(4, &SlicePayload::new(&[4; 65490]).unwrap())
+            .unwrap();
+        cursor
+            .table_insert(3, &SlicePayload::new(&[3; 65490]).unwrap())
+            .unwrap();
+
+        cursor.table_move_to(2).unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 2);
+        assert_eq!(payload.buf(), &[2; 65490]);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 3);
+        assert_eq!(payload.buf(), &[3; 65490]);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 4);
+        assert_eq!(payload.buf(), &[4; 65490]);
+        drop(payload);
+
+        cursor.move_next().unwrap();
+        let payload = cursor.get_table_payload().unwrap();
+        assert!(payload.is_none());
     }
 
     #[test]
@@ -3284,6 +3335,34 @@ mod tests {
             assert_eq!(payload.buf(), &[(i % 256) as u8; 200]);
         }
         cursor.move_next().unwrap();
+        assert!(cursor.get_table_payload().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_insert_table_split_1_cell_per_page() {
+        let file =
+            create_sqlite_database(&["PRAGMA page_size = 512;", "CREATE TABLE example(col);"]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let page_id = find_table_page_id("example", file.path());
+
+        let mut cursor = BtreeCursor::new(page_id, &pager, &bctx).unwrap();
+        // On inserting key = 128 and splitting a page, the content size of right page
+        // is bigger than left page.
+        for i in 0..1000 {
+            cursor
+                .table_insert(i, &SlicePayload::new(&[(i % 256) as u8; 400]).unwrap())
+                .unwrap();
+        }
+
+        cursor.move_to_first().unwrap();
+        for i in 0..1000 {
+            let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+            assert_eq!(key, i);
+            assert_eq!(payload.buf(), &[(i % 256) as u8; 400]);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
         assert!(cursor.get_table_payload().unwrap().is_none());
     }
 

@@ -345,6 +345,61 @@ fn test_insert_overflow() {
 }
 
 #[test]
+fn test_insert_1_cell_per_table_page_no_overflow() {
+    let file = create_sqlite_database(&["PRAGMA page_size = 512;", "CREATE TABLE example(col);"]);
+    let conn = Connection::open(file.path()).unwrap();
+    const N_ENTRIES: usize = 128;
+
+    let insert_stmt_string = format!("INSERT INTO example(col) VALUES (x'{}');", "11".repeat(412));
+    let insert_stmt = conn.prepare(&insert_stmt_string).unwrap();
+    for _ in 0..N_ENTRIES {
+        assert_eq!(insert_stmt.execute().unwrap(), 1);
+    }
+    let v = Value::Blob(vec![0x11; 412].into());
+    let row = [Some(&v)];
+    let mut expected = Vec::with_capacity(N_ENTRIES);
+    for _ in 0..N_ENTRIES {
+        expected.push(row.as_slice());
+    }
+    let test_conn = rusqlite::Connection::open(file.path()).unwrap();
+    assert_same_results(
+        expected.as_slice(),
+        "SELECT * FROM example;",
+        &test_conn,
+        &conn,
+    );
+}
+
+#[test]
+fn test_insert_overflow_index() {
+    let file = create_sqlite_database(&[
+        "PRAGMA page_size = 512;",
+        "CREATE TABLE example(col);",
+        // "CREATE INDEX index1 ON example(col);",
+    ]);
+    let conn = Connection::open(file.path()).unwrap();
+
+    let insert_stmt_string = format!("INSERT INTO example(col) VALUES (x'{}');", "11".repeat(412));
+    let insert_stmt = conn.prepare(&insert_stmt_string).unwrap();
+    for _ in 0..1000 {
+        assert_eq!(insert_stmt.execute().unwrap(), 1);
+    }
+    let v = Value::Blob(vec![0x11; 412].into());
+    let row = [Some(&v)];
+    let mut expected = Vec::with_capacity(1000);
+    for _ in 0..1000 {
+        expected.push(row.as_slice());
+    }
+    let test_conn = rusqlite::Connection::open(file.path()).unwrap();
+    assert_same_results(
+        expected.as_slice(),
+        "SELECT * FROM example;",
+        &test_conn,
+        &conn,
+    );
+}
+
+#[test]
 fn test_insert_freeblock() {
     let file = create_sqlite_database(&[
         "CREATE TABLE example(col);",
