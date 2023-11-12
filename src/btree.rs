@@ -456,7 +456,7 @@ fn compute_table_leaf_cell_size(
         let payload_size: PayloadSize = payload_size
             .try_into()
             .map_err(|_| FileCorrupt("payload size too large"))?;
-        ctx.n_local(true, payload_size)
+        ctx.n_local(true, payload_size) + BTREE_OVERFLOW_PAGE_ID_BYTES as u16
     };
     Ok(payload_size_length as u16 + key_length as u16 + n_local)
 }

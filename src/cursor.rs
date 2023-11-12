@@ -3226,12 +3226,28 @@ mod tests {
                 .table_insert(i, &SlicePayload::new(&[(i % 256) as u8; 200]).unwrap())
                 .unwrap();
         }
+        // Overflow payloads
+        for i in 1000..2000 {
+            cursor
+                .table_insert(i, &SlicePayload::new(&[(i % 256) as u8; 1000]).unwrap())
+                .unwrap();
+        }
 
         cursor.move_to_first().unwrap();
         for i in 0..1000 {
             let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
             assert_eq!(key, i);
             assert_eq!(payload.buf(), &[(i % 256) as u8; 200]);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        for i in 1000..2000 {
+            let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+            assert_eq!(key, i);
+            assert_eq!(payload.size().get(), 1000);
+            let mut buf = [0; 1001];
+            assert_eq!(payload.load(0, &mut buf).unwrap(), 1000);
+            assert_eq!(&buf[..1000], &[(i % 256) as u8; 1000]);
             drop(payload);
             cursor.move_next().unwrap();
         }
@@ -3754,6 +3770,21 @@ mod tests {
                 .index_insert(&comparator, &SlicePayload::new(&payload).unwrap())
                 .unwrap();
         }
+        // Overflow payloads
+        for i in 1000..2000 {
+            let rowid_value = Value::Integer(i);
+            let mut buf = (i as u16).to_be_bytes().to_vec();
+            buf.extend(&[(i % 256) as u8; 1000]);
+            let value = Value::Blob(buf.into());
+            let payload = build_record(&[Some(&value), Some(&rowid_value)]);
+            let comparator = [
+                Some(ValueCmp::new(&value, &Collation::Binary)),
+                Some(ValueCmp::new(&rowid_value, &Collation::Binary)),
+            ];
+            cursor
+                .index_insert(&comparator, &SlicePayload::new(&payload).unwrap())
+                .unwrap();
+        }
 
         cursor.move_to_first().unwrap();
         for i in 0..1000 {
@@ -3764,6 +3795,20 @@ mod tests {
             let expected = build_record(&[Some(&value), Some(&rowid_value)]);
             let payload = cursor.get_index_payload().unwrap().unwrap();
             assert_eq!(payload.buf(), &expected, "i = {}", i);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        for i in 1000..2000 {
+            let rowid_value = Value::Integer(i);
+            let mut buf = (i as u16).to_be_bytes().to_vec();
+            buf.extend(&[(i % 256) as u8; 1000]);
+            let value = Value::Blob(buf.into());
+            let expected = build_record(&[Some(&value), Some(&rowid_value)]);
+            let payload = cursor.get_index_payload().unwrap().unwrap();
+            assert_eq!(payload.size().get() as usize, expected.len());
+            let mut buf = vec![0; expected.len() + 1];
+            assert_eq!(payload.load(0, &mut buf).unwrap(), expected.len());
+            assert_eq!(&buf[..expected.len()], &expected, "i = {}", i);
             drop(payload);
             cursor.move_next().unwrap();
         }

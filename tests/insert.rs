@@ -481,6 +481,7 @@ fn test_insert_split() {
     ]);
     let conn = Connection::open(file.path()).unwrap();
     let magic_v = "abc".repeat(50);
+    let magic_v_overflow = "hello".repeat(100);
 
     for i in 0..5 {
         for j in 0..3 {
@@ -496,6 +497,20 @@ fn test_insert_split() {
             }
         }
     }
+    for i in 0..5 {
+        for j in 0..3 {
+            for k in 0..50 {
+                let rowid = 5 * 3 * 500 + 15 * k + 5 * j + i;
+                conn.prepare(&format!(
+                    "INSERT INTO example (rowid, col) VALUES ({}, '{}{}{}');",
+                    rowid, rowid, &magic_v_overflow, rowid
+                ))
+                .unwrap()
+                .execute()
+                .unwrap();
+            }
+        }
+    }
 
     let test_conn = rusqlite::Connection::open(file.path()).unwrap();
     let sql = "SELECT rowid, col FROM example;";
@@ -503,16 +518,32 @@ fn test_insert_split() {
     let mut test_rows = test_stmt.query([]).unwrap();
     let stmt = conn.prepare(sql).unwrap();
     let mut rows = stmt.query().unwrap();
-    for i in 0..3 * 5 * 500 {
-        let expected = format!("{}{}{}", i, &magic_v, i);
+    for rowid in 0..3 * 5 * 500 {
+        let expected = format!("{}{}{}", rowid, &magic_v, rowid);
         let test_row = test_rows.next().unwrap().unwrap();
-        assert_eq!(test_row.get::<_, i64>(0).unwrap(), i);
+        assert_eq!(test_row.get::<_, i64>(0).unwrap(), rowid);
         assert_eq!(&test_row.get::<_, String>(1).unwrap(), &expected);
 
         let row = rows.next_row().unwrap().unwrap();
         let columns = row.parse().unwrap();
         assert_eq!(columns.len(), 2);
-        assert_eq!(columns.get(0), Some(&Value::Integer(i)));
+        assert_eq!(columns.get(0), Some(&Value::Integer(rowid)));
+        assert_eq!(
+            columns.get(1),
+            Some(&Value::Text(expected.as_bytes().into()))
+        );
+    }
+    for i in 0..3 * 5 * 50 {
+        let rowid = 3 * 5 * 500 + i;
+        let expected = format!("{}{}{}", rowid, &magic_v_overflow, rowid);
+        let test_row = test_rows.next().unwrap().unwrap();
+        assert_eq!(test_row.get::<_, i64>(0).unwrap(), rowid);
+        assert_eq!(&test_row.get::<_, String>(1).unwrap(), &expected);
+
+        let row = rows.next_row().unwrap().unwrap();
+        let columns = row.parse().unwrap();
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns.get(0), Some(&Value::Integer(rowid)));
         assert_eq!(
             columns.get(1),
             Some(&Value::Text(expected.as_bytes().into()))
@@ -527,6 +558,18 @@ fn test_insert_split() {
             &format!(
                 "SELECT rowid from example WHERE col = '{}{}{}';",
                 rowid, &magic_v, rowid
+            ),
+            &test_conn,
+            &conn,
+        );
+    }
+    for i in 0..3 * 5 * 50 {
+        let rowid = 3 * 5 * 500 + i;
+        assert_same_results(
+            &[&[Some(&Value::Integer(rowid))]],
+            &format!(
+                "SELECT rowid from example WHERE col = '{}{}{}';",
+                rowid, &magic_v_overflow, rowid
             ),
             &test_conn,
             &conn,
