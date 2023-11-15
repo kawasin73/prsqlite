@@ -230,6 +230,9 @@ impl BtreePageType {
     }
 }
 
+pub const BTREE_FIRST_FREEBLOCK_OFFSET: Range<usize> = 1..3;
+pub const BTREE_RIGHT_PAGE_ID_OFFSET: usize = 8;
+
 pub struct BtreePageHeader<'page>(&'page [u8; BTREE_PAGE_HEADER_MAX_SIZE]);
 
 impl<'page> BtreePageHeader<'page> {
@@ -263,7 +266,7 @@ impl<'page> BtreePageHeader<'page> {
 
     /// The offset of the first freeblock, or zero if there are no freeblocks.
     pub fn first_freeblock_offset(&self) -> u16 {
-        u16::from_be_bytes(self.0[1..3].try_into().unwrap())
+        u16::from_be_bytes(self.0[BTREE_FIRST_FREEBLOCK_OFFSET].try_into().unwrap())
     }
 
     /// The number of cells in this page
@@ -287,8 +290,12 @@ impl<'page> BtreePageHeader<'page> {
     ///
     /// This is only valid when the page is a interior page.
     pub fn right_page_id(&self) -> ParseResult<PageId> {
-        PageId::new(u32::from_be_bytes(self.0[8..12].try_into().unwrap()))
-            .ok_or(FileCorrupt("right page id is zero"))
+        PageId::new(u32::from_be_bytes(
+            self.0[BTREE_RIGHT_PAGE_ID_OFFSET..BTREE_RIGHT_PAGE_ID_OFFSET + 4]
+                .try_into()
+                .unwrap(),
+        ))
+        .ok_or(FileCorrupt("right page id is zero"))
     }
 }
 
@@ -334,7 +341,8 @@ impl<'a> BtreePageHeaderMut<'a> {
     }
 
     pub fn set_right_page_id(&mut self, page_id: PageId) {
-        self.0[8..12].copy_from_slice(&page_id.get().to_be_bytes());
+        self.0[BTREE_RIGHT_PAGE_ID_OFFSET..BTREE_RIGHT_PAGE_ID_OFFSET + 4]
+            .copy_from_slice(&page_id.get().to_be_bytes());
     }
 }
 

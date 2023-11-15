@@ -31,14 +31,18 @@ use crate::btree::BtreePageHeaderMut;
 use crate::btree::BtreePageType;
 use crate::btree::FileCorrupt;
 use crate::btree::IndexCellKeyParser;
+use crate::btree::OverflowPage;
 use crate::btree::PayloadInfo;
 use crate::btree::TableCellKeyParser;
+use crate::btree::BTREE_FIRST_FREEBLOCK_OFFSET;
 use crate::btree::BTREE_OVERFLOW_PAGE_ID_BYTES;
 use crate::btree::BTREE_PAGE_CELL_POINTER_SIZE;
+use crate::btree::BTREE_RIGHT_PAGE_ID_OFFSET;
 use crate::pager::swap_page_buffer;
 use crate::pager::Error as PagerError;
 use crate::pager::MemPage;
 use crate::pager::PageBuffer;
+use crate::pager::PageBufferMut;
 use crate::pager::PageId;
 use crate::pager::Pager;
 use crate::payload::Payload;
@@ -57,6 +61,7 @@ pub enum Error {
     NotTable,
     NotIndex,
     NotInitialized,
+    NoEntry,
     Record(anyhow::Error),
     LoadPayload,
     IndexExists,
@@ -71,6 +76,7 @@ impl std::error::Error for Error {
             Self::NotTable => None,
             Self::NotIndex => None,
             Self::NotInitialized => None,
+            Self::NoEntry => None,
             Self::Record(e) => e.source(),
             Self::LoadPayload => None,
             Self::IndexExists => None,
@@ -91,6 +97,7 @@ impl Display for Error {
             Self::NotTable => f.write_str("not a table page"),
             Self::NotIndex => f.write_str("not an index page"),
             Self::NotInitialized => f.write_str("cursor is not initialized"),
+            Self::NoEntry => f.write_str("cursor pointing no entry"),
             Self::Record(e) => f.write_fmt(format_args!("record: {}", e)),
             Self::LoadPayload => f.write_str("failed to load payload"),
             Self::IndexExists => f.write_str("index already exists"),
@@ -611,11 +618,13 @@ impl<'a> BtreeCursor<'a> {
 
         let mut depth = self.parent_pages.len();
         let mut interior_cell_buf = self.pager.allocate_tmp_page();
-        // sub interior cell is for a special case when table leaf page is splitted into 3 pages.
-        // In that case, new 2 interior cells are inserted to the parent page.
+        // sub interior cell is for a special case when table leaf page is splitted into
+        // 3 pages. In that case, new 2 interior cells are inserted to the
+        // parent page.
         let mut sub_interiror_cell_buf = [0; 13];
         let mut sub_interior_cell_len = None;
-        // This is used to update idx_cell of the parent page when splitting a child page.
+        // This is used to update idx_cell of the parent page when splitting a child
+        // page.
         let mut new_cell_in_right_page = false;
 
         loop {
@@ -1250,37 +1259,14 @@ impl<'a> BtreeCursor<'a> {
                                         page_id: self.current_page.page_id,
                                         e,
                                     })?;
-                            let mut overflow_page =
+                            let overflow_page =
                                 compute_overflow_page(self.btree_ctx, &buffer, offset).map_err(
                                     |e| Error::FileCorrupt {
                                         page_id: self.current_page.page_id,
                                         e,
                                     },
                                 )?;
-                            while let Some(overflow_page_unwrap) = overflow_page {
-                                let next_page_id = overflow_page_unwrap.page_id();
-                                let next_page = self.pager.get_page(next_page_id).map_err(|e| {
-                                    Error::Pager {
-                                        page_id: self.current_page.page_id,
-                                        e,
-                                    }
-                                })?;
-                                let buffer = next_page.buffer();
-                                let (_, next_overflow_page) = overflow_page_unwrap
-                                    .parse(self.btree_ctx, &buffer)
-                                    .map_err(|e| Error::FileCorrupt {
-                                        page_id: next_page_id,
-                                        e,
-                                    })?;
-                                overflow_page = next_overflow_page;
-                                drop(buffer);
-                                self.pager
-                                    .delete_page(next_page_id)
-                                    .map_err(|e| Error::Pager {
-                                        page_id: self.current_page.page_id,
-                                        e,
-                                    })?;
-                            }
+                            self.free_overflow_pages(overflow_page)?;
                         }
                         n_deleted += self.current_page.n_cells as u64;
                     }
@@ -1326,6 +1312,225 @@ impl<'a> BtreeCursor<'a> {
 
             self.move_to_current_child()?;
         }
+    }
+
+    /// Delete the current entry.
+    #[allow(dead_code)]
+    pub fn delete(&mut self) -> Result<()> {
+        if !self.initialized {
+            return Err(Error::NotInitialized);
+        } else if self.current_page.idx_cell >= self.current_page.n_cells {
+            return Err(Error::NoEntry);
+        } else if self.current_page.page_type.is_index() {
+            todo!("delete index page");
+        }
+        assert!(self.current_page.n_cells > 0);
+        assert!(self.current_page.idx_cell < self.current_page.n_cells);
+
+        // Free the overflow payload pages.
+        {
+            let buffer = self.current_page.mem.buffer();
+            let header_size = self.current_page.page_type.header_size();
+            let cell_offset = get_cell_offset(
+                &self.current_page.mem,
+                &buffer,
+                self.current_page.idx_cell,
+                header_size,
+            )
+            .map_err(|e| Error::FileCorrupt {
+                page_id: self.current_page.page_id,
+                e,
+            })?;
+            let overflow_page = self.current_page.page_type.compute_overflow_page_fn()(
+                self.btree_ctx,
+                &buffer,
+                cell_offset,
+            )
+            .map_err(|e| Error::FileCorrupt {
+                page_id: self.current_page.page_id,
+                e,
+            })?;
+            self.free_overflow_pages(overflow_page)?;
+            drop(buffer);
+        }
+
+        if self.current_page.page_type.is_leaf() {
+            loop {
+                if self.current_page.n_cells > self.current_page.page_type.is_leaf() as u16 {
+                    let header_size = self.current_page.page_type.header_size();
+
+                    let mut buffer =
+                        self.pager
+                            .make_page_mut(&self.current_page.mem)
+                            .map_err(|e| Error::Pager {
+                                page_id: self.current_page.page_id,
+                                e,
+                            })?;
+
+                    let cell_offset = if self.current_page.idx_cell == self.current_page.n_cells {
+                        assert!(!self.current_page.page_type.is_leaf());
+                        self.current_page.idx_cell -= 1;
+
+                        let cell_offset = get_cell_offset(
+                            &self.current_page.mem,
+                            &buffer,
+                            self.current_page.idx_cell,
+                            header_size,
+                        )
+                        .map_err(|e| Error::FileCorrupt {
+                            page_id: self.current_page.page_id,
+                            e,
+                        })?;
+
+                        buffer
+                            .copy_within(cell_offset..cell_offset + 4, BTREE_RIGHT_PAGE_ID_OFFSET);
+                        cell_offset
+                    } else {
+                        let cell_offset = get_cell_offset(
+                            &self.current_page.mem,
+                            &buffer,
+                            self.current_page.idx_cell,
+                            header_size,
+                        )
+                        .map_err(|e| Error::FileCorrupt {
+                            page_id: self.current_page.page_id,
+                            e,
+                        })?;
+
+                        let cell_pointers_tail_offset = cell_pointer_offset(
+                            &self.current_page.mem,
+                            self.current_page.n_cells,
+                            header_size,
+                        );
+                        let cell_pointer_offset = cell_pointer_offset(
+                            &self.current_page.mem,
+                            self.current_page.idx_cell,
+                            header_size,
+                        );
+
+                        // Move the cell pointers.
+                        buffer.copy_within(
+                            cell_pointer_offset + 2..cell_pointers_tail_offset,
+                            cell_pointer_offset,
+                        );
+
+                        cell_offset
+                    };
+
+                    let cell_size = self.current_page.page_type.compute_cell_size_fn()(
+                        self.btree_ctx,
+                        &buffer,
+                        cell_offset,
+                    )
+                    .map_err(|e| Error::FileCorrupt {
+                        page_id: self.current_page.page_id,
+                        e,
+                    })?;
+
+                    Self::free_cell(&self.current_page.mem, &mut buffer, cell_offset, cell_size);
+
+                    // Update page header.
+                    self.current_page.n_cells -= 1;
+                    let mut page_header =
+                        BtreePageHeaderMut::from_page(&self.current_page.mem, &mut buffer);
+                    page_header.set_n_cells(self.current_page.n_cells);
+                    drop(buffer);
+                    if self.current_page.page_type.is_table()
+                        && !self.current_page.page_type.is_leaf()
+                    {
+                        self.move_to_left_most()?;
+                    }
+                    break;
+                } else {
+                    let page_id = self.current_page.page_id;
+                    if self.back_to_parent() {
+                        // Remove the child page.
+                        self.pager
+                            .delete_page(page_id)
+                            .map_err(|e| Error::Pager { page_id, e })?;
+
+                        assert!(!self.current_page.page_type.is_leaf());
+                        if self.current_page.page_type.is_table()
+                            && self.current_page.idx_cell != self.current_page.n_cells
+                            && self.current_page.n_cells == 1
+                        {
+                            // TODO: Optimization: shrink the page level by
+                            // replacing the interior page with the right child
+                            // page.
+                        } else if self.current_page.page_type.is_index() {
+                            todo!("delete index page");
+                        }
+                    } else {
+                        // Initialize the root page.
+                        self.current_page.page_type = self.current_page.page_type.leaf_type();
+                        self.current_page.idx_cell = 0;
+                        self.current_page.n_cells = 0;
+                        let mut buffer =
+                            self.pager
+                                .make_page_mut(&self.current_page.mem)
+                                .map_err(|e| Error::Pager {
+                                    page_id: self.current_page.page_id,
+                                    e,
+                                })?;
+                        let mut page_header =
+                            BtreePageHeaderMut::from_page(&self.current_page.mem, &mut buffer);
+                        page_header.set_page_type(self.current_page.page_type);
+                        page_header.set_first_freeblock_offset(0);
+                        page_header.set_n_cells(0);
+                        page_header.set_cell_content_area_offset(non_zero_to_u16(
+                            self.btree_ctx.usable_size,
+                        ));
+                        page_header.clear_fragmented_free_bytes();
+                        break;
+                    }
+                }
+            }
+        } else {
+            assert!(self.current_page.page_type.is_index());
+
+            // TODO: Delete cell in interior page.
+        }
+        Ok(())
+    }
+
+    fn free_overflow_pages(&self, overflow_page: Option<OverflowPage>) -> Result<()> {
+        let mut overflow_page = overflow_page;
+        while let Some(overflow_page_unwrap) = overflow_page {
+            let next_page_id = overflow_page_unwrap.page_id();
+            let next_page = self
+                .pager
+                .get_page(next_page_id)
+                .map_err(|e| Error::Pager {
+                    page_id: self.current_page.page_id,
+                    e,
+                })?;
+            let buffer = next_page.buffer();
+            let (_, next_overflow_page) = overflow_page_unwrap
+                .parse(self.btree_ctx, &buffer)
+                .map_err(|e| Error::FileCorrupt {
+                    page_id: next_page_id,
+                    e,
+                })?;
+            overflow_page = next_overflow_page;
+            drop(buffer);
+            self.pager
+                .delete_page(next_page_id)
+                .map_err(|e| Error::Pager {
+                    page_id: self.current_page.page_id,
+                    e,
+                })?;
+        }
+        Ok(())
+    }
+
+    fn free_cell(page: &MemPage, buffer: &mut PageBufferMut, offset: usize, cell_size: u16) {
+        buffer.copy_within(BTREE_FIRST_FREEBLOCK_OFFSET, offset);
+        set_u16(buffer, offset + 2, cell_size);
+        let mut page_header = BtreePageHeaderMut::from_page(page, buffer);
+        page_header.set_first_freeblock_offset(offset as u16);
+
+        // TODO: Merge freeblocks.
+        // TODO: Merge freeblock to unallocated space if possible.
     }
 
     pub fn get_table_key(&self) -> Result<Option<i64>> {
@@ -1471,6 +1676,7 @@ impl<'a> BtreeCursor<'a> {
         let mut page = CursorPage::new(page_id, mem);
         std::mem::swap(&mut self.current_page, &mut page);
         self.parent_pages.push(page);
+
         Ok(())
     }
 
@@ -4323,5 +4529,284 @@ mod tests {
         cursor.move_to_first().unwrap();
         assert!(cursor.get_index_payload().unwrap().is_none());
         assert_eq!(pager.num_free_pages(), 0);
+    }
+
+    #[test]
+    fn test_delete_empty() {
+        let file = create_sqlite_database(&[
+            "PRAGMA page_size = 512;",
+            "CREATE TABLE example(col);",
+            "CREATE INDEX index1 ON example(col);",
+        ]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let table_page_id = find_table_page_id("example", file.path());
+        let index_page_id = find_index_page_id("index1", file.path());
+
+        let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
+        assert!(matches!(cursor.delete(), Err(Error::NotInitialized)));
+        cursor.move_to_first().unwrap();
+        assert!(matches!(cursor.delete(), Err(Error::NoEntry)));
+
+        let mut cursor = BtreeCursor::new(index_page_id, &pager, &bctx).unwrap();
+        assert!(matches!(cursor.delete(), Err(Error::NotInitialized)));
+        cursor.move_to_first().unwrap();
+        assert!(matches!(cursor.delete(), Err(Error::NoEntry)));
+    }
+
+    #[test]
+    fn test_delete_single_table_leaf_page() {
+        let file =
+            create_sqlite_database(&["PRAGMA page_size = 512;", "CREATE TABLE example(col);"]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let table_page_id = find_table_page_id("example", file.path());
+
+        let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
+
+        for i in 0..10 {
+            cursor
+                .table_insert(i, &SlicePayload::new(&[i as u8; 10]).unwrap())
+                .unwrap();
+        }
+
+        cursor.table_move_to(10).unwrap();
+        assert!(matches!(cursor.delete(), Err(Error::NoEntry)));
+        assert!(cursor.get_table_payload().unwrap().is_none());
+
+        cursor.table_move_to(9).unwrap();
+        cursor.delete().unwrap();
+        assert!(cursor.get_table_payload().unwrap().is_none());
+
+        cursor.move_to_first().unwrap();
+        for i in 0..9 {
+            let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+            assert_eq!(key, i);
+            assert_eq!(payload.buf(), &[i as u8; 10]);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        assert!(cursor.get_table_payload().unwrap().is_none());
+
+        cursor.table_move_to(0).unwrap();
+        cursor.delete().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 1);
+        assert_eq!(payload.buf(), &[1; 10]);
+        drop(payload);
+
+        cursor.move_to_first().unwrap();
+        for i in 1..9 {
+            let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+            assert_eq!(key, i);
+            assert_eq!(payload.buf(), &[i as u8; 10]);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        assert!(cursor.get_table_payload().unwrap().is_none());
+
+        cursor.table_move_to(2).unwrap();
+        cursor.delete().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 3);
+        assert_eq!(payload.buf(), &[3; 10]);
+        drop(payload);
+
+        cursor.move_to_first().unwrap();
+        let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+        assert_eq!(key, 1);
+        assert_eq!(payload.buf(), &[1; 10]);
+        drop(payload);
+        cursor.move_next().unwrap();
+        for i in 3..9 {
+            let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+            assert_eq!(key, i);
+            assert_eq!(payload.buf(), &[i as u8; 10]);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        assert!(cursor.get_table_payload().unwrap().is_none());
+
+        cursor.move_to_first().unwrap();
+        for _ in 0..7 {
+            cursor.delete().unwrap();
+        }
+        assert!(matches!(cursor.delete(), Err(Error::NoEntry)));
+
+        cursor.move_to_first().unwrap();
+        assert!(cursor.get_table_payload().unwrap().is_none());
+
+        // The root page is cleared
+        let root_page = pager.get_page(table_page_id).unwrap();
+        let buffer = root_page.buffer();
+        let page_header = BtreePageHeader::from_page(&root_page, &buffer);
+        assert!(page_header.page_type().is_leaf());
+        assert_eq!(page_header.n_cells(), 0);
+        assert_eq!(page_header.first_freeblock_offset(), 0);
+        assert_eq!(page_header.fragmented_free_bytes(), 0);
+        assert_eq!(
+            page_header.cell_content_area_offset().get(),
+            bctx.usable_size
+        );
+    }
+
+    #[test]
+    fn test_delete_table_leaf_page_freeblock() {
+        let file =
+            create_sqlite_database(&["PRAGMA page_size = 512;", "CREATE TABLE example(col);"]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let table_page_id = find_table_page_id("example", file.path());
+
+        let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
+
+        for i in 0..4 {
+            cursor
+                .table_insert(i, &SlicePayload::new(&[i as u8; 100]).unwrap())
+                .unwrap();
+        }
+
+        let root_page = pager.get_page(table_page_id).unwrap();
+        let buffer = root_page.buffer();
+        let page_header = BtreePageHeader::from_page(&root_page, &buffer);
+        assert_eq!(page_header.first_freeblock_offset(), 0);
+        drop(buffer);
+
+        cursor.move_to_first().unwrap();
+
+        // Delete 2 cells.
+        cursor.delete().unwrap();
+        cursor.move_next().unwrap();
+        cursor.delete().unwrap();
+
+        let buffer = root_page.buffer();
+        let page_header = BtreePageHeader::from_page(&root_page, &buffer);
+        assert_ne!(page_header.first_freeblock_offset(), 0);
+        drop(buffer);
+
+        cursor
+            .table_insert(4, &SlicePayload::new(&[4; 100]).unwrap())
+            .unwrap();
+
+        // No defragment but use the freeblock.
+        let buffer = root_page.buffer();
+        let page_header = BtreePageHeader::from_page(&root_page, &buffer);
+        assert_ne!(page_header.first_freeblock_offset(), 0);
+        drop(buffer);
+
+        cursor.move_to_first().unwrap();
+        for i in [1, 3, 4] {
+            let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+            assert_eq!(key, i);
+            assert_eq!(payload.buf(), &[i as u8; 100]);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        assert!(cursor.get_table_payload().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_delete_table() {
+        let file =
+            create_sqlite_database(&["PRAGMA page_size = 512;", "CREATE TABLE example(col);"]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let table_page_id = find_table_page_id("example", file.path());
+
+        let initial_pages = pager.num_pages();
+        assert_eq!(initial_pages, 2);
+
+        let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
+
+        // At least 3 leaf pages.
+        for i in 0..12 {
+            cursor
+                .table_insert(i, &SlicePayload::new(&[i as u8; 100]).unwrap())
+                .unwrap();
+        }
+
+        cursor.move_to_first().unwrap();
+        for i in 0..12 {
+            let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+            assert_eq!(key, i);
+            assert_eq!(payload.buf(), &[i as u8; 100]);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        assert!(cursor.get_table_payload().unwrap().is_none());
+
+        // Delete last 4 entries. At least, the last leaf page is deleted.
+        for i in 0..4 {
+            cursor.table_move_to(11 - i).unwrap();
+            cursor.delete().unwrap();
+        }
+
+        cursor.move_to_first().unwrap();
+        for i in 0..8 {
+            let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+            assert_eq!(key, i);
+            assert_eq!(payload.buf(), &[i as u8; 100]);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        assert!(cursor.get_table_payload().unwrap().is_none());
+
+        // Delete the first leaf page.
+        for i in 0..4 {
+            cursor.table_move_to(i).unwrap();
+            cursor.delete().unwrap();
+        }
+
+        for i in 4..8 {
+            let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
+            assert_eq!(key, i);
+            assert_eq!(payload.buf(), &[i as u8; 100]);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        assert!(cursor.get_table_payload().unwrap().is_none());
+
+        cursor.move_to_first().unwrap();
+        for _ in 0..4 {
+            cursor.delete().unwrap();
+        }
+
+        cursor.move_to_first().unwrap();
+        assert!(cursor.get_table_payload().unwrap().is_none());
+
+        assert_eq!(pager.num_pages() - pager.num_free_pages(), initial_pages);
+    }
+
+    #[test]
+    fn test_delete_table_3level() {
+        let file =
+            create_sqlite_database(&["PRAGMA page_size = 512;", "CREATE TABLE example(col);"]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let table_page_id = find_table_page_id("example", file.path());
+
+        let initial_pages = pager.num_pages();
+        assert_eq!(initial_pages, 2);
+
+        let mut cursor = BtreeCursor::new(table_page_id, &pager, &bctx).unwrap();
+
+        for i in 0..200 {
+            cursor
+                .table_insert(i, &SlicePayload::new(&[i as u8; 300]).unwrap())
+                .unwrap();
+        }
+        // More than 1 interior page. I.e. 2 level interior pages.
+        assert!(pager.num_pages() > initial_pages + 200 + 1);
+
+        cursor.move_to_first().unwrap();
+        for _ in 0..200 {
+            cursor.delete().unwrap();
+        }
+        assert!(cursor.get_table_payload().unwrap().is_none());
+
+        cursor.move_to_first().unwrap();
+        assert!(cursor.get_table_payload().unwrap().is_none());
+
+        assert_eq!(pager.num_pages() - pager.num_free_pages(), initial_pages);
     }
 }
