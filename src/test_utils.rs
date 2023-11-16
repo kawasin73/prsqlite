@@ -25,7 +25,9 @@ use crate::pager::Pager;
 use crate::payload::Payload;
 use crate::record::RecordPayload;
 use crate::schema::Schema;
+use crate::value::Collation;
 use crate::value::Value;
+use crate::value::ValueCmp;
 use crate::Connection;
 use crate::DatabaseHeader;
 use crate::Expression;
@@ -124,4 +126,11 @@ pub fn build_record(record: &[Option<&Value>]) -> Vec<u8> {
         payload.size().get() as usize
     );
     buf
+}
+
+pub fn build_comparators<'a>(values: &'a [Option<Value>]) -> Vec<Option<ValueCmp<'a>>> {
+    values
+        .iter()
+        .map(|v| v.as_ref().map(|v| ValueCmp::new(v, &Collation::Binary)))
+        .collect::<Vec<_>>()
 }

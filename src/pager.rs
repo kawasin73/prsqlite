@@ -32,6 +32,8 @@ use std::rc::Rc;
 use crate::header::DatabaseHeader;
 use crate::header::DatabaseHeaderMut;
 use crate::header::DATABASE_HEADER_SIZE;
+use crate::payload::Payload;
+use crate::payload::PayloadSize;
 
 /// Page 1 is special:
 ///
@@ -476,6 +478,36 @@ impl MemPage {
     #[inline(always)]
     pub fn buffer(&self) -> PageBuffer {
         PageBuffer(self.page.borrow())
+    }
+}
+
+pub struct PagePayload {
+    page: MemPage,
+    offset: usize,
+    size: PayloadSize,
+}
+
+impl PagePayload {
+    pub fn new(page: &MemPage, offset: usize, size: PayloadSize) -> Self {
+        let page = MemPage {
+            page: page.page.clone(),
+            header_offset: page.header_offset,
+        };
+        Self { page, offset, size }
+    }
+}
+
+impl Payload<()> for PagePayload {
+    fn size(&self) -> PayloadSize {
+        self.size
+    }
+
+    fn load(&self, offset: usize, buf: &mut [u8]) -> std::result::Result<usize, ()> {
+        assert!(offset <= self.size.get() as usize);
+        let n = buf.len().min(self.size.get() as usize - offset);
+        buf[..n]
+            .copy_from_slice(&self.page.buffer()[self.offset + offset..self.offset + offset + n]);
+        Ok(n)
     }
 }
 

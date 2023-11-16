@@ -44,6 +44,7 @@ use crate::pager::MemPage;
 use crate::pager::PageBuffer;
 use crate::pager::PageBufferMut;
 use crate::pager::PageId;
+use crate::pager::PagePayload;
 use crate::pager::Pager;
 use crate::payload::LocalPayload;
 use crate::payload::Payload;
@@ -393,22 +394,9 @@ impl<'a> BtreeCursor<'a> {
 
     pub fn move_to_last(&mut self) -> Result<()> {
         self.move_to_root();
-        if self.current_page.n_cells == 0 {
-            self.current_page.idx_cell = 0;
-        } else {
-            while !self.current_page.page_type.is_leaf() {
-                let page_id = BtreePageHeader::from_page(
-                    &self.current_page.mem,
-                    &self.current_page.mem.buffer(),
-                )
-                .right_page_id()
-                .map_err(|e| Error::FileCorrupt {
-                    page_id: self.current_page.page_id,
-                    e,
-                })?;
-                self.move_to_child(page_id)?;
-            }
-            self.current_page.idx_cell = self.current_page.n_cells - 1;
+        self.move_to_right_most()?;
+        if self.current_page.n_cells != 0 {
+            self.current_page.idx_cell -= 1;
         }
         self.initialized = true;
         Ok(())
@@ -597,10 +585,10 @@ impl<'a> BtreeCursor<'a> {
         }
     }
 
-    fn insert_cell<P: Payload<()>>(
+    fn insert_cell(
         &mut self,
         cell_header: &[u8],
-        payload: &P,
+        payload: &dyn Payload<()>,
         n_local: u16,
         overflow_page_id: Option<PageId>,
     ) -> Result<()> {
@@ -829,7 +817,7 @@ impl<'a> BtreeCursor<'a> {
 
             // Split the overflowing page.
             if depth == 0 {
-                let (page_id, new_page) =
+                let (new_page_id, new_page) =
                     self.pager.allocate_page().map_err(Error::AllocatePage)?;
                 // make_page_mut() must succeed for allocated pages.
                 let mut new_buffer = self.pager.make_page_mut(&new_page).unwrap();
@@ -843,7 +831,7 @@ impl<'a> BtreeCursor<'a> {
                 page_header
                     .set_cell_content_area_offset(non_zero_to_u16(self.btree_ctx.usable_size));
                 page_header.clear_fragmented_free_bytes();
-                page_header.set_right_page_id(page_id);
+                page_header.set_right_page_id(new_page_id);
                 if current_page.mem.header_offset > 0 {
                     // Move database header back to page 1.
                     buffer[..current_page.mem.header_offset]
@@ -863,13 +851,15 @@ impl<'a> BtreeCursor<'a> {
                 }
                 drop(buffer);
                 drop(new_buffer);
-                let mut new_page = new_page;
-                std::mem::swap(&mut current_page.mem, &mut new_page);
+                let mut root_page = new_page;
+                std::mem::swap(&mut current_page.mem, &mut root_page);
+                let root_page_id = current_page.page_id;
+                current_page.page_id = new_page_id;
                 self.parent_pages.insert(
                     0,
                     CursorPage {
-                        page_id,
-                        mem: new_page,
+                        page_id: root_page_id,
+                        mem: root_page,
                         idx_cell: 0,
                         n_cells: 0,
                         page_type: root_page_type,
@@ -1227,6 +1217,7 @@ impl<'a> BtreeCursor<'a> {
                 // The new_page contains the new cell. Note that new_buffer (left_buffer) may
                 // not points at the buffer of new_page.
                 current_page.mem = new_page;
+                current_page.page_id = new_page_id;
                 current_page.n_cells = n_new_cells;
                 current_page.n_cells -= (!move_to_right && !is_table_leaf) as u16;
                 current_page.idx_cell = new_idx_cell;
@@ -1324,8 +1315,6 @@ impl<'a> BtreeCursor<'a> {
             return Err(Error::NotInitialized);
         } else if self.current_page.idx_cell >= self.current_page.n_cells {
             return Err(Error::NoEntry);
-        } else if self.current_page.page_type.is_index() {
-            todo!("delete index page");
         }
         assert!(self.current_page.n_cells > 0);
         assert!(self.current_page.idx_cell < self.current_page.n_cells);
@@ -1357,11 +1346,148 @@ impl<'a> BtreeCursor<'a> {
             drop(buffer);
         }
 
-        if self.current_page.page_type.is_leaf() {
-            loop {
-                if self.current_page.n_cells > self.current_page.page_type.is_leaf() as u16 {
-                    let header_size = self.current_page.page_type.header_size();
+        if !self.current_page.page_type.is_leaf() {
+            assert!(self.current_page.page_type.is_index());
 
+            // TODO: Delete cell in interior page.
+            todo!("delete cell in interior page");
+
+            // Fill the interior cell with the right most cell in child.
+        }
+
+        loop {
+            if self.current_page.n_cells > self.current_page.page_type.is_leaf() as u16 {
+                let header_size = self.current_page.page_type.header_size();
+
+                let mut buffer = self
+                    .pager
+                    .make_page_mut(&self.current_page.mem)
+                    .map_err(|e| Error::Pager {
+                        page_id: self.current_page.page_id,
+                        e,
+                    })?;
+
+                let remove_right_page = self.current_page.idx_cell == self.current_page.n_cells;
+                let cell_offset = if remove_right_page {
+                    assert!(!self.current_page.page_type.is_leaf());
+                    self.current_page.idx_cell -= 1;
+
+                    let cell_offset = get_cell_offset(
+                        &self.current_page.mem,
+                        &buffer,
+                        self.current_page.idx_cell,
+                        header_size,
+                    )
+                    .map_err(|e| Error::FileCorrupt {
+                        page_id: self.current_page.page_id,
+                        e,
+                    })?;
+
+                    buffer.copy_within(cell_offset..cell_offset + 4, BTREE_RIGHT_PAGE_ID_OFFSET);
+                    cell_offset
+                } else {
+                    let cell_offset = get_cell_offset(
+                        &self.current_page.mem,
+                        &buffer,
+                        self.current_page.idx_cell,
+                        header_size,
+                    )
+                    .map_err(|e| Error::FileCorrupt {
+                        page_id: self.current_page.page_id,
+                        e,
+                    })?;
+
+                    let cell_pointers_tail_offset = cell_pointer_offset(
+                        &self.current_page.mem,
+                        self.current_page.n_cells,
+                        header_size,
+                    );
+                    let cell_pointer_offset = cell_pointer_offset(
+                        &self.current_page.mem,
+                        self.current_page.idx_cell,
+                        header_size,
+                    );
+
+                    // Move the cell pointers.
+                    buffer.copy_within(
+                        cell_pointer_offset + 2..cell_pointers_tail_offset,
+                        cell_pointer_offset,
+                    );
+
+                    cell_offset
+                };
+
+                let cell_size = self.current_page.page_type.compute_cell_size_fn()(
+                    self.btree_ctx,
+                    &buffer,
+                    cell_offset,
+                )
+                .map_err(|e| Error::FileCorrupt {
+                    page_id: self.current_page.page_id,
+                    e,
+                })?;
+
+                Self::free_cell(&self.current_page.mem, &mut buffer, cell_offset, cell_size);
+
+                // Update page header.
+                self.current_page.n_cells -= 1;
+                let mut page_header =
+                    BtreePageHeaderMut::from_page(&self.current_page.mem, &mut buffer);
+                page_header.set_n_cells(self.current_page.n_cells);
+                drop(buffer);
+                if !self.current_page.page_type.is_leaf() {
+                    if self.current_page.page_type.is_index() {
+                        let payload_size =
+                            (cell_size as u64 - 4)
+                                .try_into()
+                                .map_err(|_| Error::FileCorrupt {
+                                    page_id: self.current_page.page_id,
+                                    e: FileCorrupt::new("cell size"),
+                                })?;
+                        // The payload of the freed cell is not broken because freeblocks only
+                        // overwrites the first 4 bytes of the cell.
+                        // Using PagePayload pointing the freed cell for insert_cell() is safe.
+                        // insert_cell() first copies the payload to the leaf page. Even if the
+                        // new cell is inserted into the parent interior page as the divider, it
+                        // is copied into interior_cell_buf.
+                        // TODO: This can save memory copy. But it is not safe because the freed
+                        // cell may be overwritten by future change for insert_cell().
+                        let payload =
+                            PagePayload::new(&self.current_page.mem, cell_offset + 4, payload_size);
+                        if remove_right_page {
+                            self.move_to_right_most()?;
+                        } else {
+                            self.move_to_left_most()?;
+                        }
+                        // Insert the payload of the removed cell to child page.
+                        self.insert_cell(&[], &payload, payload.size().get() as u16, None)?;
+                    } else {
+                        self.move_to_left_most()?;
+                    }
+                }
+                break;
+            } else {
+                let page_id = self.current_page.page_id;
+                if self.back_to_parent() {
+                    // Remove the child page.
+                    self.pager
+                        .delete_page(page_id)
+                        .map_err(|e| Error::Pager { page_id, e })?;
+
+                    assert!(!self.current_page.page_type.is_leaf());
+                    if self.current_page.page_type.is_table()
+                        && self.current_page.idx_cell != self.current_page.n_cells
+                        && self.current_page.n_cells == 1
+                    {
+                        // TODO: Optimization: shrink the page level by
+                        // replacing the interior page with the right child
+                        // page.
+                    }
+                } else {
+                    // Initialize the root page.
+                    self.current_page.page_type = self.current_page.page_type.leaf_type();
+                    self.current_page.idx_cell = 0;
+                    self.current_page.n_cells = 0;
                     let mut buffer =
                         self.pager
                             .make_page_mut(&self.current_page.mem)
@@ -1369,129 +1495,17 @@ impl<'a> BtreeCursor<'a> {
                                 page_id: self.current_page.page_id,
                                 e,
                             })?;
-
-                    let cell_offset = if self.current_page.idx_cell == self.current_page.n_cells {
-                        assert!(!self.current_page.page_type.is_leaf());
-                        self.current_page.idx_cell -= 1;
-
-                        let cell_offset = get_cell_offset(
-                            &self.current_page.mem,
-                            &buffer,
-                            self.current_page.idx_cell,
-                            header_size,
-                        )
-                        .map_err(|e| Error::FileCorrupt {
-                            page_id: self.current_page.page_id,
-                            e,
-                        })?;
-
-                        buffer
-                            .copy_within(cell_offset..cell_offset + 4, BTREE_RIGHT_PAGE_ID_OFFSET);
-                        cell_offset
-                    } else {
-                        let cell_offset = get_cell_offset(
-                            &self.current_page.mem,
-                            &buffer,
-                            self.current_page.idx_cell,
-                            header_size,
-                        )
-                        .map_err(|e| Error::FileCorrupt {
-                            page_id: self.current_page.page_id,
-                            e,
-                        })?;
-
-                        let cell_pointers_tail_offset = cell_pointer_offset(
-                            &self.current_page.mem,
-                            self.current_page.n_cells,
-                            header_size,
-                        );
-                        let cell_pointer_offset = cell_pointer_offset(
-                            &self.current_page.mem,
-                            self.current_page.idx_cell,
-                            header_size,
-                        );
-
-                        // Move the cell pointers.
-                        buffer.copy_within(
-                            cell_pointer_offset + 2..cell_pointers_tail_offset,
-                            cell_pointer_offset,
-                        );
-
-                        cell_offset
-                    };
-
-                    let cell_size = self.current_page.page_type.compute_cell_size_fn()(
-                        self.btree_ctx,
-                        &buffer,
-                        cell_offset,
-                    )
-                    .map_err(|e| Error::FileCorrupt {
-                        page_id: self.current_page.page_id,
-                        e,
-                    })?;
-
-                    Self::free_cell(&self.current_page.mem, &mut buffer, cell_offset, cell_size);
-
-                    // Update page header.
-                    self.current_page.n_cells -= 1;
                     let mut page_header =
                         BtreePageHeaderMut::from_page(&self.current_page.mem, &mut buffer);
-                    page_header.set_n_cells(self.current_page.n_cells);
-                    drop(buffer);
-                    if self.current_page.page_type.is_table()
-                        && !self.current_page.page_type.is_leaf()
-                    {
-                        self.move_to_left_most()?;
-                    }
+                    page_header.set_page_type(self.current_page.page_type);
+                    page_header.set_first_freeblock_offset(0);
+                    page_header.set_n_cells(0);
+                    page_header
+                        .set_cell_content_area_offset(non_zero_to_u16(self.btree_ctx.usable_size));
+                    page_header.clear_fragmented_free_bytes();
                     break;
-                } else {
-                    let page_id = self.current_page.page_id;
-                    if self.back_to_parent() {
-                        // Remove the child page.
-                        self.pager
-                            .delete_page(page_id)
-                            .map_err(|e| Error::Pager { page_id, e })?;
-
-                        assert!(!self.current_page.page_type.is_leaf());
-                        if self.current_page.page_type.is_table()
-                            && self.current_page.idx_cell != self.current_page.n_cells
-                            && self.current_page.n_cells == 1
-                        {
-                            // TODO: Optimization: shrink the page level by
-                            // replacing the interior page with the right child
-                            // page.
-                        } else if self.current_page.page_type.is_index() {
-                            todo!("delete index page");
-                        }
-                    } else {
-                        // Initialize the root page.
-                        self.current_page.page_type = self.current_page.page_type.leaf_type();
-                        self.current_page.idx_cell = 0;
-                        self.current_page.n_cells = 0;
-                        let mut buffer =
-                            self.pager
-                                .make_page_mut(&self.current_page.mem)
-                                .map_err(|e| Error::Pager {
-                                    page_id: self.current_page.page_id,
-                                    e,
-                                })?;
-                        let mut page_header =
-                            BtreePageHeaderMut::from_page(&self.current_page.mem, &mut buffer);
-                        page_header.set_page_type(self.current_page.page_type);
-                        page_header.set_first_freeblock_offset(0);
-                        page_header.set_n_cells(0);
-                        page_header.set_cell_content_area_offset(non_zero_to_u16(
-                            self.btree_ctx.usable_size,
-                        ));
-                        page_header.clear_fragmented_free_bytes();
-                        break;
-                    }
                 }
             }
-        } else {
-            assert!(self.current_page.page_type.is_index());
-
-            // TODO: Delete cell in interior page.
         }
         Ok(())
     }
@@ -1527,6 +1541,7 @@ impl<'a> BtreeCursor<'a> {
     }
 
     fn free_cell(page: &MemPage, buffer: &mut PageBufferMut, offset: usize, cell_size: u16) {
+        let cell_size = if cell_size < 4 { 4 } else { cell_size };
         buffer.copy_within(BTREE_FIRST_FREEBLOCK_OFFSET, offset);
         set_u16(buffer, offset + 2, cell_size);
         let mut page_header = BtreePageHeaderMut::from_page(page, buffer);
@@ -1662,6 +1677,22 @@ impl<'a> BtreeCursor<'a> {
             self.move_to_child(page_id)?;
         }
         Ok(true)
+    }
+
+    fn move_to_right_most(&mut self) -> Result<()> {
+        while !self.current_page.page_type.is_leaf() {
+            let page_id =
+                BtreePageHeader::from_page(&self.current_page.mem, &self.current_page.mem.buffer())
+                    .right_page_id()
+                    .map_err(|e| Error::FileCorrupt {
+                        page_id: self.current_page.page_id,
+                        e,
+                    })?;
+            self.current_page.idx_cell = self.current_page.n_cells;
+            self.move_to_child(page_id)?;
+        }
+        self.current_page.idx_cell = self.current_page.n_cells;
+        Ok(())
     }
 
     fn move_to_root(&mut self) {
@@ -4809,6 +4840,306 @@ mod tests {
 
         cursor.move_to_first().unwrap();
         assert!(cursor.get_table_payload().unwrap().is_none());
+
+        assert_eq!(pager.num_pages() - pager.num_free_pages(), initial_pages);
+    }
+
+    #[test]
+    fn test_delete_single_index_leaf_page() {
+        let file = create_sqlite_database(&[
+            "PRAGMA page_size = 512;",
+            "CREATE TABLE example(col);",
+            "CREATE INDEX index1 ON example(col);",
+        ]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let index_page_id = find_index_page_id("index1", file.path());
+
+        let mut cursor = BtreeCursor::new(index_page_id, &pager, &bctx).unwrap();
+
+        let mut entries = Vec::new();
+        let mut payloads = Vec::new();
+        for i in 0..10 {
+            let values = [Some(Value::Integer(i)), Some(Value::Integer(i))];
+            let payload = build_record(
+                values
+                    .iter()
+                    .map(Option::as_ref)
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            );
+            cursor
+                .index_insert(
+                    &build_comparators(values.as_slice()),
+                    &SlicePayload::new(&payload).unwrap(),
+                )
+                .unwrap();
+            entries.push(values);
+            payloads.push(payload);
+        }
+
+        cursor.move_to_last().unwrap();
+        cursor.move_next().unwrap();
+        assert!(matches!(cursor.delete(), Err(Error::NoEntry)));
+        assert!(cursor.get_index_payload().unwrap().is_none());
+
+        cursor
+            .index_move_to(&build_comparators(&entries[9]))
+            .unwrap();
+        cursor.delete().unwrap();
+        assert!(cursor.get_index_payload().unwrap().is_none());
+
+        cursor.move_to_first().unwrap();
+        for expected in payloads.iter().take(9) {
+            let payload = cursor.get_index_payload().unwrap().unwrap();
+            assert_eq!(payload.buf(), expected);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        assert!(cursor.get_index_payload().unwrap().is_none());
+
+        cursor
+            .index_move_to(&build_comparators(&entries[0]))
+            .unwrap();
+        cursor.delete().unwrap();
+        let payload = cursor.get_index_payload().unwrap().unwrap();
+        assert_eq!(payload.buf(), &payloads[1]);
+        drop(payload);
+
+        cursor.move_to_first().unwrap();
+        for expected in payloads.iter().take(9).skip(1) {
+            let payload = cursor.get_index_payload().unwrap().unwrap();
+            assert_eq!(payload.buf(), expected);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        assert!(cursor.get_index_payload().unwrap().is_none());
+
+        cursor
+            .index_move_to(&build_comparators(&entries[2]))
+            .unwrap();
+        cursor.delete().unwrap();
+        let payload = cursor.get_index_payload().unwrap().unwrap();
+        assert_eq!(payload.buf(), &payloads[3]);
+        drop(payload);
+
+        cursor.move_to_first().unwrap();
+        let payload = cursor.get_index_payload().unwrap().unwrap();
+        assert_eq!(payload.buf(), &payloads[1]);
+        drop(payload);
+        cursor.move_next().unwrap();
+        for expected in payloads.iter().take(9).skip(3) {
+            let payload = cursor.get_index_payload().unwrap().unwrap();
+            assert_eq!(payload.buf(), expected);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        assert!(cursor.get_index_payload().unwrap().is_none());
+
+        cursor.move_to_first().unwrap();
+        for _ in 0..7 {
+            cursor.delete().unwrap();
+        }
+        assert!(matches!(cursor.delete(), Err(Error::NoEntry)));
+
+        cursor.move_to_first().unwrap();
+        assert!(cursor.get_index_payload().unwrap().is_none());
+
+        // The root page is cleared
+        let root_page = pager.get_page(index_page_id).unwrap();
+        let buffer = root_page.buffer();
+        let page_header = BtreePageHeader::from_page(&root_page, &buffer);
+        assert!(page_header.page_type().is_leaf());
+        assert_eq!(page_header.n_cells(), 0);
+        assert_eq!(page_header.first_freeblock_offset(), 0);
+        assert_eq!(page_header.fragmented_free_bytes(), 0);
+        assert_eq!(
+            page_header.cell_content_area_offset().get(),
+            bctx.usable_size
+        );
+    }
+
+    #[test]
+    fn test_delete_index_leaf_page_freeblock() {
+        let file = create_sqlite_database(&[
+            "PRAGMA page_size = 512;",
+            "CREATE TABLE example(col);",
+            "CREATE INDEX index1 ON example(col);",
+        ]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let index_page_id = find_index_page_id("index1", file.path());
+
+        let mut cursor = BtreeCursor::new(index_page_id, &pager, &bctx).unwrap();
+
+        let mut entries = Vec::new();
+        let mut payloads = Vec::new();
+        for i in 0..4 {
+            let values = [
+                Some(Value::Blob(vec![i as u8; 97].into())),
+                Some(Value::Integer(i)),
+            ];
+            let payload = build_record(
+                values
+                    .iter()
+                    .map(Option::as_ref)
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            );
+            cursor
+                .index_insert(
+                    &build_comparators(values.as_slice()),
+                    &SlicePayload::new(&payload).unwrap(),
+                )
+                .unwrap();
+            entries.push(values);
+            payloads.push(payload);
+        }
+
+        let root_page = pager.get_page(index_page_id).unwrap();
+        let buffer = root_page.buffer();
+        let page_header = BtreePageHeader::from_page(&root_page, &buffer);
+        assert_eq!(page_header.first_freeblock_offset(), 0);
+        drop(buffer);
+
+        cursor.move_to_first().unwrap();
+
+        // Delete 2 cells.
+        cursor.delete().unwrap();
+        cursor.move_next().unwrap();
+        cursor.delete().unwrap();
+
+        let buffer = root_page.buffer();
+        let page_header = BtreePageHeader::from_page(&root_page, &buffer);
+        assert_ne!(page_header.first_freeblock_offset(), 0);
+        drop(buffer);
+
+        let values = [
+            Some(Value::Blob(vec![4; 97].into())),
+            Some(Value::Integer(4)),
+        ];
+        let payload = build_record(
+            values
+                .iter()
+                .map(Option::as_ref)
+                .collect::<Vec<_>>()
+                .as_slice(),
+        );
+        cursor
+            .index_insert(
+                &build_comparators(values.as_slice()),
+                &SlicePayload::new(&payload).unwrap(),
+            )
+            .unwrap();
+        entries.push(values);
+        payloads.push(payload);
+
+        // No defragment but use the freeblock.
+        let buffer = root_page.buffer();
+        let page_header = BtreePageHeader::from_page(&root_page, &buffer);
+        assert_ne!(page_header.first_freeblock_offset(), 0);
+        drop(buffer);
+
+        cursor.move_to_first().unwrap();
+        for i in [1, 3, 4] {
+            let payload = cursor.get_index_payload().unwrap().unwrap();
+            assert_eq!(payload.buf(), &payloads[i]);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        assert!(cursor.get_index_payload().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_delete_index_leaf() {
+        // Deleting entries from leaf pages.
+        let file = create_sqlite_database(&[
+            "PRAGMA page_size = 512;",
+            "CREATE TABLE example(col);",
+            "CREATE INDEX index1 ON example(col);",
+        ]);
+        let pager = create_pager(file.as_file().try_clone().unwrap()).unwrap();
+        let bctx = load_btree_context(file.as_file()).unwrap();
+        let index_page_id = find_index_page_id("index1", file.path());
+
+        let initial_pages = pager.num_pages();
+        assert_eq!(initial_pages, 3);
+
+        let mut cursor = BtreeCursor::new(index_page_id, &pager, &bctx).unwrap();
+
+        // At least 3 levels.
+        let mut entries = Vec::new();
+        let mut payloads = Vec::new();
+        for i in 0..24 {
+            let values = [
+                Some(Value::Blob(vec![i as u8; 97].into())),
+                Some(Value::Integer(i)),
+            ];
+            let payload = build_record(
+                values
+                    .iter()
+                    .map(Option::as_ref)
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            );
+            cursor
+                .index_insert(
+                    &build_comparators(values.as_slice()),
+                    &SlicePayload::new(&payload).unwrap(),
+                )
+                .unwrap();
+            entries.push(values);
+            payloads.push(payload);
+        }
+
+        cursor.move_to_first().unwrap();
+        assert!(cursor.parent_pages.len() >= 2);
+        for expected in payloads.iter().take(24) {
+            let payload = cursor.get_index_payload().unwrap().unwrap();
+            assert_eq!(payload.buf(), expected);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        assert!(cursor.get_index_payload().unwrap().is_none());
+
+        // Delete last 4 entries. At least, the last leaf page is deleted.
+        for i in 0..4 {
+            cursor
+                .index_move_to(&build_comparators(&entries[23 - i]))
+                .unwrap();
+            cursor.delete().unwrap();
+        }
+
+        cursor.move_to_first().unwrap();
+        for expected in payloads.iter().take(20) {
+            let payload = cursor.get_index_payload().unwrap().unwrap();
+            assert_eq!(payload.buf(), expected);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        assert!(cursor.get_index_payload().unwrap().is_none());
+
+        // Delete the first leaf page.
+        for entry in entries.iter().take(4) {
+            cursor.index_move_to(&build_comparators(entry)).unwrap();
+            cursor.delete().unwrap();
+        }
+
+        for expected in payloads.iter().take(20).skip(4) {
+            let payload = cursor.get_index_payload().unwrap().unwrap();
+            assert_eq!(payload.buf(), expected);
+            drop(payload);
+            cursor.move_next().unwrap();
+        }
+        assert!(cursor.get_index_payload().unwrap().is_none());
+
+        cursor.move_to_first().unwrap();
+        for _ in 0..16 {
+            cursor.delete().unwrap();
+        }
+
+        cursor.move_to_first().unwrap();
+        assert!(cursor.get_index_payload().unwrap().is_none());
 
         assert_eq!(pager.num_pages() - pager.num_free_pages(), initial_pages);
     }

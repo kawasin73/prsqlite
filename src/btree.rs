@@ -811,11 +811,11 @@ pub fn allocate_from_unallocated_space(
 }
 
 /// Write a table leaf cell to the specified offset.
-pub fn write_leaf_cell<P: Payload<()>>(
+pub fn write_leaf_cell(
     buffer: &mut PageBufferMut,
     offset: usize,
     cell_header: &[u8],
-    payload: &P,
+    payload: &dyn Payload<()>,
     n_local: u16,
     overflow_page_id: Option<PageId>,
 ) {
