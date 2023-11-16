@@ -15,8 +15,11 @@
 /// The interface for payload.
 pub trait Payload<E> {
     fn size(&self) -> PayloadSize;
-    fn buf(&self) -> &[u8];
     fn load(&self, offset: usize, buf: &mut [u8]) -> Result<usize, E>;
+}
+
+pub trait LocalPayload<E>: Payload<E> {
+    fn buf(&self) -> &[u8];
 }
 
 pub struct SlicePayload<'a> {
@@ -38,15 +41,17 @@ impl Payload<()> for SlicePayload<'_> {
         self.size
     }
 
-    fn buf(&self) -> &[u8] {
-        self.buf
-    }
-
     fn load(&self, offset: usize, buf: &mut [u8]) -> std::result::Result<usize, ()> {
         assert!(offset <= self.buf.len());
         let n = buf.len().min(self.buf.len() - offset);
         buf[..n].copy_from_slice(&self.buf[offset..offset + n]);
         Ok(n)
+    }
+}
+
+impl LocalPayload<()> for SlicePayload<'_> {
+    fn buf(&self) -> &[u8] {
+        self.buf
     }
 }
 

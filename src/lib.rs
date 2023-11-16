@@ -59,6 +59,7 @@ use parser::Parser;
 use parser::ResultColumn;
 use parser::Select;
 use parser::Stmt;
+use payload::LocalPayload;
 use payload::Payload;
 use record::parse_record;
 use record::parse_record_header;

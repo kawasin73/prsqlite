@@ -45,6 +45,7 @@ use crate::pager::PageBuffer;
 use crate::pager::PageBufferMut;
 use crate::pager::PageId;
 use crate::pager::Pager;
+use crate::payload::LocalPayload;
 use crate::payload::Payload;
 use crate::payload::PayloadSize;
 use crate::record::compare_record;
@@ -115,17 +116,10 @@ pub struct BtreePayload<'a> {
     payload_info: PayloadInfo,
 }
 
-impl<'a> Payload<Error> for BtreePayload<'a> {
+impl Payload<Error> for BtreePayload<'_> {
     /// The size of the payload.
     fn size(&self) -> PayloadSize {
         self.payload_info.payload_size
-    }
-
-    /// The local payload.
-    ///
-    /// This may not be the entire payload if there is overflow page.
-    fn buf(&self) -> &[u8] {
-        &self.local_payload_buffer[self.payload_info.local_range.clone()]
     }
 
     /// Load the payload into the buffer.
@@ -186,6 +180,15 @@ impl<'a> Payload<Error> for BtreePayload<'a> {
         }
 
         Ok(n_loaded)
+    }
+}
+
+impl<'a> LocalPayload<Error> for BtreePayload<'a> {
+    /// The local payload.
+    ///
+    /// This may not be the entire payload if there is overflow page.
+    fn buf(&self) -> &[u8] {
+        &self.local_payload_buffer[self.payload_info.local_range.clone()]
     }
 }
 

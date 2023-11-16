@@ -20,6 +20,7 @@ use anyhow::bail;
 use anyhow::Context;
 
 use crate::cursor::BtreePayload;
+use crate::payload::LocalPayload;
 use crate::payload::Payload;
 use crate::payload::PayloadSize;
 use crate::utils::len_varint;
@@ -141,7 +142,7 @@ impl SerialType {
     }
 }
 
-pub struct Record<'a, P: Payload<E>, E> {
+pub struct Record<'a, P: LocalPayload<E>, E> {
     payload: &'a P,
     header: Vec<(SerialType, usize)>,
     tmp_buf: Vec<u8>,
@@ -155,7 +156,7 @@ pub fn parse_record<'a>(
     Record::parse(payload)
 }
 
-impl<'a, P: Payload<E>, E: Debug> Record<'a, P, E> {
+impl<'a, P: LocalPayload<E>, E: Debug> Record<'a, P, E> {
     pub fn parse(payload: &'a P) -> anyhow::Result<Self> {
         let header = parse_record_header_payload(payload)?;
         Ok(Self {
@@ -204,7 +205,7 @@ pub fn parse_record_header(payload: &BtreePayload) -> anyhow::Result<Vec<(Serial
 /// Parse record header and return a list of serial types and content offsets.
 ///
 /// TODO: support partial parsing.
-fn parse_record_header_payload<P: Payload<E>, E: Debug>(
+fn parse_record_header_payload<P: LocalPayload<E>, E: Debug>(
     payload: &P,
 ) -> anyhow::Result<Vec<(SerialType, usize)>> {
     let local_buf = payload.buf();
@@ -336,10 +337,6 @@ impl<'a> RecordPayload<'a> {
 impl Payload<()> for RecordPayload<'_> {
     fn size(&self) -> PayloadSize {
         self.payload_size
-    }
-
-    fn buf(&self) -> &[u8] {
-        &[]
     }
 
     /// Copy the record payload to the buffer.
