@@ -300,7 +300,7 @@ impl<'a> BtreeCursor<'a> {
             }
 
             drop(buffer);
-            self.move_to_current_child()?;
+            assert!(self.move_to_current_child()?);
         }
     }
 
@@ -378,7 +378,7 @@ impl<'a> BtreeCursor<'a> {
             }
 
             drop(buffer);
-            self.move_to_current_child()?;
+            assert!(self.move_to_current_child()?);
         }
     }
 
@@ -394,7 +394,10 @@ impl<'a> BtreeCursor<'a> {
 
     pub fn move_to_last(&mut self) -> Result<()> {
         self.move_to_root();
-        self.move_to_right_most()?;
+        self.current_page.idx_cell = self.current_page.n_cells;
+        if !self.current_page.page_type.is_leaf() {
+            assert!(self.move_to_right_most()?);
+        }
         if self.current_page.n_cells != 0 {
             self.current_page.idx_cell -= 1;
         }
@@ -1236,7 +1239,6 @@ impl<'a> BtreeCursor<'a> {
         let mut n_deleted = 0;
         loop {
             if self.current_page.page_type.is_leaf() {
-                // TODO: Delete overflow payloads.
                 self.current_page.idx_cell = self.current_page.n_cells;
                 while self.current_page.idx_cell == self.current_page.n_cells {
                     if self.current_page.page_type.is_leaf()
@@ -1302,9 +1304,7 @@ impl<'a> BtreeCursor<'a> {
                 assert!(!self.current_page.page_type.is_leaf());
             }
 
-            // TODO: Delete overflow payloads.
-
-            self.move_to_current_child()?;
+            assert!(self.move_to_current_child()?);
         }
     }
 
@@ -1455,14 +1455,14 @@ impl<'a> BtreeCursor<'a> {
                         let payload =
                             PagePayload::new(&self.current_page.mem, cell_offset + 4, payload_size);
                         if remove_right_page {
-                            self.move_to_right_most()?;
+                            assert!(self.move_to_right_most()?);
                         } else {
-                            self.move_to_left_most()?;
+                            assert!(self.move_to_left_most()?);
                         }
                         // Insert the payload of the removed cell to child page.
                         self.insert_cell(&[], &payload, payload.size().get() as u16, None)?;
                     } else {
-                        self.move_to_left_most()?;
+                        assert!(self.move_to_left_most()?);
                     }
                 }
                 break;
@@ -1635,8 +1635,67 @@ impl<'a> BtreeCursor<'a> {
     /// If cursor is completed, return `Ok(false)`.
     fn move_to_left_most(&mut self) -> Result<bool> {
         assert!(!self.current_page.page_type.is_leaf());
+        if !self.move_to_current_child()? {
+            return Ok(false);
+        }
+        loop {
+            if self.current_page.page_type.is_leaf() {
+                break;
+            }
+            let buffer = self.current_page.mem.buffer();
+            let page_id = parse_btree_interior_cell_page_id(&self.current_page.mem, &buffer, 0)
+                .map_err(|e| Error::FileCorrupt {
+                    page_id: self.current_page.page_id,
+                    e,
+                })?;
+            drop(buffer);
+            self.move_to_child(page_id)?;
+        }
+        Ok(true)
+    }
+
+    fn move_to_right_most(&mut self) -> Result<bool> {
+        assert!(!self.current_page.page_type.is_leaf());
+        if !self.move_to_current_child()? {
+            return Ok(false);
+        }
+        while !self.current_page.page_type.is_leaf() {
+            let page_id =
+                BtreePageHeader::from_page(&self.current_page.mem, &self.current_page.mem.buffer())
+                    .right_page_id()
+                    .map_err(|e| Error::FileCorrupt {
+                        page_id: self.current_page.page_id,
+                        e,
+                    })?;
+            self.current_page.idx_cell = self.current_page.n_cells;
+            self.move_to_child(page_id)?;
+        }
+        self.current_page.idx_cell = self.current_page.n_cells;
+        Ok(true)
+    }
+
+    fn move_to_root(&mut self) {
+        if !self.parent_pages.is_empty() {
+            self.parent_pages.truncate(1);
+            self.current_page = self.parent_pages.pop().unwrap();
+        }
+    }
+
+    fn move_to_child(&mut self, page_id: PageId) -> Result<()> {
+        let mem = self
+            .pager
+            .get_page(page_id)
+            .map_err(|e| Error::Pager { page_id, e })?;
+        let mut page = CursorPage::new(page_id, mem);
+        std::mem::swap(&mut self.current_page, &mut page);
+        self.parent_pages.push(page);
+
+        Ok(())
+    }
+
+    fn move_to_current_child(&mut self) -> Result<bool> {
         let buffer = self.current_page.mem.buffer();
-        let page_id = match self.current_page.idx_cell.cmp(&self.current_page.n_cells) {
+        let next_page_id = match self.current_page.idx_cell.cmp(&self.current_page.n_cells) {
             Ordering::Less => parse_btree_interior_cell_page_id(
                 &self.current_page.mem,
                 &buffer,
@@ -1661,81 +1720,8 @@ impl<'a> BtreeCursor<'a> {
             }
         };
         drop(buffer);
-        self.move_to_child(page_id)?;
-        self.current_page.idx_cell = 0;
-        loop {
-            if self.current_page.page_type.is_leaf() {
-                break;
-            }
-            let buffer = self.current_page.mem.buffer();
-            let page_id = parse_btree_interior_cell_page_id(&self.current_page.mem, &buffer, 0)
-                .map_err(|e| Error::FileCorrupt {
-                    page_id: self.current_page.page_id,
-                    e,
-                })?;
-            drop(buffer);
-            self.move_to_child(page_id)?;
-        }
+        self.move_to_child(next_page_id)?;
         Ok(true)
-    }
-
-    fn move_to_right_most(&mut self) -> Result<()> {
-        while !self.current_page.page_type.is_leaf() {
-            let page_id =
-                BtreePageHeader::from_page(&self.current_page.mem, &self.current_page.mem.buffer())
-                    .right_page_id()
-                    .map_err(|e| Error::FileCorrupt {
-                        page_id: self.current_page.page_id,
-                        e,
-                    })?;
-            self.current_page.idx_cell = self.current_page.n_cells;
-            self.move_to_child(page_id)?;
-        }
-        self.current_page.idx_cell = self.current_page.n_cells;
-        Ok(())
-    }
-
-    fn move_to_root(&mut self) {
-        if !self.parent_pages.is_empty() {
-            self.parent_pages.truncate(1);
-            self.current_page = self.parent_pages.pop().unwrap();
-        }
-    }
-
-    fn move_to_child(&mut self, page_id: PageId) -> Result<()> {
-        let mem = self
-            .pager
-            .get_page(page_id)
-            .map_err(|e| Error::Pager { page_id, e })?;
-        let mut page = CursorPage::new(page_id, mem);
-        std::mem::swap(&mut self.current_page, &mut page);
-        self.parent_pages.push(page);
-
-        Ok(())
-    }
-
-    fn move_to_current_child(&mut self) -> Result<()> {
-        let buffer = self.current_page.mem.buffer();
-        let next_page_id = if self.current_page.idx_cell == self.current_page.n_cells {
-            BtreePageHeader::from_page(&self.current_page.mem, &buffer)
-                .right_page_id()
-                .map_err(|e| Error::FileCorrupt {
-                    page_id: self.current_page.page_id,
-                    e,
-                })?
-        } else {
-            parse_btree_interior_cell_page_id(
-                &self.current_page.mem,
-                &buffer,
-                self.current_page.idx_cell,
-            )
-            .map_err(|e| Error::FileCorrupt {
-                page_id: self.current_page.page_id,
-                e,
-            })?
-        };
-        drop(buffer);
-        self.move_to_child(next_page_id)
     }
 
     fn back_to_parent(&mut self) -> bool {
