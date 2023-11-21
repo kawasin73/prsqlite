@@ -18,6 +18,21 @@ pub trait Payload<E> {
     fn load(&self, offset: usize, buf: &mut [u8]) -> Result<usize, E>;
 }
 
+impl<P: CopiablePayload> Payload<()> for P {
+    fn size(&self) -> PayloadSize {
+        self.size()
+    }
+
+    fn load(&self, offset: usize, buf: &mut [u8]) -> Result<usize, ()> {
+        Ok(self.copy(offset, buf))
+    }
+}
+
+pub trait CopiablePayload {
+    fn size(&self) -> PayloadSize;
+    fn copy(&self, offset: usize, buf: &mut [u8]) -> usize;
+}
+
 pub trait LocalPayload<E>: Payload<E> {
     fn buf(&self) -> &[u8];
 }
@@ -36,16 +51,16 @@ impl<'a> SlicePayload<'a> {
     }
 }
 
-impl Payload<()> for SlicePayload<'_> {
+impl CopiablePayload for SlicePayload<'_> {
     fn size(&self) -> PayloadSize {
         self.size
     }
 
-    fn load(&self, offset: usize, buf: &mut [u8]) -> std::result::Result<usize, ()> {
+    fn copy(&self, offset: usize, buf: &mut [u8]) -> usize {
         assert!(offset <= self.buf.len());
         let n = buf.len().min(self.buf.len() - offset);
         buf[..n].copy_from_slice(&self.buf[offset..offset + n]);
-        Ok(n)
+        n
     }
 }
 

@@ -32,7 +32,7 @@ use std::rc::Rc;
 use crate::header::DatabaseHeader;
 use crate::header::DatabaseHeaderMut;
 use crate::header::DATABASE_HEADER_SIZE;
-use crate::payload::Payload;
+use crate::payload::CopiablePayload;
 use crate::payload::PayloadSize;
 
 /// Page 1 is special:
@@ -497,17 +497,17 @@ impl PagePayload {
     }
 }
 
-impl Payload<()> for PagePayload {
+impl CopiablePayload for PagePayload {
     fn size(&self) -> PayloadSize {
         self.size
     }
 
-    fn load(&self, offset: usize, buf: &mut [u8]) -> std::result::Result<usize, ()> {
+    fn copy(&self, offset: usize, buf: &mut [u8]) -> usize {
         assert!(offset <= self.size.get() as usize);
         let n = buf.len().min(self.size.get() as usize - offset);
         buf[..n]
             .copy_from_slice(&self.page.buffer()[self.offset + offset..self.offset + offset + n]);
-        Ok(n)
+        n
     }
 }
 

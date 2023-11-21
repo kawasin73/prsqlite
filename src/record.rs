@@ -20,8 +20,8 @@ use anyhow::bail;
 use anyhow::Context;
 
 use crate::cursor::BtreePayload;
+use crate::payload::CopiablePayload;
 use crate::payload::LocalPayload;
-use crate::payload::Payload;
 use crate::payload::PayloadSize;
 use crate::utils::len_varint;
 use crate::utils::parse_varint;
@@ -334,7 +334,7 @@ impl<'a> RecordPayload<'a> {
     }
 }
 
-impl Payload<()> for RecordPayload<'_> {
+impl CopiablePayload for RecordPayload<'_> {
     fn size(&self) -> PayloadSize {
         self.payload_size
     }
@@ -347,7 +347,7 @@ impl Payload<()> for RecordPayload<'_> {
     ///   larger than 9.
     /// * `buf` - The buffer to copy the payload. This must be larger than 9
     ///   bytes.
-    fn load(&self, offset: usize, buf: &mut [u8]) -> std::result::Result<usize, ()> {
+    fn copy(&self, offset: usize, buf: &mut [u8]) -> usize {
         if offset == 0 && buf.len() >= self.header_size {
             // Optimized path: most case is buf.len() <= self.header_size. Copy the header
             // with less conditional branches than below.
@@ -382,7 +382,7 @@ impl Payload<()> for RecordPayload<'_> {
                         );
                         let buf_len = buf.len();
                         buf[offset_in_buf..].copy_from_slice(&local_buf[..buf_len - offset_in_buf]);
-                        return Ok(buf.len());
+                        return buf.len();
                     }
                     assert_eq!(
                         put_varint(&mut buf[offset_in_buf..], serial_type.0 as u64),
@@ -441,7 +441,8 @@ impl Payload<()> for RecordPayload<'_> {
                 }
             }
             assert_eq!(i_data, self.payload_size.get() as usize);
-            Ok(i_data)
+
+            i_data
         } else {
             for (serial_type, value) in self.values.iter() {
                 match serial_type.0 {
@@ -465,7 +466,7 @@ impl Payload<()> for RecordPayload<'_> {
                                 buf[offset_in_buf..].copy_from_slice(
                                     &i.to_be_bytes()[8 - n..8 - n + buf_len - offset_in_buf],
                                 );
-                                return Ok(buf.len());
+                                return buf.len();
                             }
                             buf[offset_in_buf..offset_in_buf + n]
                                 .copy_from_slice(&i.to_be_bytes()[8 - n..]);
@@ -490,7 +491,7 @@ impl Payload<()> for RecordPayload<'_> {
                                 let buf_len = buf.len();
                                 buf[offset_in_buf..]
                                     .copy_from_slice(&d.to_be_bytes()[..buf_len - offset_in_buf]);
-                                return Ok(buf.len());
+                                return buf.len();
                             }
                             buf[offset_in_buf..offset_in_buf + REAL_SIZE]
                                 .copy_from_slice(&d.to_be_bytes());
@@ -515,7 +516,7 @@ impl Payload<()> for RecordPayload<'_> {
                                 let buf_len = buf.len();
                                 buf[offset_in_buf..]
                                     .copy_from_slice(&data[..buf_len - offset_in_buf]);
-                                return Ok(buf.len());
+                                return buf.len();
                             }
                             buf[offset_in_buf..offset_in_buf + n].copy_from_slice(data);
                         } else if i_data + n > offset {
@@ -528,7 +529,7 @@ impl Payload<()> for RecordPayload<'_> {
                                 &data[offset - i_data..size_to_copy + (offset - i_data)],
                             );
                             if size_to_copy == buf.len() {
-                                return Ok(buf.len());
+                                return buf.len();
                             }
                         }
                         i_data += n;
@@ -536,7 +537,8 @@ impl Payload<()> for RecordPayload<'_> {
                 }
             }
             assert_eq!(i_data, self.payload_size.get() as usize);
-            Ok(i_data - offset)
+
+            i_data - offset
         }
     }
 }
@@ -718,7 +720,7 @@ mod tests {
         let record = values.iter().map(|v| v.as_ref()).collect::<Vec<_>>();
         let payload = RecordPayload::new(&record).unwrap();
         let mut buf = vec![0; payload.size().get() as usize];
-        assert_eq!(payload.load(0, &mut buf).unwrap(), buf.len());
+        assert_eq!(payload.copy(0, &mut buf), buf.len());
         let payload2 = SlicePayload::new(&buf).unwrap();
         let mut record = Record::parse(&payload2).unwrap();
         for (i, value) in values.iter().enumerate() {
@@ -727,9 +729,9 @@ mod tests {
 
         for i in 9..buf.len() {
             buf.fill(0);
-            assert_eq!(payload.load(0, &mut buf[..i]).unwrap(), i, "split: {}", i);
+            assert_eq!(payload.copy(0, &mut buf[..i]), i, "split: {}", i);
             assert_eq!(
-                payload.load(i, &mut buf[i..]).unwrap(),
+                payload.copy(i, &mut buf[i..]),
                 buf.len() - i,
                 "split: {}",
                 i
@@ -743,21 +745,12 @@ mod tests {
 
         // No data but header only.
         let mut buf = vec![0; 2];
-        assert_eq!(
-            RecordPayload::new(&[None])
-                .unwrap()
-                .load(0, &mut buf)
-                .unwrap(),
-            2
-        );
+        assert_eq!(RecordPayload::new(&[None]).unwrap().copy(0, &mut buf), 2);
         assert_eq!(buf, vec![2, 0]);
 
         let mut buf = vec![0; 127];
         assert_eq!(
-            RecordPayload::new(&[None; 126])
-                .unwrap()
-                .load(0, &mut buf)
-                .unwrap(),
+            RecordPayload::new(&[None; 126]).unwrap().copy(0, &mut buf),
             127
         );
         assert_eq!(buf[0], 127);
@@ -771,10 +764,7 @@ mod tests {
 
         let mut buf = vec![0; 129];
         assert_eq!(
-            RecordPayload::new(&[None; 127])
-                .unwrap()
-                .load(0, &mut buf)
-                .unwrap(),
+            RecordPayload::new(&[None; 127]).unwrap().copy(0, &mut buf),
             129
         );
         assert_eq!(&buf[..2], &[129, 1]);
@@ -788,10 +778,7 @@ mod tests {
 
         let mut buf = vec![0; 130];
         assert_eq!(
-            RecordPayload::new(&[None; 128])
-                .unwrap()
-                .load(0, &mut buf)
-                .unwrap(),
+            RecordPayload::new(&[None; 128]).unwrap().copy(0, &mut buf),
             130
         );
         assert_eq!(&buf[..2], &[129, 2]);
@@ -808,8 +795,7 @@ mod tests {
         assert_eq!(
             RecordPayload::new(&[Some(&Value::Text(Buffer::Owned(vec![0x11; 58])))])
                 .unwrap()
-                .load(0, &mut buf)
-                .unwrap(),
+                .copy(0, &mut buf),
             61
         );
         assert_eq!(buf[..3], vec![3, 129, 1]);
@@ -827,8 +813,7 @@ mod tests {
         assert_eq!(
             RecordPayload::new(&[Some(&Value::Blob(Buffer::Owned(vec![0x11; 58])))])
                 .unwrap()
-                .load(0, &mut buf)
-                .unwrap(),
+                .copy(0, &mut buf),
             61
         );
         assert_eq!(buf[..3], vec![3, 129, 0]);

@@ -24,7 +24,6 @@ use crate::btree::non_zero_to_u16;
 use crate::btree::parse_btree_interior_cell_page_id;
 use crate::btree::parse_btree_table_leaf_cell;
 use crate::btree::set_u16;
-use crate::btree::write_leaf_cell;
 use crate::btree::BtreeContext;
 use crate::btree::BtreePageHeader;
 use crate::btree::BtreePageHeaderMut;
@@ -46,6 +45,7 @@ use crate::pager::PageBufferMut;
 use crate::pager::PageId;
 use crate::pager::PagePayload;
 use crate::pager::Pager;
+use crate::payload::CopiablePayload;
 use crate::payload::LocalPayload;
 use crate::payload::Payload;
 use crate::payload::PayloadSize;
@@ -190,6 +190,55 @@ impl<'a> LocalPayload<Error> for BtreePayload<'a> {
     /// This may not be the entire payload if there is overflow page.
     fn buf(&self) -> &[u8] {
         &self.local_payload_buffer[self.payload_info.local_range.clone()]
+    }
+}
+
+trait CellPayload {
+    fn size(&self) -> u16;
+    fn copy_all(&self, buf: &mut [u8]);
+}
+
+struct LeafCellPayload<'a, P: CopiablePayload> {
+    cell_header: &'a [u8],
+    payload: &'a P,
+    n_local: u16,
+    overflow_page_id: Option<PageId>,
+}
+
+impl<P: CopiablePayload> CellPayload for LeafCellPayload<'_, P> {
+    fn size(&self) -> u16 {
+        self.cell_header.len() as u16
+            + self.n_local
+            + BTREE_OVERFLOW_PAGE_ID_BYTES as u16 * self.overflow_page_id.is_some() as u16
+    }
+
+    fn copy_all(&self, buf: &mut [u8]) {
+        buf[..self.cell_header.len()].copy_from_slice(self.cell_header);
+        let payload_tail_offset = self.cell_header.len() + self.n_local as usize;
+        assert_eq!(
+            self.payload
+                .copy(0, &mut buf[self.cell_header.len()..payload_tail_offset]),
+            self.n_local as usize
+        );
+        if let Some(overflow_page_id) = self.overflow_page_id {
+            let overflow_page_id = overflow_page_id.get().to_be_bytes();
+            buf[payload_tail_offset..payload_tail_offset + overflow_page_id.len()]
+                .copy_from_slice(&overflow_page_id);
+        }
+    }
+}
+
+struct PageCellPayload {
+    payload: PagePayload,
+}
+
+impl CellPayload for PageCellPayload {
+    fn size(&self) -> u16 {
+        CopiablePayload::size(&self.payload).get() as u16
+    }
+
+    fn copy_all(&self, buf: &mut [u8]) {
+        assert_eq!(self.payload.copy(0, buf), self.size() as usize);
     }
 }
 
@@ -473,7 +522,7 @@ impl<'a> BtreeCursor<'a> {
     ///
     /// This fails if the key already exists. If you need to update the key for
     /// an entry, delete the key in the index first.
-    pub fn index_insert<P: Payload<()>>(
+    pub fn index_insert<P: CopiablePayload>(
         &mut self,
         comparators: &[Option<ValueCmp>],
         payload: &P,
@@ -492,14 +541,19 @@ impl<'a> BtreeCursor<'a> {
         let (cell_header, n_local, overflow_page_id) =
             self.pack_cell(cell_header_buf.as_mut_slice(), payload, None)?;
 
-        self.insert_cell(cell_header, payload, n_local, overflow_page_id)
+        self.insert_cell(&LeafCellPayload {
+            cell_header,
+            payload,
+            n_local,
+            overflow_page_id,
+        })
     }
 
     /// Insert or update a new item to the table.
     ///
     /// There should not be other [BtreeCursor]s pointing the same btree.
     /// Otherwise, this fails.
-    pub fn table_insert<P: Payload<()>>(&mut self, key: i64, payload: &P) -> Result<()> {
+    pub fn table_insert<P: CopiablePayload>(&mut self, key: i64, payload: &P) -> Result<()> {
         let current_cell_key = self.table_move_to(key)?;
 
         assert!(self.current_page.page_type.is_table());
@@ -517,10 +571,15 @@ impl<'a> BtreeCursor<'a> {
         let (cell_header, n_local, overflow_page_id) =
             self.pack_cell(cell_header_buf.as_mut_slice(), payload, Some(key))?;
 
-        self.insert_cell(cell_header, payload, n_local, overflow_page_id)
+        self.insert_cell(&LeafCellPayload {
+            cell_header,
+            payload,
+            n_local,
+            overflow_page_id,
+        })
     }
 
-    fn pack_cell<'b, P: Payload<()>>(
+    fn pack_cell<'b, P: CopiablePayload>(
         &self,
         cell_header_buf: &'b mut [u8],
         payload: &P,
@@ -556,12 +615,10 @@ impl<'a> BtreeCursor<'a> {
                 let mut buffer = self.pager.make_page_mut(&page).unwrap();
                 let next_page_id_buf = next_page_id.get().to_be_bytes();
                 buffer[..next_page_id_buf.len()].copy_from_slice(&next_page_id_buf);
-                let n = payload
-                    .load(
-                        i_overflow_payload,
-                        &mut buffer[next_page_id_buf.len()..self.btree_ctx.usable_size as usize],
-                    )
-                    .map_err(|_| Error::LoadPayload)?;
+                let n = payload.copy(
+                    i_overflow_payload,
+                    &mut buffer[next_page_id_buf.len()..self.btree_ctx.usable_size as usize],
+                );
                 assert_eq!(n, usable_size_overflow);
                 drop(buffer);
                 i_overflow_payload += usable_size_overflow;
@@ -574,13 +631,11 @@ impl<'a> BtreeCursor<'a> {
                 .map_err(|e| Error::Pager { page_id, e })?;
             let last_overflow_size = payload.size().get() as usize - i_overflow_payload;
             buffer[..BTREE_OVERFLOW_PAGE_ID_BYTES].fill(0);
-            let n = payload
-                .load(
-                    i_overflow_payload,
-                    &mut buffer[BTREE_OVERFLOW_PAGE_ID_BYTES
-                        ..BTREE_OVERFLOW_PAGE_ID_BYTES + last_overflow_size],
-                )
-                .map_err(|_| Error::LoadPayload)?;
+            let n = payload.copy(
+                i_overflow_payload,
+                &mut buffer[BTREE_OVERFLOW_PAGE_ID_BYTES
+                    ..BTREE_OVERFLOW_PAGE_ID_BYTES + last_overflow_size],
+            );
             assert_eq!(n, last_overflow_size);
             drop(buffer);
 
@@ -588,27 +643,14 @@ impl<'a> BtreeCursor<'a> {
         }
     }
 
-    fn insert_cell(
-        &mut self,
-        cell_header: &[u8],
-        payload: &dyn Payload<()>,
-        n_local: u16,
-        overflow_page_id: Option<PageId>,
-    ) -> Result<()> {
-        let new_cell_size = cell_header.len()
-            + n_local as usize
-            + BTREE_OVERFLOW_PAGE_ID_BYTES * overflow_page_id.is_some() as usize;
-        assert!(new_cell_size <= u16::MAX as usize);
+    fn insert_cell(&mut self, cell_payload: &dyn CellPayload) -> Result<()> {
+        let new_cell_size = cell_payload.size();
         // Allocate 4 bytes or more to be compatible to allocateSpace() of SQLite.
         // Otherwise freeSpace() of SQLite corrupts the database file (e.g. on updating
         // or deleting records). 4 bytes allocation is introduced in order to make
         // spaces easier to reused as freeblock. 1 ~ 3 bytes spaces are counted as
         // fragmented and never reused. cell_size can be less than 4 on index pages.
-        let mut new_cell_size = if new_cell_size < 4 {
-            4
-        } else {
-            new_cell_size as u16
-        };
+        let mut new_cell_size = if new_cell_size < 4 { 4 } else { new_cell_size };
 
         let mut depth = self.parent_pages.len();
         let mut interior_cell_buf = self.pager.allocate_tmp_page();
@@ -796,14 +838,7 @@ impl<'a> BtreeCursor<'a> {
                 set_u16(&mut buffer, cell_pointer_offset, allocated_offset as u16);
 
                 if page_type.is_leaf() {
-                    write_leaf_cell(
-                        &mut buffer,
-                        allocated_offset,
-                        cell_header,
-                        payload,
-                        n_local,
-                        overflow_page_id,
-                    );
+                    cell_payload.copy_all(&mut buffer[allocated_offset..]);
                 } else {
                     current_page.idx_cell += new_cell_in_right_page as u16;
                     buffer[allocated_offset..allocated_offset + new_cell_size as usize]
@@ -1024,14 +1059,7 @@ impl<'a> BtreeCursor<'a> {
                         new_cell_size,
                     );
                     assert!(current_page.page_type.is_leaf());
-                    write_leaf_cell(
-                        &mut new_buffer,
-                        cell_content_area_offset,
-                        cell_header,
-                        payload,
-                        n_local,
-                        overflow_page_id,
-                    );
+                    cell_payload.copy_all(&mut new_buffer[cell_content_area_offset..]);
 
                     let mut new_page_header =
                         BtreePageHeaderMut::from_page(&new_page, &mut new_buffer);
@@ -1073,14 +1101,7 @@ impl<'a> BtreeCursor<'a> {
                         new_cell_size,
                     );
                     if current_page.page_type.is_leaf() {
-                        write_leaf_cell(
-                            &mut new_buffer,
-                            cell_content_area_offset,
-                            cell_header,
-                            payload,
-                            n_local,
-                            overflow_page_id,
-                        );
+                        cell_payload.copy_all(&mut new_buffer[cell_content_area_offset..]);
                     } else {
                         new_buffer[cell_content_area_offset
                             ..cell_content_area_offset + new_cell_size as usize]
@@ -1460,7 +1481,7 @@ impl<'a> BtreeCursor<'a> {
                             assert!(self.move_to_left_most()?);
                         }
                         // Insert the payload of the removed cell to child page.
-                        self.insert_cell(&[], &payload, payload.size().get() as u16, None)?;
+                        self.insert_cell(&PageCellPayload { payload })?;
                     } else {
                         assert!(self.move_to_left_most()?);
                     }

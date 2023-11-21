@@ -20,7 +20,6 @@ use crate::pager::MemPage;
 use crate::pager::PageBuffer;
 use crate::pager::PageBufferMut;
 use crate::pager::PageId;
-use crate::payload::Payload;
 use crate::payload::PayloadSize;
 use crate::utils::len_varint_buffer;
 use crate::utils::parse_varint;
@@ -808,32 +807,6 @@ pub fn allocate_from_unallocated_space(
         new_cell_content_area_offset as u16,
     );
     new_cell_content_area_offset
-}
-
-/// Write a table leaf cell to the specified offset.
-pub fn write_leaf_cell(
-    buffer: &mut PageBufferMut,
-    offset: usize,
-    cell_header: &[u8],
-    payload: &dyn Payload<()>,
-    n_local: u16,
-    overflow_page_id: Option<PageId>,
-) {
-    // Copy payload to the btree page.
-    let payload_offset = offset + cell_header.len();
-    buffer[offset..payload_offset].copy_from_slice(cell_header);
-    let payload_tail_offset = payload_offset + n_local as usize;
-    assert_eq!(
-        payload
-            .load(0, &mut buffer[payload_offset..payload_tail_offset])
-            .unwrap(),
-        n_local as usize
-    );
-    if let Some(overflow_page_id) = overflow_page_id {
-        let overflow_page_id = overflow_page_id.get().to_be_bytes();
-        buffer[payload_tail_offset..payload_tail_offset + overflow_page_id.len()]
-            .copy_from_slice(&overflow_page_id);
-    }
 }
 
 /// Compute the free size of the page.
