@@ -476,15 +476,19 @@ impl<'a> BtreeCursor<'a> {
             // table page never stops in the middle of the interior page.
             assert!(self.current_page.page_type.is_leaf());
             assert!(self.current_page.idx_cell == self.current_page.n_cells);
-            loop {
-                if !self.back_to_parent() {
-                    // traversing completed.
-                    self.current_page.idx_cell += 1;
-                    break;
-                }
+            if !self.back_to_parent() {
+                // Traversing completed for single leaf btree.
                 self.current_page.idx_cell += 1;
-                if self.move_to_left_most()? {
-                    break;
+            } else {
+                loop {
+                    self.current_page.idx_cell += 1;
+                    if self.move_to_left_most()? {
+                        break;
+                    }
+                    if !self.back_to_parent() {
+                        // Traversing completed for multi level btree.
+                        break;
+                    }
                 }
             }
         } else if self.current_page.page_type.is_index() {
@@ -1820,6 +1824,12 @@ mod tests {
         assert!(cursor.get_index_payload().is_err());
         assert!(cursor.get_table_key().unwrap().is_none());
 
+        // Move to next after all consumed does not change the cursor.
+        cursor.move_next().unwrap();
+        assert!(cursor.get_table_payload().unwrap().is_none());
+        assert!(cursor.get_index_payload().is_err());
+        assert!(cursor.get_table_key().unwrap().is_none());
+
         cursor.move_to_last().unwrap();
         assert_eq!(cursor.get_table_key().unwrap().unwrap(), 3);
 
@@ -1870,6 +1880,11 @@ mod tests {
         assert!(cursor.get_table_payload().is_err());
         drop(payload);
 
+        cursor.move_next().unwrap();
+        assert!(cursor.get_index_payload().unwrap().is_none());
+        assert!(cursor.get_table_payload().is_err());
+
+        // Move to next after all consumed does not change the cursor.
         cursor.move_next().unwrap();
         assert!(cursor.get_index_payload().unwrap().is_none());
         assert!(cursor.get_table_payload().is_err());
@@ -2058,6 +2073,12 @@ mod tests {
             index2_cursor.move_next().unwrap();
         }
 
+        assert!(table_cursor.get_table_payload().unwrap().is_none());
+        assert!(index1_cursor.get_index_payload().unwrap().is_none());
+
+        // Move to next after all consumed does not change the cursor.
+        table_cursor.move_next().unwrap();
+        index1_cursor.move_next().unwrap();
         assert!(table_cursor.get_table_payload().unwrap().is_none());
         assert!(index1_cursor.get_index_payload().unwrap().is_none());
 
