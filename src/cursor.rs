@@ -1460,35 +1460,53 @@ impl<'a> BtreeCursor<'a> {
                     BtreePageHeaderMut::from_page(&self.current_page.mem, &mut buffer);
                 page_header.set_n_cells(self.current_page.n_cells);
                 drop(buffer);
-                if !self.current_page.page_type.is_leaf() {
-                    if self.current_page.page_type.is_index() {
-                        let payload_size =
-                            (cell_size as u64 - 4)
-                                .try_into()
-                                .map_err(|_| Error::FileCorrupt {
-                                    page_id: self.current_page.page_id,
-                                    e: FileCorrupt::new("cell size"),
-                                })?;
-                        // The payload of the freed cell is not broken because freeblocks only
-                        // overwrites the first 4 bytes of the cell.
-                        // Using PagePayload pointing the freed cell for insert_cell() is safe.
-                        // insert_cell() first copies the payload to the leaf page. Even if the
-                        // new cell is inserted into the parent interior page as the divider, it
-                        // is copied into interior_cell_buf.
-                        // TODO: This can save memory copy. But it is not safe because the freed
-                        // cell may be overwritten by future change for insert_cell().
-                        let payload =
-                            PagePayload::new(&self.current_page.mem, cell_offset + 4, payload_size);
-                        if remove_right_page {
-                            assert!(self.move_to_right_most()?);
-                        } else {
-                            assert!(self.move_to_left_most()?);
+                if self.current_page.page_type.is_leaf() {
+                    if self.current_page.idx_cell == self.current_page.n_cells {
+                        loop {
+                            if !self.back_to_parent() {
+                                self.current_page.idx_cell += 1;
+                                break;
+                            } else if self.current_page.page_type.is_index() {
+                                if self.current_page.idx_cell == self.current_page.n_cells {
+                                    continue;
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                self.current_page.idx_cell += 1;
+                            }
+                            if self.move_to_left_most()? {
+                                break;
+                            }
                         }
-                        // Insert the payload of the removed cell to child page.
-                        self.insert_cell(&PageCellPayload { payload })?;
+                    }
+                } else if self.current_page.page_type.is_index() {
+                    let payload_size =
+                        (cell_size as u64 - 4)
+                            .try_into()
+                            .map_err(|_| Error::FileCorrupt {
+                                page_id: self.current_page.page_id,
+                                e: FileCorrupt::new("cell size"),
+                            })?;
+                    // The payload of the freed cell is not broken because freeblocks only
+                    // overwrites the first 4 bytes of the cell.
+                    // Using PagePayload pointing the freed cell for insert_cell() is safe.
+                    // insert_cell() first copies the payload to the leaf page. Even if the
+                    // new cell is inserted into the parent interior page as the divider, it
+                    // is copied into interior_cell_buf.
+                    // TODO: This can save memory copy. But it is not safe because the freed
+                    // cell may be overwritten by future change for insert_cell().
+                    let payload =
+                        PagePayload::new(&self.current_page.mem, cell_offset + 4, payload_size);
+                    if remove_right_page {
+                        assert!(self.move_to_right_most()?);
                     } else {
                         assert!(self.move_to_left_most()?);
                     }
+                    // Insert the payload of the removed cell to child page.
+                    self.insert_cell(&PageCellPayload { payload })?;
+                } else {
+                    assert!(self.move_to_left_most()?);
                 }
                 break;
             } else {
@@ -4813,13 +4831,22 @@ mod tests {
         }
         assert!(cursor.get_table_payload().unwrap().is_none());
 
+        // Delete the tail entry in a leaf page.
+        cursor.move_to_first().unwrap();
+        while cursor.current_page.idx_cell != cursor.current_page.n_cells - 1 {
+            cursor.move_next().unwrap();
+        }
+        assert_eq!(cursor.get_table_key().unwrap().unwrap(), 2);
+        cursor.delete().unwrap();
+        assert_eq!(cursor.get_table_key().unwrap().unwrap(), 3);
+
         // Delete the first leaf page.
-        for i in 0..4 {
+        for i in 0..2 {
             cursor.table_move_to(i).unwrap();
             cursor.delete().unwrap();
         }
 
-        for i in 4..8 {
+        for i in 3..8 {
             let (key, payload) = cursor.get_table_payload().unwrap().unwrap();
             assert_eq!(key, i);
             assert_eq!(payload.buf(), &[i as u8; 100]);
@@ -4829,7 +4856,7 @@ mod tests {
         assert!(cursor.get_table_payload().unwrap().is_none());
 
         cursor.move_to_first().unwrap();
-        for _ in 0..4 {
+        for _ in 0..5 {
             cursor.delete().unwrap();
         }
 
@@ -5147,13 +5174,26 @@ mod tests {
         }
         assert!(cursor.get_index_payload().unwrap().is_none());
 
-        // Delete the first leaf page.
-        for entry in entries.iter().take(4) {
-            cursor.index_move_to(&build_comparators(entry)).unwrap();
-            cursor.delete().unwrap();
+        // Delete the tail entry in a leaf page.
+        cursor.move_to_first().unwrap();
+        while cursor.current_page.idx_cell != cursor.current_page.n_cells - 1 {
+            cursor.move_next().unwrap();
         }
+        assert_eq!(
+            cursor.get_index_payload().unwrap().unwrap().buf(),
+            payloads[1]
+        );
+        cursor.delete().unwrap();
+        assert_eq!(
+            cursor.get_index_payload().unwrap().unwrap().buf(),
+            payloads[2]
+        );
 
-        for expected in payloads.iter().take(20).skip(4) {
+        // Delete the first leaf page.
+        cursor.move_to_first().unwrap();
+        cursor.delete().unwrap();
+
+        for expected in payloads.iter().take(20).skip(2) {
             let payload = cursor.get_index_payload().unwrap().unwrap();
             assert_eq!(payload.buf(), expected);
             drop(payload);
@@ -5161,8 +5201,27 @@ mod tests {
         }
         assert!(cursor.get_index_payload().unwrap().is_none());
 
+        // Delete the tail entry in a leaf page. Also the leaf page is the tail in the
+        // upper interior page.
         cursor.move_to_first().unwrap();
-        for _ in 0..16 {
+        while cursor.parent_pages.len() != 2
+            || cursor.current_page.idx_cell != cursor.current_page.n_cells - 1
+            || cursor.parent_pages[1].idx_cell != cursor.parent_pages[1].n_cells
+        {
+            cursor.move_next().unwrap();
+        }
+        assert_eq!(
+            cursor.get_index_payload().unwrap().unwrap().buf(),
+            payloads[7]
+        );
+        cursor.delete().unwrap();
+        assert_eq!(
+            cursor.get_index_payload().unwrap().unwrap().buf(),
+            payloads[8]
+        );
+
+        cursor.move_to_first().unwrap();
+        for _ in 0..17 {
             cursor.delete().unwrap();
         }
 
