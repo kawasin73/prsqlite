@@ -83,6 +83,7 @@ const MAX_ROWID: i64 = i64::MAX;
 pub enum Error<'a> {
     Parse(parser::Error<'a>),
     Cursor(cursor::Error),
+    Expression(expression::Error),
     UniqueConstraintViolation,
     DataTypeMismatch,
     Unsupported(&'static str),
@@ -101,11 +102,19 @@ impl From<cursor::Error> for Error<'_> {
     }
 }
 
+impl From<expression::Error> for Error<'_> {
+    fn from(e: expression::Error) -> Self {
+        Self::Expression(e)
+    }
+}
+
 impl From<anyhow::Error> for Error<'_> {
     fn from(e: anyhow::Error) -> Self {
         Self::Other(e)
     }
 }
+
+impl std::error::Error for Error<'_> {}
 
 impl Display for Error<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -115,6 +124,9 @@ impl Display for Error<'_> {
             }
             Error::Cursor(e) => {
                 write!(f, "Btree cursor error: {}", e)
+            }
+            Error::Expression(e) => {
+                write!(f, "expression error: {}", e)
             }
             Error::DataTypeMismatch => {
                 write!(f, "data type mismatch")
@@ -638,7 +650,7 @@ pub struct Rows<'conn> {
 }
 
 impl<'conn> Rows<'conn> {
-    pub fn next_row(&mut self) -> anyhow::Result<Option<Row<'_>>> {
+    pub fn next_row(&mut self) -> Result<Option<Row<'_>>> {
         if self.completed {
             return Ok(None);
         }
@@ -656,7 +668,7 @@ impl<'conn> Rows<'conn> {
                 }
                 Err(e) => {
                     self.completed = true;
-                    return Err(e);
+                    return Err(Error::Other(e));
                 }
             }
 
@@ -667,7 +679,7 @@ impl<'conn> Rows<'conn> {
             headers = parse_record_header(&payload)?;
 
             if headers.is_empty() {
-                bail!("empty header payload");
+                return Err(Error::Other(anyhow::anyhow!("empty header payload")));
             }
 
             content_offset = headers[0].1;
@@ -680,7 +692,9 @@ impl<'conn> Rows<'conn> {
                 tmp_buf.resize(content_size, 0);
                 let n = payload.load(content_offset, &mut tmp_buf)?;
                 if n != content_size {
-                    bail!("payload does not have enough size");
+                    return Err(Error::Other(anyhow::anyhow!(
+                        "payload does not have enough size"
+                    )));
                 }
             };
 
@@ -781,7 +795,10 @@ pub struct RowData<'a> {
 }
 
 impl<'a> DataContext for RowData<'a> {
-    fn get_column_value(&self, column_idx: &ColumnNumber) -> anyhow::Result<Option<Value>> {
+    fn get_column_value(
+        &self,
+        column_idx: &ColumnNumber,
+    ) -> std::result::Result<Option<Value>, Box<dyn std::error::Error + Sync + Send>> {
         match column_idx {
             ColumnNumber::Column(idx) => {
                 if let Some((serial_type, offset)) = self.headers.get(*idx) {
@@ -790,9 +807,13 @@ impl<'a> DataContext for RowData<'a> {
                     } else {
                         &self.tmp_buf
                     };
-                    serial_type
-                        .parse(&contents_buffer[offset - self.content_offset..])
-                        .context("parse value")
+                    let offset = offset - self.content_offset;
+                    if contents_buffer.len() < offset
+                        || contents_buffer.len() - offset < serial_type.content_size() as usize
+                    {
+                        return Err(anyhow::anyhow!("payload does not have enough size").into());
+                    }
+                    Ok(serial_type.parse(&contents_buffer[offset..]))
                 } else {
                     Ok(None)
                 }
@@ -808,7 +829,7 @@ pub struct Row<'a> {
 }
 
 impl<'a> Row<'a> {
-    pub fn parse(&self) -> anyhow::Result<Columns<'_>> {
+    pub fn parse(&self) -> Result<Columns<'_>> {
         let mut columns = Vec::with_capacity(self.stmt.columns.len());
         for expr in self.stmt.columns.iter() {
             let (value, _, _) = expr.execute(Some(&self.data))?;

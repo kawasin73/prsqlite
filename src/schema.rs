@@ -134,11 +134,16 @@ impl Schema {
 
     pub fn generate(stmt: SelectStatement, schema_table: Table) -> anyhow::Result<Schema> {
         let stmt = stmt;
-        let mut rows = stmt.query()?;
+        let mut rows = stmt
+            .query()
+            .map_err(|e| anyhow::anyhow!("query: {:?}", e))?;
         let mut tables = HashMap::new();
         let mut indexes = HashMap::new();
-        while let Some(row) = rows.next_row()? {
-            let columns = row.parse()?;
+        while let Some(row) = rows
+            .next_row()
+            .map_err(|e| anyhow::anyhow!("next row: {:?}", e))?
+        {
+            let columns = row.parse().map_err(|e| anyhow::anyhow!("parse: {:?}", e))?;
             let schema = SchemaRecord::parse(&columns)?;
             match schema.type_ {
                 b"table" => {
@@ -338,18 +343,18 @@ pub fn calc_type_affinity(type_name: &[MaybeQuotedBytes]) -> TypeAffinity {
 /// This now supports BINARY, NOCASE, and RTRIM only.
 ///
 /// TODO: Support user defined collating sequence.
-pub fn calc_collation(collation_name: &MaybeQuotedBytes) -> anyhow::Result<Collation> {
+pub fn calc_collation(collation_name: &MaybeQuotedBytes) -> Option<Collation> {
     // TODO: Validate with iterator.
     let collation_name = collation_name.dequote();
     let case_insensitive_collation_name = CaseInsensitiveBytes::from(collation_name.as_slice());
     if case_insensitive_collation_name.equal_to_lower_bytes(b"binary") {
-        Ok(Collation::Binary)
+        Some(Collation::Binary)
     } else if case_insensitive_collation_name.equal_to_lower_bytes(b"nocase") {
-        Ok(Collation::NoCase)
+        Some(Collation::NoCase)
     } else if case_insensitive_collation_name.equal_to_lower_bytes(b"rtrim") {
-        Ok(Collation::RTrim)
+        Some(Collation::RTrim)
     } else {
-        bail!("invalid collation: {:?}", collation_name);
+        None
     }
 }
 
@@ -397,7 +402,8 @@ impl Table {
             let mut collation = DEFAULT_COLLATION.clone();
             for constraint in &column_def.constraints {
                 if let ColumnConstraint::Collate(collation_name) = constraint {
-                    collation = calc_collation(collation_name)?;
+                    collation = calc_collation(collation_name)
+                        .ok_or_else(|| anyhow::anyhow!("collation is not found"))?;
                 }
             }
 

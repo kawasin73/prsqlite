@@ -70,32 +70,31 @@ impl SerialType {
         }
     }
 
-    pub fn parse<'a>(&self, buf: &'a [u8]) -> anyhow::Result<Option<Value<'a>>> {
-        let v = match self.0 {
+    /// Parse the buffer into [Value].
+    ///
+    /// The buffer must be at least [content_size] bytes.
+    pub fn parse<'a>(&self, buf: &'a [u8]) -> Option<Value<'a>> {
+        match self.0 {
             0 => None,
             1 => Some(Value::Integer(
-                i8::from_be_bytes(buf[..1].try_into()?) as i64
+                i8::from_be_bytes(buf[..1].try_into().unwrap()) as i64,
             )),
             2 => Some(Value::Integer(
-                i16::from_be_bytes(buf[..2].try_into()?) as i64
+                i16::from_be_bytes(buf[..2].try_into().unwrap()) as i64,
             )),
             // TODO: use std::mem::transmute.
             3 => {
-                if buf.len() < 3 {
-                    bail!("buffer size {} does not match integer 3", buf.len());
-                }
+                assert!(buf.len() >= 3);
                 Some(Value::Integer(
                     ((buf[0] as i64) << 56 | (buf[1] as i64) << 48 | (buf[2] as i64) << 40) >> 40,
                 ))
             }
             4 => Some(Value::Integer(
-                i32::from_be_bytes(buf[..4].try_into()?) as i64
+                i32::from_be_bytes(buf[..4].try_into().unwrap()) as i64,
             )),
             // TODO: use std::mem::transmute.
             5 => {
-                if buf.len() < 6 {
-                    bail!("buffer size {} does not match integer 6", buf.len());
-                }
+                assert!(buf.len() >= 6);
                 Some(Value::Integer(
                     ((buf[0] as i64) << 56
                         | (buf[1] as i64) << 48
@@ -106,9 +105,11 @@ impl SerialType {
                         >> 16,
                 ))
             }
-            6 => Some(Value::Integer(i64::from_be_bytes(buf[..8].try_into()?))),
+            6 => Some(Value::Integer(i64::from_be_bytes(
+                buf[..8].try_into().unwrap(),
+            ))),
             7 => {
-                let f = f64::from_be_bytes(buf[..8].try_into()?);
+                let f = f64::from_be_bytes(buf[..8].try_into().unwrap());
                 if f.is_nan() {
                     None
                 } else {
@@ -118,17 +119,11 @@ impl SerialType {
             8 => Some(Value::Integer(0)),
             9 => Some(Value::Integer(1)),
             10 | 11 => {
-                bail!("reserved record is not implemented");
+                unreachable!("reserved record is not implemented");
             }
             n => {
                 let size = ((n - 12) >> 1) as usize;
-                if buf.len() < size {
-                    bail!(
-                        "buffer size {} is smaller than content size {}",
-                        buf.len(),
-                        size
-                    );
-                }
+                assert!(buf.len() >= size);
                 let buf = &buf[..size];
                 let v = if n & 1 == 0 {
                     Value::Blob(Buffer::Ref(buf))
@@ -137,8 +132,7 @@ impl SerialType {
                 };
                 Some(v)
             }
-        };
-        Ok(v)
+        }
     }
 }
 
@@ -193,7 +187,7 @@ impl<'a, P: LocalPayload<E>, E: Debug> Record<'a, P, E> {
         } else {
             &self.payload.buf()[offset..offset + content_size]
         };
-        serial_type.parse(buf)
+        Ok(serial_type.parse(buf))
     }
 }
 
@@ -674,22 +668,15 @@ mod tests {
     #[test]
     fn test_parse_real() {
         assert_eq!(
-            SerialType(7).parse(0_f64.to_be_bytes().as_slice()).unwrap(),
+            SerialType(7).parse(0_f64.to_be_bytes().as_slice()),
             Some(Value::Real(0.0))
         );
         assert_eq!(
-            SerialType(7)
-                .parse(1.1_f64.to_be_bytes().as_slice())
-                .unwrap(),
+            SerialType(7).parse(1.1_f64.to_be_bytes().as_slice()),
             Some(Value::Real(1.1))
         );
         // NaN
-        assert_eq!(
-            SerialType(7)
-                .parse(f64::NAN.to_be_bytes().as_slice())
-                .unwrap(),
-            None
-        );
+        assert_eq!(SerialType(7).parse(f64::NAN.to_be_bytes().as_slice()), None);
     }
 
     #[test]

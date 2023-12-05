@@ -13,8 +13,7 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
-
-use anyhow::bail;
+use std::fmt::Display;
 
 use crate::parser::BinaryOp;
 use crate::parser::CompareOp;
@@ -32,6 +31,51 @@ use crate::value::Value;
 use crate::value::ValueCmp;
 use crate::value::DEFAULT_COLLATION;
 
+#[derive(Debug)]
+pub enum Error {
+    CollationNotFound,
+    ColumnNotFound,
+    NoTableContext,
+    FailGetColumn(Box<dyn std::error::Error + Sync + Send>),
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::CollationNotFound => None,
+            Self::ColumnNotFound => None,
+            Self::NoTableContext => None,
+            Self::FailGetColumn(e) => Some(e.as_ref()),
+        }
+    }
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CollationNotFound => {
+                write!(f, "collation not found")
+            }
+            Self::ColumnNotFound => {
+                write!(f, "column not found")
+            }
+            Self::NoTableContext => {
+                write!(f, "no table context")
+            }
+            Self::FailGetColumn(e) => {
+                write!(f, "fail to get column: {}", e)
+            }
+        }
+    }
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+pub type ExecutionResult<'a> = Result<(
+    Option<Value<'a>>,
+    Option<TypeAffinity>,
+    Option<(&'a Collation, CollateOrigin)>,
+)>;
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum CollateOrigin {
     Column,
@@ -48,7 +92,10 @@ fn filter_expression_collation(
 }
 
 pub trait DataContext {
-    fn get_column_value(&self, column_idx: &ColumnNumber) -> anyhow::Result<Option<Value>>;
+    fn get_column_value(
+        &self,
+        column_idx: &ColumnNumber,
+    ) -> std::result::Result<Option<Value>, Box<dyn std::error::Error + Sync + Send>>;
 }
 
 #[derive(Debug, Clone)]
@@ -75,14 +122,8 @@ pub enum Expression {
     Const(ConstantValue),
 }
 
-type ExecutionResult<'a> = (
-    Option<Value<'a>>,
-    Option<TypeAffinity>,
-    Option<(&'a Collation, CollateOrigin)>,
-);
-
 impl Expression {
-    pub fn from(expr: Expr, table: Option<&Table>) -> anyhow::Result<Self> {
+    pub fn from(expr: Expr, table: Option<&Table>) -> Result<Self> {
         match expr {
             Expr::Null => Ok(Self::Null),
             Expr::Integer(i) => Ok(Self::Const(ConstantValue::Integer(i))),
@@ -98,7 +139,7 @@ impl Expression {
                 collation_name,
             } => Ok(Self::Collate {
                 expr: Box::new(Self::from(*expr, table)?),
-                collation: calc_collation(&collation_name)?,
+                collation: calc_collation(&collation_name).ok_or(Error::CollationNotFound)?,
             }),
             Expr::BinaryOperator {
                 operator,
@@ -115,12 +156,9 @@ impl Expression {
                     table
                         .get_column(&column_name)
                         .map(Self::Column)
-                        .ok_or(anyhow::anyhow!(
-                            "column not found: {}",
-                            std::str::from_utf8(&column_name).unwrap_or_default()
-                        ))
+                        .ok_or(Error::ColumnNotFound)
                 } else {
-                    bail!("no table context is not specified");
+                    Err(Error::NoTableContext)
                 }
             }
             Expr::Cast { expr, type_name } => Ok(Self::Cast {
@@ -133,20 +171,17 @@ impl Expression {
     /// Execute the expression and return the result.
     ///
     /// TODO: The row should be a context object.
-    pub fn execute<'a, D: DataContext>(
-        &'a self,
-        row: Option<&'a D>,
-    ) -> anyhow::Result<ExecutionResult<'a>> {
+    pub fn execute<'a, D: DataContext>(&'a self, row: Option<&'a D>) -> ExecutionResult<'a> {
         match self {
             Self::Column((idx, affinity, collation)) => {
                 if let Some(row) = row {
                     Ok((
-                        row.get_column_value(idx)?,
+                        row.get_column_value(idx).map_err(Error::FailGetColumn)?,
                         Some(*affinity),
                         Some((collation, CollateOrigin::Column)),
                     ))
                 } else {
-                    bail!("column value is not available");
+                    Err(Error::NoTableContext)
                 }
             }
             Self::UnaryOperator { operator, expr } => {
