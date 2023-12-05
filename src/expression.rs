@@ -123,6 +123,11 @@ pub enum Expression {
 }
 
 impl Expression {
+    #[inline]
+    pub fn one() -> Self {
+        Self::Const(ConstantValue::Integer(1))
+    }
+
     pub fn from(expr: Expr, table: Option<&Table>) -> Result<Self> {
         match expr {
             Expr::Null => Ok(Self::Null),

@@ -305,6 +305,10 @@ impl<'a> BtreeCursor<'a> {
         })
     }
 
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
     /// Move to the specified btree table cell with the key.
     ///
     /// If it does not exist, move to the next cell.

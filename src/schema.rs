@@ -480,6 +480,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::query::QueryPlan;
     use crate::test_utils::*;
     use crate::Connection;
     use crate::Expression;
@@ -492,7 +493,13 @@ mod tests {
             .map(Expression::Column)
             .collect::<Vec<_>>();
         Schema::generate(
-            SelectStatement::new(&conn, schema_table.root_page_id, columns, None),
+            SelectStatement::new(
+                &conn,
+                schema_table.root_page_id,
+                columns,
+                Expression::one(),
+                QueryPlan::FullScan,
+            ),
             schema_table,
         )
         .unwrap()

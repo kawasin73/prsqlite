@@ -23,6 +23,7 @@ use crate::btree::BtreeContext;
 use crate::pager::PageId;
 use crate::pager::Pager;
 use crate::payload::Payload;
+use crate::query::QueryPlan;
 use crate::record::RecordPayload;
 use crate::schema::Schema;
 use crate::value::Collation;
@@ -96,7 +97,13 @@ pub fn find_table_page_id(table: &str, filepath: &Path) -> PageId {
         .map(Expression::Column)
         .collect::<Vec<_>>();
     let schema = Schema::generate(
-        SelectStatement::new(&conn, schema_table.root_page_id, columns, None),
+        SelectStatement::new(
+            &conn,
+            schema_table.root_page_id,
+            columns,
+            Expression::one(),
+            QueryPlan::FullScan,
+        ),
         schema_table,
     )
     .unwrap();
@@ -111,7 +118,13 @@ pub fn find_index_page_id(index: &str, filepath: &Path) -> PageId {
         .map(Expression::Column)
         .collect::<Vec<_>>();
     let schema = Schema::generate(
-        SelectStatement::new(&conn, schema_table.root_page_id, columns, None),
+        SelectStatement::new(
+            &conn,
+            schema_table.root_page_id,
+            columns,
+            Expression::one(),
+            QueryPlan::FullScan,
+        ),
         schema_table,
     )
     .unwrap();
