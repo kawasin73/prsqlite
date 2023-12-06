@@ -144,6 +144,13 @@ impl QueryPlan {
         };
         plan
     }
+
+    pub fn index_page_id(&self) -> Option<PageId> {
+        match self {
+            Self::FullScan | Self::RowId(_) => None,
+            Self::IndexScan(index_info) => Some(index_info.page_id),
+        }
+    }
 }
 
 pub struct IndexInfo {
@@ -162,6 +169,7 @@ pub struct Query<'a> {
     cursor: BtreeCursor<'a>,
     plan: PlanExecutor<'a>,
     filter: &'a Expression,
+    deleted: bool,
 }
 
 impl<'a> Query<'a> {
@@ -187,6 +195,7 @@ impl<'a> Query<'a> {
             cursor: BtreeCursor::new(table_page_id, pager, bctx)?,
             plan,
             filter,
+            deleted: false,
         })
     }
 
@@ -199,14 +208,18 @@ impl<'a> Query<'a> {
         loop {
             match &mut self.plan {
                 PlanExecutor::Full => {
-                    if self.cursor.is_initialized() {
+                    if !self.cursor.is_initialized() {
+                        self.cursor.move_to_first()?;
+                    } else if !self.deleted {
                         self.cursor.move_next()?;
                     } else {
-                        self.cursor.move_to_first()?;
+                        self.deleted = false;
                     }
                 }
                 PlanExecutor::Index(index_cursor) => {
-                    if let Some(rowid) = index_cursor.next()? {
+                    let rowid = index_cursor.next(self.deleted)?;
+                    self.deleted = false;
+                    if let Some(rowid) = rowid {
                         self.cursor.table_move_to(rowid)?;
                     } else {
                         return Ok(None);
@@ -278,6 +291,15 @@ impl<'a> Query<'a> {
             tmp_buf,
         }))
     }
+
+    pub fn delete(&mut self) -> Result<()> {
+        self.cursor.delete()?;
+        if let PlanExecutor::Index(index_cursor) = &mut self.plan {
+            index_cursor.cursor.delete()?;
+        }
+        self.deleted = true;
+        Ok(())
+    }
 }
 
 struct IndexCursor<'a> {
@@ -298,10 +320,8 @@ impl<'a> IndexCursor<'a> {
         })
     }
 
-    fn next(&mut self) -> Result<Option<i64>> {
-        if self.cursor.is_initialized() {
-            self.cursor.move_next()?;
-        } else {
+    fn next(&mut self, deleted: bool) -> Result<Option<i64>> {
+        if !self.cursor.is_initialized() {
             // TODO: IndexInfo should hold ValueCmp instead of ConstantValue.
             let tmp_keys = self
                 .index
@@ -315,6 +335,8 @@ impl<'a> IndexCursor<'a> {
             // +1 for rowid
             comparators.extend((0..self.index.n_extra + 1).map(|_| None));
             self.cursor.index_move_to(&comparators)?;
+        } else if !deleted {
+            self.cursor.move_next()?;
         }
 
         let Some(index_payload) = self.cursor.get_index_payload()? else {

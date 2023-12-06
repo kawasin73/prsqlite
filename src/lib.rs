@@ -39,6 +39,7 @@ use anyhow::bail;
 use anyhow::Context;
 use btree::BtreeContext;
 use cursor::BtreeCursor;
+use expression::DataContext;
 use expression::Expression;
 use header::DatabaseHeader;
 use header::DatabaseHeaderMut;
@@ -60,7 +61,9 @@ use query::QueryPlan;
 use query::RowData;
 use record::RecordPayload;
 use schema::ColumnNumber;
+use schema::Index;
 use schema::Schema;
+use schema::Table;
 pub use value::Buffer;
 use value::Collation;
 use value::TypeAffinity;
@@ -205,9 +208,7 @@ impl Connection {
             Stmt::Insert(insert) => {
                 Ok(Statement::Execution(Box::new(self.prepare_insert(insert)?)))
             }
-            Stmt::Delete(delete) => {
-                Ok(Statement::Execution(Box::new(self.prepare_delete(delete)?)))
-            }
+            Stmt::Delete(delete) => Ok(Statement::Execution(self.prepare_delete(delete)?)),
         }
     }
 
@@ -330,27 +331,10 @@ impl Connection {
 
         let table_page_id = table.root_page_id;
         let mut indexes = Vec::new();
-        let mut index_schema = table.indexes.clone();
-        while let Some(index) = index_schema {
-            let mut columns = index
-                .columns
-                .iter()
-                .map(|column_number| {
-                    let collation = if let ColumnNumber::Column(column_idx) = column_number {
-                        &table.columns[*column_idx].collation
-                    } else {
-                        &DEFAULT_COLLATION
-                    };
-                    (*column_number, collation.clone())
-                })
-                .collect::<Vec<_>>();
-            columns.push((ColumnNumber::RowId, DEFAULT_COLLATION.clone()));
-
-            indexes.push(IndexSchema {
-                root_page_id: index.root_page_id,
-                columns,
-            });
-            index_schema = index.next.clone();
+        let mut index = table.indexes.as_ref();
+        while let Some(idx) = index {
+            indexes.push(IndexSchema::create(table, idx));
+            index = idx.next.as_ref();
         }
         Ok(InsertStatement {
             conn: self,
@@ -360,7 +344,10 @@ impl Connection {
         })
     }
 
-    fn prepare_delete<'a>(&self, delete: Delete<'a>) -> Result<'a, DeleteStatement> {
+    fn prepare_delete<'a, 'conn>(
+        &'conn self,
+        delete: Delete<'a>,
+    ) -> Result<'a, Box<dyn ExecutionStatement + 'conn>> {
         if self.schema.borrow().is_none() {
             self.load_schema()?;
         }
@@ -377,22 +364,40 @@ impl Connection {
             .map(|expr| Expression::from(expr, Some(table)))
             .transpose()?;
 
-        if filter.is_some() {
-            todo!("filter");
-        }
-
         let table_page_id = table.root_page_id;
-        let mut index_page_ids = Vec::new();
-        let mut index_schema = table.indexes.clone();
-        while let Some(index) = index_schema {
-            index_page_ids.push(index.root_page_id);
-            index_schema = index.next.clone();
+        if let Some(filter) = filter {
+            let query_plan = QueryPlan::generate(table, &filter);
+
+            let query_index_page_id = query_plan.index_page_id();
+            let mut indexes = Vec::new();
+            let mut index = table.indexes.as_ref();
+            while let Some(idx) = index {
+                if Some(idx.root_page_id) != query_index_page_id {
+                    indexes.push(IndexSchema::create(table, idx));
+                }
+                index = idx.next.as_ref();
+            }
+
+            Ok(Box::new(DeleteStatement {
+                conn: self,
+                table_page_id,
+                indexes,
+                filter,
+                query_plan,
+            }))
+        } else {
+            let mut index_page_ids = Vec::new();
+            let mut index_schema = table.indexes.clone();
+            while let Some(index) = index_schema {
+                index_page_ids.push(index.root_page_id);
+                index_schema = index.next.clone();
+            }
+            Ok(Box::new(ClearStatement {
+                conn: self,
+                table_page_id,
+                index_page_ids,
+            }))
         }
-        Ok(DeleteStatement {
-            conn: self,
-            table_page_id,
-            index_page_ids,
-        })
     }
 
     fn start_read(&self) -> anyhow::Result<ReadTransaction> {
@@ -599,6 +604,29 @@ struct IndexSchema {
     columns: Vec<(ColumnNumber, Collation)>,
 }
 
+impl IndexSchema {
+    fn create(table: &Table, index: &Index) -> Self {
+        let mut columns = index
+            .columns
+            .iter()
+            .map(|column_number| {
+                let collation = if let ColumnNumber::Column(column_idx) = column_number {
+                    &table.columns[*column_idx].collation
+                } else {
+                    &DEFAULT_COLLATION
+                };
+                (*column_number, collation.clone())
+            })
+            .collect::<Vec<_>>();
+        columns.push((ColumnNumber::RowId, DEFAULT_COLLATION.clone()));
+
+        IndexSchema {
+            root_page_id: index.root_page_id,
+            columns,
+        }
+    }
+}
+
 pub struct InsertStatement<'conn> {
     conn: &'conn Connection,
     table_page_id: PageId,
@@ -688,13 +716,13 @@ impl<'conn> ExecutionStatement for InsertStatement<'conn> {
     }
 }
 
-pub struct DeleteStatement<'conn> {
+pub struct ClearStatement<'conn> {
     conn: &'conn Connection,
     table_page_id: PageId,
     index_page_ids: Vec<PageId>,
 }
 
-impl<'conn> ExecutionStatement for DeleteStatement<'conn> {
+impl<'conn> ExecutionStatement for ClearStatement<'conn> {
     fn execute(&self) -> Result<u64> {
         let write_txn = self.conn.start_write()?;
 
@@ -712,6 +740,67 @@ impl<'conn> ExecutionStatement for DeleteStatement<'conn> {
                     "number of deleted rows in table and index does not match"
                 )));
             }
+        }
+
+        write_txn.commit()?;
+
+        Ok(n_deleted)
+    }
+}
+
+pub struct DeleteStatement<'conn> {
+    conn: &'conn Connection,
+    table_page_id: PageId,
+    indexes: Vec<IndexSchema>,
+    filter: Expression,
+    query_plan: QueryPlan,
+}
+
+impl<'conn> ExecutionStatement for DeleteStatement<'conn> {
+    fn execute(&self) -> Result<u64> {
+        let write_txn = self.conn.start_write()?;
+
+        let mut query = Query::new(
+            self.table_page_id,
+            &self.conn.pager,
+            &self.conn.btree_ctx,
+            &self.query_plan,
+            &self.filter,
+        )?;
+
+        let mut n_deleted = 0;
+
+        loop {
+            let Some(data) = query.next()? else {
+                break;
+            };
+
+            // Delete from index
+            for index in &self.indexes {
+                let tmp_keys = index
+                    .columns
+                    .iter()
+                    .map(|(column_idx, collation)| {
+                        let value = data
+                            .get_column_value(column_idx)
+                            .map_err(expression::Error::FailGetColumn)?;
+                        Ok((value, collation))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let comparators = tmp_keys
+                    .iter()
+                    .map(|(v, c)| v.as_ref().map(|v| ValueCmp::new(v, c)))
+                    .collect::<Vec<_>>();
+                let mut index_cursor =
+                    BtreeCursor::new(index.root_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
+                index_cursor.index_move_to(&comparators)?;
+                index_cursor.delete()?;
+            }
+
+            drop(data);
+            query.delete()?;
+
+            n_deleted += 1;
         }
 
         write_txn.commit()?;

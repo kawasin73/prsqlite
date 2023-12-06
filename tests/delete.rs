@@ -204,3 +204,159 @@ fn test_delete_after_insert_with_overflow_payloads() {
     );
     assert_eq!(file.as_file().metadata().unwrap().len(), original_file_size);
 }
+
+#[test]
+fn test_delete_partial() {
+    let file = create_sqlite_database(&[
+        "CREATE TABLE example(col1, col2, col3);",
+        "CREATE INDEX index1 ON example(col1);",
+        "CREATE INDEX index2 ON example(col3, col2);",
+        "INSERT INTO example (col1, col2, col3) VALUES (10, 1, 3);",
+        "INSERT INTO example (col1, col2, col3) VALUES (10, 2, 2);",
+        "INSERT INTO example (col1, col2, col3) VALUES (10, 3, 1);",
+        "INSERT INTO example (col1, col2, col3) VALUES (20, 1, 3);",
+        "INSERT INTO example (col1, col2, col3) VALUES (20, 2, 2);",
+        "INSERT INTO example (col1, col2, col3) VALUES (20, 3, 1);",
+        "INSERT INTO example (col1, col2, col3) VALUES (30, 1, 3);",
+        "INSERT INTO example (col1, col2, col3) VALUES (30, 2, 2);",
+        "INSERT INTO example (col1, col2, col3) VALUES (30, 3, 1);",
+    ]);
+    let conn = Connection::open(file.path()).unwrap();
+
+    // Delete using index1
+    let stmt = conn
+        .prepare("DELETE FROM example WHERE col1 = 20;")
+        .unwrap();
+    assert_eq!(stmt.execute().unwrap(), 3);
+
+    let test_conn = rusqlite::Connection::open(file.path()).unwrap();
+    assert_same_results(
+        &[
+            &[
+                Some(&Value::Integer(10)),
+                Some(&Value::Integer(1)),
+                Some(&Value::Integer(3)),
+            ],
+            &[
+                Some(&Value::Integer(10)),
+                Some(&Value::Integer(2)),
+                Some(&Value::Integer(2)),
+            ],
+            &[
+                Some(&Value::Integer(10)),
+                Some(&Value::Integer(3)),
+                Some(&Value::Integer(1)),
+            ],
+            &[
+                Some(&Value::Integer(30)),
+                Some(&Value::Integer(1)),
+                Some(&Value::Integer(3)),
+            ],
+            &[
+                Some(&Value::Integer(30)),
+                Some(&Value::Integer(2)),
+                Some(&Value::Integer(2)),
+            ],
+            &[
+                Some(&Value::Integer(30)),
+                Some(&Value::Integer(3)),
+                Some(&Value::Integer(1)),
+            ],
+        ],
+        "SELECT * FROM example;",
+        &test_conn,
+        &conn,
+    );
+    assert_eq!(stmt.execute().unwrap(), 0);
+
+    // Delete with full scan.
+    let stmt = conn.prepare("DELETE FROM example WHERE col2 = 2;").unwrap();
+    assert_eq!(stmt.execute().unwrap(), 2);
+
+    let test_conn = rusqlite::Connection::open(file.path()).unwrap();
+    assert_same_results(
+        &[
+            &[
+                Some(&Value::Integer(10)),
+                Some(&Value::Integer(1)),
+                Some(&Value::Integer(3)),
+            ],
+            &[
+                Some(&Value::Integer(10)),
+                Some(&Value::Integer(3)),
+                Some(&Value::Integer(1)),
+            ],
+            &[
+                Some(&Value::Integer(30)),
+                Some(&Value::Integer(1)),
+                Some(&Value::Integer(3)),
+            ],
+            &[
+                Some(&Value::Integer(30)),
+                Some(&Value::Integer(3)),
+                Some(&Value::Integer(1)),
+            ],
+        ],
+        "SELECT * FROM example;",
+        &test_conn,
+        &conn,
+    );
+    assert_eq!(stmt.execute().unwrap(), 0);
+
+    let insert_stmt = conn
+        .prepare("INSERT INTO example (col1, col2, col3) VALUES (1, 2, 3);")
+        .unwrap();
+    assert_eq!(insert_stmt.execute().unwrap(), 1);
+
+    let test_conn = rusqlite::Connection::open(file.path()).unwrap();
+    assert_same_results(
+        &[
+            &[
+                Some(&Value::Integer(10)),
+                Some(&Value::Integer(1)),
+                Some(&Value::Integer(3)),
+            ],
+            &[
+                Some(&Value::Integer(10)),
+                Some(&Value::Integer(3)),
+                Some(&Value::Integer(1)),
+            ],
+            &[
+                Some(&Value::Integer(30)),
+                Some(&Value::Integer(1)),
+                Some(&Value::Integer(3)),
+            ],
+            &[
+                Some(&Value::Integer(30)),
+                Some(&Value::Integer(3)),
+                Some(&Value::Integer(1)),
+            ],
+            &[
+                Some(&Value::Integer(1)),
+                Some(&Value::Integer(2)),
+                Some(&Value::Integer(3)),
+            ],
+        ],
+        "SELECT * FROM example;",
+        &test_conn,
+        &conn,
+    );
+    // SELECT using index1 still works.
+    assert_same_results(
+        &[
+            &[
+                Some(&Value::Integer(10)),
+                Some(&Value::Integer(1)),
+                Some(&Value::Integer(3)),
+            ],
+            &[
+                Some(&Value::Integer(10)),
+                Some(&Value::Integer(3)),
+                Some(&Value::Integer(1)),
+            ],
+        ],
+        "SELECT * FROM example WHERE col1 = 10;",
+        &test_conn,
+        &conn,
+    );
+}

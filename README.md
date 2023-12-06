@@ -93,6 +93,12 @@ prsqlite> SELECT rowid, * FROM example WHERE col2 >= 6;
 7||7
 20||20
 21|hello|21
+prsqlite> DELETE FROM example WHERE col2 < 20;
+prsqlite> SELECT * FROM example;
+|20
+hello|21
+prsqlite> DELETE FROM example;
+prsqlite> SELECT * FROM example;
 prsqlite> .quit
 ```
 
