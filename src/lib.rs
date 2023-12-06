@@ -202,12 +202,12 @@ impl Connection {
 
         match statement {
             Stmt::Select(select) => Ok(Statement::Query(self.prepare_select(select)?)),
-            Stmt::Insert(insert) => Ok(Statement::Execution(ExecutionStatement::Insert(
-                self.prepare_insert(insert)?,
-            ))),
-            Stmt::Delete(delete) => Ok(Statement::Execution(ExecutionStatement::Delete(
-                self.prepare_delete(delete)?,
-            ))),
+            Stmt::Insert(insert) => {
+                Ok(Statement::Execution(Box::new(self.prepare_insert(insert)?)))
+            }
+            Stmt::Delete(delete) => {
+                Ok(Statement::Execution(Box::new(self.prepare_delete(delete)?)))
+            }
         }
     }
 
@@ -460,23 +460,13 @@ impl Drop for WriteTransaction<'_> {
     }
 }
 
-pub enum ExecutionStatement<'conn> {
-    Insert(InsertStatement<'conn>),
-    Delete(DeleteStatement<'conn>),
-}
-
-impl ExecutionStatement<'_> {
-    pub fn execute(&self) -> Result<u64> {
-        match self {
-            Self::Insert(stmt) => stmt.execute(),
-            Self::Delete(stmt) => stmt.execute(),
-        }
-    }
+pub trait ExecutionStatement {
+    fn execute(&self) -> Result<u64>;
 }
 
 pub enum Statement<'conn> {
     Query(SelectStatement<'conn>),
-    Execution(ExecutionStatement<'conn>),
+    Execution(Box<dyn ExecutionStatement + 'conn>),
 }
 
 impl<'conn> Statement<'conn> {
@@ -495,7 +485,6 @@ impl<'conn> Statement<'conn> {
     }
 }
 
-// TODO: make Connection non mut and support multiple statements.
 pub struct SelectStatement<'conn> {
     conn: &'conn Connection,
     table_page_id: PageId,
@@ -617,8 +606,8 @@ pub struct InsertStatement<'conn> {
     indexes: Vec<IndexSchema>,
 }
 
-impl<'conn> InsertStatement<'conn> {
-    pub fn execute(&self) -> Result<u64> {
+impl<'conn> ExecutionStatement for InsertStatement<'conn> {
+    fn execute(&self) -> Result<u64> {
         let write_txn = self.conn.start_write()?;
 
         let mut cursor =
@@ -705,8 +694,8 @@ pub struct DeleteStatement<'conn> {
     index_page_ids: Vec<PageId>,
 }
 
-impl<'conn> DeleteStatement<'conn> {
-    pub fn execute(&self) -> Result<u64> {
+impl<'conn> ExecutionStatement for DeleteStatement<'conn> {
+    fn execute(&self) -> Result<u64> {
         let write_txn = self.conn.start_write()?;
 
         let mut cursor =
