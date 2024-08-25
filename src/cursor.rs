@@ -1329,7 +1329,6 @@ impl<'a> BtreeCursor<'a> {
     }
 
     /// Delete the current entry.
-    #[allow(dead_code)]
     pub fn delete(&mut self) -> Result<()> {
         if !self.initialized {
             return Err(Error::NotInitialized);
@@ -1548,23 +1547,11 @@ impl<'a> BtreeCursor<'a> {
                 drop(buffer);
                 if self.current_page.page_type.is_leaf() {
                     if self.current_page.idx_cell == self.current_page.n_cells {
-                        loop {
-                            if !self.back_to_parent() {
-                                self.current_page.idx_cell += 1;
-                                break;
-                            } else if self.current_page.page_type.is_index() {
-                                if self.current_page.idx_cell == self.current_page.n_cells {
-                                    continue;
-                                } else {
-                                    break;
-                                }
-                            } else {
-                                self.current_page.idx_cell += 1;
-                            }
-                            if self.move_to_left_most()? {
-                                break;
-                            }
-                        }
+                        // self.current_page.n_cells was greater than 1 before decremented because
+                        // is_leaf() is true. It is safe to decreament idx_cell.
+                        assert!(self.current_page.idx_cell >= 1);
+                        self.current_page.idx_cell -= 1;
+                        self.move_next()?;
                     }
                 } else if self.current_page.page_type.is_index() {
                     let payload_size =
