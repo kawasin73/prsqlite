@@ -156,7 +156,7 @@ pub struct Connection {
     schema: RefCell<Option<Schema>>,
     /// Number of running read or write.
     ///
-    /// > 0 : read(s) running
+    /// \> 0 : read(s) running
     /// 0   : no read/write
     /// -1  : write running
     ref_count: Cell<i64>,

@@ -19,7 +19,6 @@ use std::rc::Rc;
 use anyhow::bail;
 use anyhow::Context;
 
-pub use crate::btree::*;
 use crate::pager::PageId;
 use crate::pager::PAGE_ID_1;
 use crate::parser::expect_no_more_token;
