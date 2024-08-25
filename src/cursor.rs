@@ -475,59 +475,35 @@ impl<'a> BtreeCursor<'a> {
         }
 
         self.current_page.idx_cell += 1;
-        if self.current_page.page_type.is_leaf()
-            && self.current_page.idx_cell < self.current_page.n_cells
-        {
+        if self.current_page.idx_cell < self.current_page.n_cells {
+            if !self.current_page.page_type.is_leaf() {
+                assert!(self.current_page.page_type.is_index());
+                assert!(self.move_to_left_most()?);
+            }
             return Ok(());
         }
 
-        if self.current_page.page_type.is_table() {
-            // table page never stops in the middle of the interior page.
-            assert!(self.current_page.page_type.is_leaf());
-            assert!(self.current_page.idx_cell == self.current_page.n_cells);
-            if !self.back_to_parent() {
-                // Traversing completed for single leaf btree.
-                self.current_page.idx_cell += 1;
-            } else {
-                loop {
+        assert!(self.current_page.idx_cell == self.current_page.n_cells);
+
+        if self.current_page.page_type.is_leaf() {
+            loop {
+                if !self.back_to_parent() {
                     self.current_page.idx_cell += 1;
-                    if self.move_to_left_most()? {
-                        break;
-                    }
-                    if !self.back_to_parent() {
-                        // Traversing completed for multi level btree.
-                        break;
-                    }
+                    return Ok(()); // The cursor is completed.
                 }
-            }
-        } else if self.current_page.page_type.is_index() {
-            if !self.current_page.page_type.is_leaf()
-                && self.current_page.idx_cell <= self.current_page.n_cells
-            {
-                assert!(self.move_to_left_most()?);
-            } else {
-                assert!(
-                    self.current_page.page_type.is_leaf()
-                        && self.current_page.idx_cell == self.current_page.n_cells
-                );
-                loop {
-                    if self.back_to_parent() {
-                        if self.current_page.idx_cell == self.current_page.n_cells {
-                            continue;
-                        }
-                    } else {
-                        // traversing completed.
-                        self.current_page.idx_cell += 1;
-                    }
+                if self.current_page.idx_cell < self.current_page.n_cells {
                     break;
                 }
             }
+            if self.current_page.page_type.is_table() {
+                self.current_page.idx_cell += 1;
+                assert!(self.move_to_left_most()?);
+            }
         } else {
-            return Err(Error::FileCorrupt {
-                page_id: self.current_page.page_id,
-                e: FileCorrupt::new("btree page type is invalid"),
-            });
+            assert!(self.current_page.page_type.is_index());
+            assert!(self.move_to_left_most()?);
         }
+
         Ok(())
     }
 
