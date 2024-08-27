@@ -12,7 +12,7 @@ This is WIP and my hobby project.
   * Some syntax is not implemented yet.
 * Zero dependency
   * except dev-dependency.
-  * While developing as WIP, prsqlite is using `anyhow` for development
+  * While developing as WIP, prsqlite is using [`anyhow`](https://docs.rs/anyhow/latest/anyhow/)  for development
   velocity. It will be replaced with a proprietary errors in the future.
 * Validating file format
   * prsqlite does not trust the file is valid unlike sqlite3 and validates pages
